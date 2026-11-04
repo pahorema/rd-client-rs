@@ -8,7 +8,7 @@ use rdc_debrid::{
 };
 use rdc_model::Torrent;
 use serde_json::json;
-use wiremock::matchers::{bearer_token, method, path, query_param};
+use wiremock::matchers::{bearer_token, body_string_contains, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn config(api_key: &str, timeout: Duration) -> ProviderConfig {
@@ -272,4 +272,185 @@ async fn deleting_an_unknown_magnet_is_not_found() {
         error.to_string(),
         "Magnet ID is invalid (MAGNET_INVALID_ID)"
     );
+}
+
+/// Answers live-mode status calls sent with `counter`.
+async fn mock_live(server: &MockServer, counter: u64, data: serde_json::Value) {
+    Mock::given(method("POST"))
+        .and(path("/v4.1/magnet/status"))
+        .and(query_param("agent", "rd-client"))
+        .and(body_string_contains("session="))
+        .and(body_string_contains(format!("counter={counter}")))
+        .respond_with(success(data))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+fn magnet(id: i64, status_code: i64) -> serde_json::Value {
+    json!({"id": id, "filename": format!("magnet-{id}"), "hash": format!("hash{id}"),
+           "size": 400, "status": "Downloading", "statusCode": status_code,
+           "downloaded": 100, "downloadSpeed": 2048, "seeders": 3,
+           "uploadDate": 1_700_000_000, "completionDate": 0})
+}
+
+fn ids(torrents: &[rdc_debrid::RemoteTorrent]) -> Vec<&str> {
+    torrents.iter().map(|torrent| torrent.id.as_str()).collect()
+}
+
+#[tokio::test]
+async fn listing_a_full_sync_without_magnets_is_empty() {
+    let server = MockServer::start().await;
+    mock_live(
+        &server,
+        0,
+        json!({"counter": 7, "fullsync": true, "magnets": []}),
+    )
+    .await;
+
+    let torrents = client(&server).list_torrents().await.expect("listing");
+
+    assert_eq!(torrents, Vec::new());
+}
+
+#[tokio::test]
+async fn listing_an_empty_change_set_after_an_empty_full_sync_is_empty() {
+    let server = MockServer::start().await;
+    mock_live(
+        &server,
+        0,
+        json!({"counter": 7, "fullsync": true, "magnets": []}),
+    )
+    .await;
+    mock_live(&server, 7, json!({"counter": 8, "magnets": []})).await;
+    let client = client(&server);
+
+    client.list_torrents().await.expect("full sync");
+    let torrents = client.list_torrents().await.expect("changes");
+
+    assert_eq!(torrents, Vec::new());
+}
+
+#[tokio::test]
+async fn a_new_full_sync_replaces_the_known_magnets() {
+    let server = MockServer::start().await;
+    mock_live(
+        &server,
+        0,
+        json!({"counter": 7, "fullsync": true, "magnets": [magnet(1, 1), magnet(2, 1)]}),
+    )
+    .await;
+    mock_live(
+        &server,
+        7,
+        json!({"counter": 1, "fullsync": true, "magnets": [magnet(3, 4)]}),
+    )
+    .await;
+    let client = client(&server);
+
+    client.list_torrents().await.expect("full sync");
+    let torrents = client.list_torrents().await.expect("second full sync");
+
+    assert_eq!(ids(&torrents), ["3"]);
+}
+
+#[tokio::test]
+async fn changes_with_a_new_magnet_add_it_to_the_known_ones() {
+    let server = MockServer::start().await;
+    mock_live(
+        &server,
+        0,
+        json!({"counter": 7, "fullsync": true, "magnets": [magnet(1, 1), magnet(2, 1)]}),
+    )
+    .await;
+    mock_live(&server, 7, json!({"counter": 8, "magnets": [magnet(3, 0)]})).await;
+    let client = client(&server);
+
+    client.list_torrents().await.expect("full sync");
+    let torrents = client.list_torrents().await.expect("changes");
+
+    assert_eq!(ids(&torrents), ["1", "2", "3"]);
+}
+
+#[tokio::test]
+async fn changes_of_a_known_magnet_update_only_the_reported_properties() {
+    let server = MockServer::start().await;
+    mock_live(
+        &server,
+        0,
+        json!({"counter": 7, "fullsync": true, "magnets": [magnet(1, 1), magnet(2, 1)]}),
+    )
+    .await;
+    mock_live(
+        &server,
+        7,
+        json!({"counter": 8, "magnets": [{"id": 2, "downloaded": 300, "downloadSpeed": 4096}]}),
+    )
+    .await;
+    let client = client(&server);
+
+    client.list_torrents().await.expect("full sync");
+    let torrents = client.list_torrents().await.expect("changes");
+
+    assert_eq!(ids(&torrents), ["1", "2"]);
+    let changed = &torrents[1];
+    assert_eq!(changed.progress, 75);
+    assert_eq!(changed.speed, Some(4096));
+    assert_eq!(changed.filename, "magnet-2");
+    assert_eq!(changed.status.as_deref(), Some("Downloading"));
+    assert_eq!(torrents[0].progress, 25);
+}
+
+#[tokio::test]
+async fn listed_magnets_map_to_torrents() {
+    let server = MockServer::start().await;
+    mock_live(
+        &server,
+        0,
+        json!({"counter": 1, "fullsync": true, "magnets": [
+            {"id": 9, "filename": "Ready", "hash": "abc", "size": "100", "status": "Ready",
+             "statusCode": 4, "uploadDate": 1_700_000_000, "completionDate": 1_700_000_600},
+            {"id": 10, "filename": "Half", "size": 100, "downloaded": 50, "status": "Downloading",
+             "statusCode": 1}
+        ]}),
+    )
+    .await;
+
+    let torrents = client(&server).list_torrents().await.expect("listing");
+
+    let ready = &torrents[0];
+    assert_eq!(ready.id, "9");
+    assert_eq!(ready.filename, "Ready");
+    assert_eq!(ready.original_filename.as_deref(), Some("Ready"));
+    assert_eq!((ready.bytes, ready.original_bytes), (100, 100));
+    assert_eq!((ready.status_code, ready.progress), (4, 0));
+    assert_eq!((ready.host.as_deref(), ready.split), (None, 0));
+    assert_eq!(
+        ready.added,
+        Some("2023-11-14T22:13:20Z".parse().expect("timestamp"))
+    );
+    assert_eq!(
+        ready.ended,
+        Some("2023-11-14T22:23:20Z".parse().expect("timestamp"))
+    );
+    assert_eq!(ready.links, Some(Vec::new()));
+    assert_eq!(ready.files, None);
+    let half = &torrents[1];
+    assert_eq!(half.progress, 50);
+    assert_eq!(half.ended, Some(jiff::Timestamp::UNIX_EPOCH));
+}
+
+#[tokio::test]
+async fn magnets_without_status_are_not_listed() {
+    let server = MockServer::start().await;
+    mock_live(
+        &server,
+        0,
+        json!({"counter": 1, "fullsync": true, "magnets": [{"id": 1, "filename": "x"}, magnet(2, 1)]}),
+    )
+    .await;
+
+    let torrents = client(&server).list_torrents().await.expect("listing");
+
+    assert_eq!(ids(&torrents), ["2"]);
 }

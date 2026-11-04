@@ -1,6 +1,8 @@
 //! Tolerant decoding of provider JSON values whose type varies between
-//! answers (numbers sent as text or floats, flags sent as numbers).
+//! answers (numbers sent as text or floats, flags sent as numbers, lists
+//! sent as a single object).
 
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Deserializer};
 
 #[derive(Deserialize)]
@@ -18,6 +20,14 @@ enum Flag {
     Number(Number),
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OneOrMany<T> {
+    Many(Vec<T>),
+    One(T),
+    Other(IgnoredAny),
+}
+
 /// Decodes an integer sent as a JSON number (floats are truncated) or as
 /// numeric text; `null` and unparsable text decode as `None`.
 pub(crate) fn optional_i64<'de, D: Deserializer<'de>>(
@@ -33,6 +43,20 @@ pub(crate) fn flag<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D
         Some(Flag::Bool(value)) => value,
         Some(Flag::Number(number)) => number.into_i64().is_some_and(|value| value != 0),
         None => false,
+    })
+}
+
+/// Decodes a list that may also be sent as a single object (a list of one);
+/// `null` and values of any other shape decode as `None`.
+pub(crate) fn one_or_many<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(match Option::<OneOrMany<T>>::deserialize(deserializer)? {
+        Some(OneOrMany::Many(items)) => Some(items),
+        Some(OneOrMany::One(item)) => Some(vec![item]),
+        Some(OneOrMany::Other(_)) | None => None,
     })
 }
 
