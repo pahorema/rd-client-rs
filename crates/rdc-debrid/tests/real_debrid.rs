@@ -7,7 +7,7 @@ use rdc_debrid::{
     DebridError, ProviderConfig, ProviderHttp, RateLimitCoordinator, RealDebrid, RetryPolicy,
 };
 use serde_json::json;
-use wiremock::matchers::{bearer_token, method, path};
+use wiremock::matchers::{bearer_token, method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn config(api_key: &str, timeout: Duration) -> ProviderConfig {
@@ -182,4 +182,130 @@ async fn requests_time_out_after_the_configured_timeout() {
     let error = client.user().await.expect_err("times out");
 
     assert!(matches!(error, DebridError::Transport(_)), "{error:?}");
+}
+
+async fn mock_server_time(server: &MockServer, time: &str) {
+    Mock::given(method("GET"))
+        .and(path("/rest/1.0/time/iso"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(time))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+fn listed(id: &str) -> serde_json::Value {
+    json!({"id": id, "filename": format!("{id}.mkv"), "hash": format!("hash-{id}"),
+           "bytes": 10, "original_bytes": 20, "host": "real-debrid.com", "split": 2000,
+           "progress": 100, "status": "downloaded", "added": "2024-05-01T10:00:00.000Z",
+           "ended": "2024-05-01T11:00:00.000Z", "links": [format!("https://real-debrid.com/d/{id}")]})
+}
+
+#[tokio::test]
+async fn listing_requests_pages_until_an_empty_page() {
+    let server = MockServer::start().await;
+    mock_server_time(&server, "2024-05-01T12:00:00+00:00").await;
+    Mock::given(method("GET"))
+        .and(path("/rest/1.0/torrents"))
+        .and(query_param_is_missing("offset"))
+        .and(query_param("limit", "5000"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([listed("A"), listed("B")])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/1.0/torrents"))
+        .and(query_param("offset", "5000"))
+        .and(query_param("limit", "5000"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([listed("C")])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/1.0/torrents"))
+        .and(query_param("offset", "10000"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let torrents = client(&server).list_torrents().await.expect("listing");
+
+    let ids: Vec<&str> = torrents.iter().map(|torrent| torrent.id.as_str()).collect();
+    assert_eq!(ids, ["A", "B", "C"]);
+    let first = &torrents[0];
+    assert_eq!(first.filename, "A.mkv");
+    assert_eq!(first.hash, "hash-A");
+    assert_eq!((first.bytes, first.original_bytes), (10, 20));
+    assert_eq!(first.host.as_deref(), Some("real-debrid.com"));
+    assert_eq!((first.split, first.progress), (2000, 100));
+    assert_eq!(first.status.as_deref(), Some("downloaded"));
+    assert_eq!(first.files, None);
+    assert_eq!(
+        first.links.as_deref(),
+        Some(["https://real-debrid.com/d/A".to_owned()].as_slice())
+    );
+}
+
+#[tokio::test]
+async fn listing_without_content_is_empty() {
+    let server = MockServer::start().await;
+    mock_server_time(&server, "2024-05-01T12:00:00+00:00").await;
+    Mock::given(method("GET"))
+        .and(path("/rest/1.0/torrents"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let torrents = client(&server).list_torrents().await.expect("listing");
+
+    assert_eq!(torrents, Vec::new());
+}
+
+#[tokio::test]
+async fn listing_corrects_times_with_the_server_offset_read_once() {
+    let server = MockServer::start().await;
+    mock_server_time(&server, "2024-05-01T14:00:00+02:00").await;
+    Mock::given(method("GET"))
+        .and(path("/rest/1.0/torrents"))
+        .and(query_param_is_missing("offset"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([listed("A")])))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/1.0/torrents"))
+        .and(query_param("offset", "5000"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&server)
+        .await;
+    let client = client(&server);
+
+    client.list_torrents().await.expect("first listing");
+    let torrents = client.list_torrents().await.expect("second listing");
+
+    assert_eq!(
+        torrents[0].added,
+        Some("2024-05-01T08:00:00Z".parse().expect("timestamp"))
+    );
+    assert_eq!(
+        torrents[0].ended,
+        Some("2024-05-01T09:00:00Z".parse().expect("timestamp"))
+    );
+}
+
+#[tokio::test]
+async fn unreadable_server_time_fails_the_listing() {
+    let server = MockServer::start().await;
+    mock_server_time(&server, "yesterday").await;
+
+    let error = client(&server)
+        .list_torrents()
+        .await
+        .expect_err("no offset");
+
+    assert!(
+        matches!(error, DebridError::InvalidResponse(_)),
+        "{error:?}"
+    );
 }

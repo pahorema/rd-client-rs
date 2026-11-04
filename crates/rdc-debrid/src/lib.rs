@@ -6,6 +6,7 @@ mod endpoint;
 pub mod error;
 pub mod highway;
 pub mod http;
+mod json;
 pub mod premiumize;
 pub mod provider;
 pub mod rate_limit;

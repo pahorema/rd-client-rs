@@ -1,14 +1,17 @@
 //! Client of the Real-Debrid REST API.
 
-use jiff::Timestamp;
+use jiff::{SignedDuration, Timestamp};
+use rdc_model::RemoteFile;
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use tokio::sync::OnceCell;
 
 use crate::endpoint::Endpoint;
 use crate::error::DebridError;
 use crate::http::ProviderHttp;
-use crate::provider::{DebridUser, ProviderConfig};
+use crate::json;
+use crate::provider::{DebridUser, ProviderConfig, RemoteTorrent};
 
 /// API host used when no alternative hostname is configured.
 pub const DEFAULT_API_HOSTNAME: &str = "api.real-debrid.com";
@@ -16,11 +19,19 @@ pub const DEFAULT_API_HOSTNAME: &str = "api.real-debrid.com";
 /// Error code Real-Debrid uses for an unknown torrent or link.
 const RESOURCE_NOT_FOUND: i64 = 7;
 
+/// Torrents requested per listing page.
+const PAGE_SIZE: usize = 5000;
+
 /// Real-Debrid account access.
+///
+/// Real-Debrid reports timestamps in its server's local time while labelling
+/// them UTC; the client reads the server's UTC offset once (from `time/iso`)
+/// and corrects the `added` and `ended` times of torrents with it.
 #[derive(Debug)]
 pub struct RealDebrid {
     endpoint: Endpoint,
     http: ProviderHttp,
+    server_offset: OnceCell<SignedDuration>,
 }
 
 impl RealDebrid {
@@ -41,6 +52,7 @@ impl RealDebrid {
         Self {
             endpoint: Endpoint::new("Real-Debrid", base_url, config),
             http,
+            server_offset: OnceCell::new(),
         }
     }
 
@@ -58,6 +70,47 @@ impl RealDebrid {
             expiration,
             premium: false,
         })
+    }
+
+    /// Lists every torrent of the account, page by page until an empty page.
+    ///
+    /// The listing carries neither files nor reliable links for unfinished
+    /// torrents; refreshing a torrent fetches its details when needed.
+    pub async fn list_torrents(&self) -> Result<Vec<RemoteTorrent>, DebridError> {
+        let server_offset = self.server_offset().await?;
+        let mut torrents = Vec::new();
+        let mut offset = 0;
+        loop {
+            let mut request = self.request(Method::GET, "torrents")?;
+            if offset > 0 {
+                request = request.query(&[("offset", offset)]);
+            }
+            let page: Vec<TorrentInfo> = self.call(request.query(&[("limit", PAGE_SIZE)])).await?;
+            if page.is_empty() {
+                break;
+            }
+            torrents.extend(page.into_iter().map(|info| info.into_remote(server_offset)));
+            offset += PAGE_SIZE;
+        }
+        Ok(torrents)
+    }
+
+    /// The UTC offset of the Real-Debrid server clock, read once.
+    async fn server_offset(&self) -> Result<SignedDuration, DebridError> {
+        self.server_offset
+            .get_or_try_init(|| async {
+                let request = self
+                    .endpoint
+                    .public_request(&self.http, Method::GET, "time/iso")?;
+                let text = self.execute(request).await?.unwrap_or_default();
+                parse_utc_offset(&text).ok_or_else(|| {
+                    DebridError::InvalidResponse(format!(
+                        "Unable to read the Real-Debrid server time: {text}"
+                    ))
+                })
+            })
+            .await
+            .copied()
     }
 
     fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, DebridError> {
@@ -98,6 +151,104 @@ struct User {
     #[serde(default)]
     premium: i64,
     expiration: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TorrentInfo {
+    #[serde(default)]
+    id: String,
+    filename: Option<String>,
+    original_filename: Option<String>,
+    hash: Option<String>,
+    /// Size of the selected files.
+    #[serde(default, deserialize_with = "json::optional_i64")]
+    bytes: Option<i64>,
+    /// Size of all files.
+    #[serde(default, deserialize_with = "json::optional_i64")]
+    original_bytes: Option<i64>,
+    host: Option<String>,
+    #[serde(default, deserialize_with = "json::optional_i64")]
+    split: Option<i64>,
+    #[serde(default, deserialize_with = "json::optional_i64")]
+    progress: Option<i64>,
+    status: Option<String>,
+    added: Option<String>,
+    ended: Option<String>,
+    files: Option<Vec<FileInfo>>,
+    links: Option<Vec<Option<String>>>,
+    #[serde(default, deserialize_with = "json::optional_i64")]
+    speed: Option<i64>,
+    #[serde(default, deserialize_with = "json::optional_i64")]
+    seeders: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileInfo {
+    #[serde(default)]
+    id: i64,
+    /// Path inside the torrent, starting with `/`.
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    bytes: i64,
+    #[serde(default, deserialize_with = "json::flag")]
+    selected: bool,
+}
+
+impl TorrentInfo {
+    fn into_remote(self, server_offset: SignedDuration) -> RemoteTorrent {
+        let files = self.files.map(|files| {
+            files
+                .into_iter()
+                .map(|file| RemoteFile {
+                    id: file.id,
+                    path: file.path,
+                    bytes: file.bytes,
+                    selected: file.selected,
+                    download_link: None,
+                })
+                .collect()
+        });
+        RemoteTorrent {
+            id: self.id,
+            filename: self.filename.unwrap_or_default(),
+            original_filename: self.original_filename,
+            hash: self.hash.unwrap_or_default(),
+            bytes: self.bytes.unwrap_or_default(),
+            original_bytes: self.original_bytes.unwrap_or_default(),
+            host: self.host,
+            split: self.split.unwrap_or_default(),
+            progress: self.progress.unwrap_or_default(),
+            status: self.status,
+            message: None,
+            status_code: 0,
+            added: server_time(self.added.as_deref(), server_offset),
+            files,
+            links: self
+                .links
+                .map(|links| links.into_iter().flatten().collect()),
+            ended: server_time(self.ended.as_deref(), server_offset),
+            speed: self.speed,
+            seeders: self.seeders,
+        }
+    }
+}
+
+/// The real instant of a Real-Debrid timestamp written in server local time.
+fn server_time(text: Option<&str>, server_offset: SignedDuration) -> Option<Timestamp> {
+    parse_timestamp(text?)?.checked_sub(server_offset).ok()
+}
+
+/// Reads the UTC offset of a `time/iso` answer such as `2024-05-01T12:00:00+02:00`.
+fn parse_utc_offset(text: &str) -> Option<SignedDuration> {
+    let text = text.trim().trim_matches('"');
+    if text.ends_with(['Z', 'z']) && text.parse::<Timestamp>().is_ok() {
+        return Some(SignedDuration::ZERO);
+    }
+    let time = jiff::fmt::strtime::parse("%Y-%m-%dT%H:%M:%S%:z", text).ok()?;
+    Some(SignedDuration::from_secs(i64::from(
+        time.offset()?.seconds(),
+    )))
 }
 
 #[derive(Debug, Deserialize)]
