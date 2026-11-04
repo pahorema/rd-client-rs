@@ -12,6 +12,11 @@
 mod bind;
 mod engine;
 mod http;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the symlink engine built on the search follows")
+)]
+mod symlink;
 mod verify;
 
 pub use self::bind::{is_local_unicast_address, resolve_bind_address};
