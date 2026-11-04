@@ -12,7 +12,8 @@ use crate::{Error, rar_format, zip_format};
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Entry {
-    /// Name as stored in the archive, with `/` or `\` separating its components.
+    /// Name as stored in the archive. RAR names use `/` between components on every platform;
+    /// ZIP names are kept verbatim and may use `\` when the archive was written that way.
     pub name: String,
     /// Uncompressed size in bytes.
     pub size: u64,

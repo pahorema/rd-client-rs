@@ -40,6 +40,17 @@ fn ensure_no_nul(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// The name of an entry with `/` between its components on every platform; the library reports
+/// names with the host's separator.
+fn entry_name(path: &Path) -> String {
+    let name = path.to_string_lossy();
+    if std::path::MAIN_SEPARATOR == '/' {
+        name.into_owned()
+    } else {
+        name.replace(std::path::MAIN_SEPARATOR, "/")
+    }
+}
+
 /// Lists the file entries of `archive` (and of its following volumes), skipping directories,
 /// and tells which volume of a set `archive` is.
 pub(crate) fn inspect(archive: &Path) -> Result<Inspection, Error> {
@@ -57,7 +68,7 @@ pub(crate) fn inspect(archive: &Path) -> Result<Inspection, Error> {
         let header = header.map_err(Error::read(archive))?;
         if header.is_file() {
             entries.push(Entry {
-                name: header.filename.to_string_lossy().into_owned(),
+                name: entry_name(&header.filename),
                 size: header.unpacked_size,
             });
         }
