@@ -5,7 +5,7 @@ pub mod support;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rdc_download::{
     CANCELLED_MESSAGE, DownloadEngine, HttpDownload, InternalConfig, Outcome, Progress,
@@ -555,4 +555,47 @@ async fn progress_reports_the_current_speed() {
     assert!(moving.bytes_done < 256 * 1024);
     drop(moving);
     run.download.cancel().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn speed_limit_is_shared_by_all_connections() {
+    let data = test_data(192 * 1024);
+    let server = TestServer::file(Arc::clone(&data), FileOptions::default()).await;
+    let limited = InternalConfig {
+        max_speed: 256 * 1024,
+        chunk_count: 4,
+        parallel_connections: 4,
+        ..config()
+    };
+    let started = Instant::now();
+    let (run, outcome) = download(&server.url("/file.bin"), limited).await;
+    let elapsed = started.elapsed();
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+    // 192 KiB at 256 KiB/s, minus a 250 ms burst, takes at least half a second.
+    assert!(elapsed >= Duration::from_millis(450), "took {elapsed:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn speed_limit_changes_apply_to_a_running_download() {
+    let data = test_data(256 * 1024);
+    let server = TestServer::file(Arc::clone(&data), FileOptions::default()).await;
+    let (tx, rx) = watch::channel(InternalConfig {
+        max_speed: 16 * 1024,
+        chunk_count: 2,
+        parallel_connections: 2,
+        ..config()
+    });
+    let started = Instant::now();
+    let run = Run::start(&server.url("/file.bin"), rx).await;
+    run.wait_for_bytes(1).await;
+    tx.send_modify(|config| config.max_speed = 0);
+    assert_eq!(run.finish().await, Ok(()));
+    assert_downloaded(&run, &data);
+    // At the initial limit the download would take 16 s.
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
 }

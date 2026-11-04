@@ -20,11 +20,14 @@ const MAX_BUFFER_SIZE: usize = 64 * 1024 * 1024;
 /// Settings of the internal HTTP engine, re-read live while a download runs.
 ///
 /// Integer fields take the raw values of the settings they come from; out-of-range values
-/// are normalised as documented on each field. The connection limit applies to running
+/// are normalised as documented on each field. Speed and connection limits apply to running
 /// downloads immediately; the chunk count, timeout and buffer size apply to downloads and
 /// connections started afterwards.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InternalConfig {
+    /// Speed limit of one download in bytes per second, shared by its connections; `0` means
+    /// unlimited.
+    pub max_speed: u64,
     /// Maximum concurrent connections per download; `1` or less means one connection.
     pub parallel_connections: i32,
     /// Number of chunks a file is split into; `0` or less means 8. Files that are small, of

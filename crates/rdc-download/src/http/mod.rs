@@ -8,7 +8,8 @@
 //! is removed. Each read waits at most the configured timeout.
 //!
 //! Progress reports bytes written, the expected size (`0` while unknown) and the speed averaged
-//! over the last two seconds.
+//! over the last two seconds. An optional speed limit is shared by all connections of a
+//! download.
 
 mod config;
 mod connection;

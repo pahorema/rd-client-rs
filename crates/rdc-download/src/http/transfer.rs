@@ -238,6 +238,11 @@ impl ChunkWorker {
                 .map_err(|error| self.io_error(error))?;
             chunk.position += take;
             self.context.add_received(take);
+            let limit = self.context.config.borrow().max_speed;
+            let wait = self.context.throttle.reserve(take, limit);
+            if !wait.is_zero() {
+                Context::sleep(&self.cancel, wait).await?;
+            }
         }
     }
 

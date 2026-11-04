@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::config::InternalConfig;
 use super::error::TransferError;
+use super::rate::Throttle;
 
 /// `User-Agent` of every request.
 const USER_AGENT: &str = concat!("rd-client/", env!("CARGO_PKG_VERSION"));
@@ -38,6 +39,7 @@ impl ByteRange {
 pub(crate) struct Context {
     pub(crate) config: watch::Receiver<InternalConfig>,
     pub(crate) cancel: CancellationToken,
+    pub(crate) throttle: Throttle,
     received: AtomicU64,
     client: Mutex<Option<Client>>,
 }
@@ -47,6 +49,7 @@ impl Context {
         Self {
             config,
             cancel,
+            throttle: Throttle::new(),
             received: AtomicU64::new(0),
             client: Mutex::new(None),
         }
