@@ -290,6 +290,50 @@ numeric_enum! {
     }
 }
 
+numeric_enum! {
+    /// Verbosity of the application log.
+    LogLevel {
+        /// Everything, including tracing of internals.
+        Verbose = 0 => "Verbose",
+        /// Diagnostic messages.
+        Debug = 1 => "Debug",
+        /// Normal operational messages.
+        Information = 2 => "Information",
+        /// Unexpected but recoverable conditions.
+        Warning = 3 => "Warning",
+        /// Failures only.
+        Error = 4 => "Error",
+    }
+}
+
+numeric_enum! {
+    /// Verbosity of the download client log; `None` disables it.
+    DownloadClientLogLevel {
+        /// Everything, including tracing of internals.
+        Verbose = 0 => "Verbose",
+        /// Diagnostic messages.
+        Debug = 1 => "Debug",
+        /// Normal operational messages.
+        Information = 2 => "Information",
+        /// Unexpected but recoverable conditions.
+        Warning = 3 => "Warning",
+        /// Failures only.
+        Error = 4 => "Error",
+        /// No download client logging.
+        None = 5 => "None",
+    }
+}
+
+numeric_enum! {
+    /// How users authenticate with the web UI and the APIs.
+    AuthenticationType {
+        /// A user name and password login.
+        UserNamePassword = 0 => "Username + Password",
+        /// No authentication: anyone reaching the URL has full access.
+        None = 1 => "No Authentication",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,6 +361,23 @@ mod tests {
             .map(|a| a.as_i32())
             .collect();
         assert_eq!(values, [0, 1]);
+    }
+
+    #[test]
+    fn log_levels_and_authentication_round_trip() {
+        assert_eq!(LogLevel::default(), LogLevel::Verbose);
+        assert_eq!("Error".parse(), Ok(LogLevel::Error));
+        assert_eq!("4".parse(), Ok(LogLevel::Error));
+        assert!("None".parse::<LogLevel>().is_err());
+        assert_eq!("None".parse(), Ok(DownloadClientLogLevel::None));
+        assert_eq!(DownloadClientLogLevel::None.as_i32(), 5);
+        assert_eq!(DownloadClientLogLevel::Information.label(), "Information");
+        assert_eq!("1".parse(), Ok(AuthenticationType::None));
+        assert_eq!(
+            AuthenticationType::UserNamePassword.label(),
+            "Username + Password"
+        );
+        assert_eq!(AuthenticationType::None.label(), "No Authentication");
     }
 
     #[test]

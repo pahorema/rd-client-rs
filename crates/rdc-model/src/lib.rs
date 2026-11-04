@@ -5,6 +5,7 @@
 mod enums;
 
 pub use enums::{
-    DownloadClient, ParseEnumError, Provider, TorrentDownloadAction, TorrentFinishedAction,
-    TorrentHostDownloadAction, TorrentStatus, UnknownValueError,
+    AuthenticationType, DownloadClient, DownloadClientLogLevel, LogLevel, ParseEnumError, Provider,
+    TorrentDownloadAction, TorrentFinishedAction, TorrentHostDownloadAction, TorrentStatus,
+    UnknownValueError,
 };
