@@ -1,10 +1,30 @@
-//! Resolution of archive entry names to paths inside an extraction directory.
+//! Resolution of archive entry names and folder names to paths inside a destination directory.
 
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use crate::Error;
+
+/// Joins the folder `name` (a torrent name or hash) to `base`.
+///
+/// `name` is used as is, nested components included, but must stay below `base`: absolute
+/// names and names with `..` components are refused. An empty name yields `base`.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by the unpack procedure, added next")
+)]
+pub(crate) fn join_name(base: &Path, name: &str) -> Result<PathBuf, Error> {
+    let stays_inside = Path::new(name)
+        .components()
+        .all(|component| matches!(component, Component::Normal(_) | Component::CurDir));
+    if !stays_inside || name.contains('\0') {
+        return Err(Error::UnsafeName {
+            name: name.to_owned(),
+        });
+    }
+    Ok(base.join(name))
+}
 
 /// Resolves the archive entry `name` to a path inside `destination`.
 ///
@@ -196,6 +216,25 @@ mod tests {
         create_entry_directory(destination.path(), &target, "a/b/").unwrap();
 
         assert!(destination.path().join("a/b").is_dir());
+    }
+
+    #[test]
+    fn folder_names_are_joined_as_given() {
+        let base = Path::new("/dest");
+        assert_eq!(join_name(base, "Show").unwrap(), Path::new("/dest/Show"));
+        assert_eq!(join_name(base, "a/b").unwrap(), Path::new("/dest/a/b"));
+        assert_eq!(join_name(base, "").unwrap(), Path::new("/dest/"));
+    }
+
+    #[test]
+    fn folder_names_leaving_the_base_are_refused() {
+        for name in ["..", "../x", "a/../../x", "/abs", "a\0b"] {
+            let error = join_name(Path::new("/dest"), name).unwrap_err();
+            assert!(
+                matches!(error, Error::UnsafeName { .. }),
+                "{name:?}: {error}"
+            );
+        }
     }
 
     #[test]

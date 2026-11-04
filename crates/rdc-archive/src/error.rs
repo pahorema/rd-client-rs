@@ -30,6 +30,12 @@ pub enum Error {
         /// Entry name as stored in the archive.
         entry: String,
     },
+    /// A name used as a directory below the destination is absolute or climbs out of it.
+    #[error("{name:?} cannot be used as a folder name inside the download directory")]
+    UnsafeName {
+        /// The offending name.
+        name: String,
+    },
     /// A file system operation failed.
     #[error("cannot {action} {}: {source}", path.display())]
     Io {
