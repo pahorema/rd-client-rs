@@ -2,6 +2,7 @@
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use reqwest::header::{ACCEPT, ACCEPT_ENCODING, CACHE_CONTROL, RANGE};
 use reqwest::{Client, Response, Url, redirect};
@@ -74,6 +75,14 @@ impl Context {
             () = cancel.cancelled() => Err(TransferError::Cancelled),
             value = future => Ok(value),
         }
+    }
+
+    /// Sleeps for `duration` unless `cancel` fires first.
+    pub(crate) async fn sleep(
+        cancel: &CancellationToken,
+        duration: Duration,
+    ) -> Result<(), TransferError> {
+        Self::cancellable(cancel, tokio::time::sleep(duration)).await
     }
 
     /// Sends a GET for `url`, optionally limited to `range`, and returns a successful response.

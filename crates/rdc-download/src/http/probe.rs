@@ -1,13 +1,19 @@
 //! Learning a remote file's size and whether its server serves byte ranges.
 
+use std::time::Duration;
+
 use reqwest::header::{
     ACCEPT_RANGES, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, HeaderMap, HeaderName,
 };
-use reqwest::{Response, Url};
+use reqwest::{Response, StatusCode, Url};
 
 use super::connection::{ByteRange, Context};
-use super::error::TransferError;
+use super::error::{TransferError, is_transient_status};
 
+/// Retries of a probe answered with a passing server error.
+const MAX_PROBE_RETRIES: u32 = 3;
+/// Longest wait between probe attempts.
+const MAX_PROBE_RETRY_DELAY: Duration = Duration::from_secs(10);
 /// The probe asks for the first byte only.
 const FIRST_BYTE: ByteRange = ByteRange {
     start: 0,
@@ -25,9 +31,49 @@ pub(crate) struct RemoteFile {
 }
 
 /// Probes `url` with a `Range: bytes=0-0` request.
+///
+/// Servers that refuse the range request are asked again without it. Probes answered with a
+/// passing server condition (throttling, overload) are retried up to three times.
 pub(crate) async fn probe(context: &Context, url: &Url) -> Result<RemoteFile, TransferError> {
-    let response = context.get(url, Some(FIRST_BYTE), &context.cancel).await?;
-    Ok(describe(&response))
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match probe_once(context, url).await {
+            Err(TransferError::Status(status))
+                if is_transient_status(status)
+                    && !status.is_redirection()
+                    && attempt <= MAX_PROBE_RETRIES =>
+            {
+                let delay = (context.config().read_timeout() * attempt).min(MAX_PROBE_RETRY_DELAY);
+                tracing::debug!("Probe of {url} answered {status}, retrying in {delay:?}");
+                Context::sleep(&context.cancel, delay).await?;
+            }
+            result => return result,
+        }
+    }
+}
+
+async fn probe_once(context: &Context, url: &Url) -> Result<RemoteFile, TransferError> {
+    let cancel = &context.cancel;
+    match context.get(url, Some(FIRST_BYTE), cancel).await {
+        Ok(response) => Ok(describe(&response)),
+        Err(TransferError::Status(status))
+            if status == StatusCode::RANGE_NOT_SATISFIABLE || !status.is_redirection() =>
+        {
+            // Some servers refuse range requests although the file downloads fine without one.
+            let plain = describe(&context.get(url, None, cancel).await?);
+            if !(status.is_server_error() || is_transient_status(status)) {
+                return Ok(plain);
+            }
+            // A passing server error says nothing about range support: ask once more.
+            match context.get(url, Some(FIRST_BYTE), cancel).await {
+                Ok(response) => Ok(describe(&response)),
+                Err(TransferError::Cancelled) => Err(TransferError::Cancelled),
+                Err(_) => Ok(plain),
+            }
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn describe(response: &Response) -> RemoteFile {

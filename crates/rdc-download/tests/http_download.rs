@@ -4,6 +4,7 @@ pub mod support;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use rdc_download::{
@@ -278,6 +279,53 @@ async fn unknown_size_is_finalised_to_the_received_bytes() {
             speed: 0
         }
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn probe_retries_passing_server_errors() {
+    let data = test_data(4096);
+    let probes = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let data = Arc::clone(&data);
+        let probes = Arc::clone(&probes);
+        TestServer::start(move |request| {
+            if probes.fetch_add(1, Ordering::SeqCst) < 2 {
+                return Reply::status(503);
+            }
+            file_reply(&data, request, &FileOptions::default())
+        })
+        .await
+    };
+    let fast = InternalConfig {
+        timeout_ms: 100,
+        ..config()
+    };
+    let (run, outcome) = download(&server.url("/file.bin"), fast).await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn range_refusing_servers_are_probed_again_without_range() {
+    let data = test_data(4096);
+    let server = {
+        let data = Arc::clone(&data);
+        TestServer::start(move |request| match request.range() {
+            Some(_) => Reply::status(403),
+            None => file_reply(
+                &data,
+                request,
+                &FileOptions {
+                    ranges: false,
+                    ..FileOptions::default()
+                },
+            ),
+        })
+        .await
+    };
+    let (run, outcome) = download(&server.url("/file.bin"), config()).await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

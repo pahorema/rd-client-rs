@@ -44,6 +44,14 @@ impl TransferError {
     }
 }
 
+/// Statuses that signal overload, throttling or a redirect rather than a permanent refusal.
+pub(crate) fn is_transient_status(status: StatusCode) -> bool {
+    matches!(
+        status.as_u16(),
+        300..=303 | 307 | 308 | 408 | 428 | 429 | 503 | 504
+    )
+}
+
 /// Joins an error and its sources into one line.
 fn describe(error: &reqwest::Error) -> String {
     let mut message = error.to_string();
@@ -66,6 +74,18 @@ mod tests {
             TransferError::Status(StatusCode::NOT_FOUND).to_string(),
             "Response status code does not indicate success: 404 (Not Found)."
         );
+    }
+
+    #[test]
+    fn overload_statuses_are_transient_and_client_errors_are_not() {
+        for code in [408, 428, 429, 503, 504, 301, 302, 307] {
+            let status = StatusCode::from_u16(code).expect("status");
+            assert!(is_transient_status(status), "code {code}");
+        }
+        for code in [400, 401, 403, 404, 416, 500, 502] {
+            let status = StatusCode::from_u16(code).expect("status");
+            assert!(!is_transient_status(status), "code {code}");
+        }
     }
 
     #[test]
