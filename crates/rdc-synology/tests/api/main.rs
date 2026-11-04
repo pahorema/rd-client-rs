@@ -2,4 +2,5 @@
 
 mod client;
 mod common;
+mod config;
 mod tasks;
