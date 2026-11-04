@@ -93,6 +93,7 @@
 					<CircleUserIcon />
 				</DropdownMenu.Trigger>
 				<DropdownMenu.Content align="end" class="min-w-44">
+					<DropdownMenu.Item onSelect={() => goto(resolve('profile'))}>Profile</DropdownMenu.Item>
 					<DropdownMenu.Item onSelect={logout}>Log out</DropdownMenu.Item>
 					<DropdownMenu.Separator />
 					<DropdownMenu.Item>
