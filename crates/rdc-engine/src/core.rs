@@ -55,6 +55,7 @@ pub(crate) struct Inner {
     pub events: broadcast::Sender<EngineEvent>,
     pub ui_connected: AtomicBool,
     pub disk_status: RwLock<Option<DiskSpaceStatus>>,
+    pub low_disk: AtomicBool,
     pub rate_observed: std::sync::Mutex<Option<jiff::Timestamp>>,
     pub updater: UpdateChecker,
     options: EngineOptions,
@@ -66,7 +67,7 @@ pub(crate) struct Inner {
 }
 
 impl Engine {
-    /// Seeds persisted settings and builds the configured provider.
+    /// Seeds persisted settings, builds the provider and starts configured background jobs.
     ///
     /// The caller must have an active Tokio runtime. Startup repair and host processing
     /// are separate from the facade's settings and provider-monitoring lifecycle.
@@ -93,6 +94,7 @@ impl Engine {
                 events,
                 ui_connected: AtomicBool::new(false),
                 disk_status: RwLock::new(None),
+                low_disk: AtomicBool::new(false),
                 updater: UpdateChecker::new().map_err(|e| EngineError::Message(e.to_string()))?,
                 rate_observed: std::sync::Mutex::new(None),
                 options,
@@ -104,6 +106,9 @@ impl Engine {
             }),
         };
         engine.notify_settings(settings);
+        if engine.inner.options.background_jobs {
+            *engine.inner.jobs.lock().await = crate::background::spawn(&engine);
+        }
         Ok(engine)
     }
     /// Stops background jobs, then waits for active transfers and extractions to stop.

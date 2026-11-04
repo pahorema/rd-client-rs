@@ -3,10 +3,11 @@
 //! completing, retrying and cleaning up, plus the background jobs that keep
 //! it running.
 //!
-//! [`Engine::start`] loads settings and prepares shared lifecycle state.
+//! [`Engine::start`] loads settings and starts independent monitoring jobs.
 //! Provider queue dispatch is shared by adds and polling; host transfer orchestration
 //! and startup repair are intentionally owned by the lifecycle runner.
 
+mod background;
 mod core;
 mod error;
 mod operations;

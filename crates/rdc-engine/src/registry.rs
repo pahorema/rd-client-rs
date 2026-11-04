@@ -176,6 +176,12 @@ impl Registry {
     pub(crate) async fn resume_torrent(&self, torrent_id: Uuid) {
         self.set_paused(Some(torrent_id), false, false).await;
     }
+    pub(crate) async fn pause_internal(&self) {
+        self.set_paused(None, true, true).await;
+    }
+    pub(crate) async fn resume_internal(&self) {
+        self.set_paused(None, true, false).await;
+    }
 
     async fn set_paused(&self, torrent_id: Option<Uuid>, internal_only: bool, paused: bool) {
         let active: Vec<_> = self
@@ -271,6 +277,38 @@ mod tests {
             "cancellation does not lose received bytes"
         );
         assert_eq!(registry.stats(first_id), DownloadStats::default());
+    }
+
+    #[tokio::test]
+    async fn low_disk_pause_only_targets_internal_transfers_and_resume_is_live() {
+        let registry = Registry::default();
+        let internal = Arc::new(TestDownload::new(false));
+        let remote = Arc::new(TestDownload::new(false));
+        let torrent_id = Uuid::new_v4();
+        register(
+            &registry,
+            Uuid::new_v4(),
+            torrent_id,
+            DownloadClient::Internal,
+            internal.clone(),
+        );
+        register(
+            &registry,
+            Uuid::new_v4(),
+            torrent_id,
+            DownloadClient::Aria2c,
+            remote.clone(),
+        );
+        registry.pause_internal().await;
+        assert_eq!(internal.paused.load(Ordering::Relaxed), 1);
+        assert_eq!(remote.paused.load(Ordering::Relaxed), 0);
+        registry.resume_internal().await;
+        assert_eq!(internal.resumed.load(Ordering::Relaxed), 1);
+        registry.pause_torrent(torrent_id).await;
+        assert_eq!(remote.paused.load(Ordering::Relaxed), 1);
+        registry.resume_torrent(torrent_id).await;
+        assert_eq!(remote.resumed.load(Ordering::Relaxed), 1);
+        registry.cancel_all().await;
     }
 
     #[tokio::test]
