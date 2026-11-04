@@ -6,14 +6,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use reqwest::Response;
+use reqwest::{Response, StatusCode};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
 use tokio_util::sync::CancellationToken;
 
-use super::connection::Context;
+use super::connection::{ByteRange, Context};
 use super::error::TransferError;
-use super::plan::ChunkRange;
+use super::plan::{ChunkRange, plan_chunks};
 use super::probe::RemoteFile;
 
 /// Suffix of the file a download is written to until it completes.
@@ -42,22 +42,36 @@ pub(crate) async fn fetch_file(
     remote: &RemoteFile,
     partial: &Path,
 ) -> Result<u64, TransferError> {
+    let config = context.config();
+    let chunks = plan_chunks(
+        remote.size,
+        remote.supports_ranges,
+        config.effective_chunk_count(),
+    );
     prepare_file(partial, remote.size).await?;
-    let worker = ChunkWorker {
-        context: Arc::clone(context),
-        remote: remote.clone(),
-        partial: partial.to_owned(),
-        cancel: context.cancel.clone(),
-    };
-    let chunk = Chunk {
-        range: ChunkRange {
-            start: 0,
-            end: remote.size.map(|size| size - 1),
-        },
-        position: 0,
-        timeout: context.config().read_timeout(),
-    };
-    worker.run(chunk).await?;
+    tracing::debug!(
+        "Downloading {} ({:?} bytes, ranges: {}) in {} chunk(s)",
+        remote.url,
+        remote.size,
+        remote.supports_ranges,
+        chunks.len()
+    );
+    let ranged = chunks.len() > 1;
+    for range in chunks {
+        let worker = ChunkWorker {
+            context: Arc::clone(context),
+            remote: remote.clone(),
+            partial: partial.to_owned(),
+            cancel: context.cancel.clone(),
+        };
+        let chunk = Chunk {
+            range,
+            position: 0,
+            timeout: config.read_timeout(),
+            ranged,
+        };
+        worker.run(chunk).await?;
+    }
     let received = context.received();
     if remote.size.is_none() {
         let file = OpenOptions::new()
@@ -93,6 +107,8 @@ struct Chunk {
     position: u64,
     /// Current per-read timeout.
     timeout: Duration,
+    /// Whether the chunk is one of several, so even its first request names its range.
+    ranged: bool,
 }
 
 impl Chunk {
@@ -126,10 +142,19 @@ impl ChunkWorker {
     /// Sends one request for the rest of the chunk and writes what arrives.
     async fn fetch(&self, chunk: &mut Chunk) -> Result<(), TransferError> {
         let offset = chunk.range.start + chunk.position;
+        // A chunk names its range when it is one of several or continues a previous request
+        // (open-ended when the size is unknown).
+        let range = (chunk.ranged || chunk.position > 0).then_some(ByteRange {
+            start: offset,
+            end: chunk.range.end,
+        });
         let mut response = self
             .context
-            .get(&self.remote.url, None, &self.cancel)
+            .get(&self.remote.url, range, &self.cancel)
             .await?;
+        if range.is_some() && offset > 0 && response.status() != StatusCode::PARTIAL_CONTENT {
+            return Err(TransferError::RangeIgnored);
+        }
         let mut file = OpenOptions::new()
             .write(true)
             .open(&self.partial)

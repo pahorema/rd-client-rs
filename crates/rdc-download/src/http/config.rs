@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+/// Chunk count used when the configured count is `0` or negative.
+const DEFAULT_CHUNK_COUNT: u64 = 8;
 /// Per-read timeout used when the configured timeout is `0` or negative.
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
 /// Shortest accepted per-read timeout.
@@ -18,10 +20,13 @@ const MAX_BUFFER_SIZE: usize = 64 * 1024 * 1024;
 /// Settings of the internal HTTP engine, re-read live while a download runs.
 ///
 /// Integer fields take the raw values of the settings they come from; out-of-range values
-/// are normalised as documented on each field. The timeout and buffer size apply to
-/// connections opened afterwards.
+/// are normalised as documented on each field. The chunk count, timeout and buffer size apply
+/// to downloads and connections started afterwards.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InternalConfig {
+    /// Number of chunks a file is split into; `0` or less means 8. Files that are small, of
+    /// unknown size or served without range support are fetched as one chunk.
+    pub chunk_count: i32,
     /// Per-read timeout in milliseconds; `0` or less means 1000, at least 100.
     pub timeout_ms: i32,
     /// Read/write buffer of each connection in bytes; `0` or less means 64 KiB.
@@ -32,6 +37,13 @@ impl InternalConfig {
     /// Creates the configuration with every value at its normalised default.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn effective_chunk_count(&self) -> u64 {
+        u64::try_from(self.chunk_count)
+            .ok()
+            .filter(|count| *count > 0)
+            .unwrap_or(DEFAULT_CHUNK_COUNT)
     }
 
     pub(crate) fn read_timeout(&self) -> Duration {
@@ -61,6 +73,22 @@ impl InternalConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_positive_chunk_count_means_eight() {
+        for value in [-1, 0] {
+            let config = InternalConfig {
+                chunk_count: value,
+                ..InternalConfig::new()
+            };
+            assert_eq!(config.effective_chunk_count(), 8, "value {value}");
+        }
+        let config = InternalConfig {
+            chunk_count: 3,
+            ..InternalConfig::new()
+        };
+        assert_eq!(config.effective_chunk_count(), 3);
+    }
 
     #[test]
     fn timeout_defaults_to_one_second_and_is_at_least_100_ms() {

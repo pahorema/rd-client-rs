@@ -27,6 +27,8 @@ pub(crate) enum TransferError {
     HeaderTimeout(Duration),
     #[error("The download ended prematurely: received {received} of {expected} bytes of a chunk.")]
     Incomplete { received: u64, expected: u64 },
+    #[error("The server ignored the requested byte range.")]
+    RangeIgnored,
     #[error("Unable to write {}: {source}", .path.display())]
     Io {
         path: PathBuf,

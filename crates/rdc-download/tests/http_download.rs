@@ -403,3 +403,49 @@ async fn responses_ending_early_fail_as_incomplete() {
     );
     assert!(!run.partial().exists());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn small_files_are_fetched_with_one_plain_request() {
+    let data = test_data(512);
+    let server = TestServer::file(Arc::clone(&data), FileOptions::default()).await;
+    let (run, outcome) = download(
+        &server.url("/file.bin"),
+        InternalConfig {
+            chunk_count: 8,
+            ..config()
+        },
+    )
+    .await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+    let transfers = server.transfer_requests();
+    assert_eq!(transfers.len(), 1);
+    assert_eq!(transfers[0].header("range"), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn downloads_a_file_in_ranged_chunks() {
+    let data = test_data(64 * 1024);
+    let server = TestServer::file(Arc::clone(&data), FileOptions::default()).await;
+    let chunked = InternalConfig {
+        chunk_count: 4,
+        ..config()
+    };
+    let (run, outcome) = download(&server.url("/file.bin"), chunked).await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+    let ranges: Vec<_> = server
+        .transfer_requests()
+        .iter()
+        .filter_map(support::Request::range)
+        .collect();
+    assert_eq!(
+        ranges,
+        vec![
+            (0, Some(16_383)),
+            (16_384, Some(32_767)),
+            (32_768, Some(49_151)),
+            (49_152, Some(65_535))
+        ]
+    );
+}
