@@ -164,6 +164,18 @@ mod tests {
     }
 
     #[test]
+    fn display_includes_api_code_description_and_details() {
+        let error = ApiError::new("SYNO.FileStation.CreateFolder", "create", 2, 1100)
+            .with_detail(408, Some("/test/:".to_owned()));
+
+        assert_eq!(
+            error.to_string(),
+            "SYNO.FileStation.CreateFolder.create (version 2) failed with error 1100: Failed to create a folder. \
+             More information in <errors> object; [408] No such file or directory (/test/:)"
+        );
+    }
+
+    #[test]
     fn display_omits_an_unknown_description() {
         let error = ApiError::new("SYNO.DownloadStation.Info", "getconfig", 2, 499);
 
