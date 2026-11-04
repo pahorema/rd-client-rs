@@ -9,21 +9,23 @@ use crate::{Provider, Torrent, TorrentDownloadAction};
 /// Bytes per unit of [`Torrent::download_min_size`].
 const BYTES_PER_MIB: i64 = 1024 * 1024;
 
-/// Which torrent expression an error refers to.
+/// Which of the two torrent expressions an error refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
     Include,
+    Exclude,
 }
 
 impl fmt::Display for Role {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Include => "include",
+            Self::Exclude => "exclude",
         })
     }
 }
 
-/// Error raised by a torrent's include regular expression.
+/// Error raised by a torrent's include or exclude regular expression.
 #[derive(Debug)]
 pub struct FilterError {
     role: Role,
@@ -70,14 +72,17 @@ impl std::error::Error for FilterError {
 /// - size: Real-Debrid torrents with manually selected files always pass;
 ///   otherwise a [`Torrent::download_min_size`] of 0 or less disables the
 ///   rule, else the file must be strictly larger than that many MiB;
-/// - path: a non-blank include expression must match the path. It searches
-///   anywhere in the full provider path (e.g. `folder/sub/file.ext`) and
-///   supports look-around and back-references.
+/// - path: a non-blank include expression must match the path, and the
+///   exclude expression is then ignored; otherwise a non-blank exclude
+///   expression must not match. Expressions search anywhere in the full
+///   provider path (e.g. `folder/sub/file.ext`) and support look-around and
+///   back-references.
 #[derive(Debug, Clone)]
 pub struct FileFilter {
     /// Files must be strictly larger than this; `None` disables the rule.
     min_size: Option<i64>,
     include: Option<Regex>,
+    exclude: Option<Regex>,
 }
 
 impl FileFilter {
@@ -85,14 +90,24 @@ impl FileFilter {
     ///
     /// # Errors
     ///
-    /// Returns an error when the include expression does not compile.
+    /// Returns an error when the expression in effect does not compile (an
+    /// exclude expression shadowed by an include expression is not checked).
     pub fn new(torrent: &Torrent) -> Result<Self, FilterError> {
         let manual_real_debrid = torrent.client_kind == Some(Provider::RealDebrid)
             && torrent.download_action == TorrentDownloadAction::DownloadManual;
         let min_size = (!manual_real_debrid && torrent.download_min_size > 0)
             .then(|| i64::from(torrent.download_min_size) * BYTES_PER_MIB);
         let include = compile(Role::Include, torrent.include_regex.as_deref())?;
-        Ok(Self { min_size, include })
+        let exclude = if include.is_some() {
+            None
+        } else {
+            compile(Role::Exclude, torrent.exclude_regex.as_deref())?
+        };
+        Ok(Self {
+            min_size,
+            include,
+            exclude,
+        })
     }
 
     /// Whether the provider file at `path` with `size` bytes gets downloaded.
@@ -120,6 +135,16 @@ impl FileFilter {
                 path,
                 include = include.as_str(),
                 "file skipped: include expression does not match"
+            );
+            return Ok(false);
+        }
+        if let Some(exclude) = &self.exclude
+            && matches(Role::Exclude, exclude, path)?
+        {
+            tracing::debug!(
+                path,
+                exclude = exclude.as_str(),
+                "file skipped: exclude expression matches"
             );
             return Ok(false);
         }
@@ -195,6 +220,13 @@ mod tests {
     fn with_include(include: &str) -> Torrent {
         Torrent {
             include_regex: Some(include.to_owned()),
+            ..torrent()
+        }
+    }
+
+    fn with_exclude(exclude: &str) -> Torrent {
+        Torrent {
+            exclude_regex: Some(exclude.to_owned()),
             ..torrent()
         }
     }
@@ -308,6 +340,50 @@ mod tests {
     }
 
     #[test]
+    fn paths_not_matching_the_exclude_expression_are_downloadable() {
+        for (exclude, path) in NON_MATCHING {
+            assert!(
+                with_exclude(exclude)
+                    .is_downloadable(path, i64::MAX)
+                    .unwrap(),
+                "exclude {exclude:?}, path {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn paths_matching_the_exclude_expression_are_skipped() {
+        for (exclude, path) in MATCHING {
+            assert!(
+                !with_exclude(exclude)
+                    .is_downloadable(path, i64::MAX)
+                    .unwrap(),
+                "exclude {exclude:?}, path {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn include_expression_wins_over_exclude_expression() {
+        let cases = [
+            ("file", "file", "file.txt"),
+            ("file", "in/a", "file/in/a/subdirectory.txt"),
+            ("ch[aA]racter c[lL]asses", "character", "character cLasses"),
+            ("digits\\d+", "123456", "digits123456.txt"),
+        ];
+        for (include, exclude, path) in cases {
+            let torrent = Torrent {
+                exclude_regex: Some(exclude.to_owned()),
+                ..with_include(include)
+            };
+            assert!(
+                torrent.is_downloadable(path, i64::MAX).unwrap(),
+                "include {include:?}, exclude {exclude:?}, path {path:?}"
+            );
+        }
+    }
+
+    #[test]
     fn large_file_not_matching_the_include_expression_is_skipped() {
         let torrent = Torrent {
             download_min_size: 10,
@@ -333,6 +409,7 @@ mod tests {
     fn blank_expressions_are_ignored() {
         let torrent = Torrent {
             include_regex: Some("  ".to_owned()),
+            exclude_regex: Some(String::new()),
             ..torrent()
         };
         assert!(torrent.is_downloadable("anything", 1).unwrap());
@@ -343,6 +420,9 @@ mod tests {
         let torrent = with_include(r"^(?!.*sample).*\.mkv$");
         assert!(torrent.is_downloadable("show/episode.mkv", 1).unwrap());
         assert!(!torrent.is_downloadable("show/sample.mkv", 1).unwrap());
+        let torrent = with_exclude(r"(\w)\1");
+        assert!(!torrent.is_downloadable("aab", 1).unwrap());
+        assert!(torrent.is_downloadable("abc", 1).unwrap());
     }
 
     #[test]
@@ -356,5 +436,20 @@ mod tests {
                 .to_string()
                 .starts_with("invalid include regular expression")
         );
+        let error = with_exclude("[").file_filter().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .starts_with("invalid exclude regular expression")
+        );
+    }
+
+    #[test]
+    fn shadowed_exclude_expression_is_not_compiled() {
+        let torrent = Torrent {
+            exclude_regex: Some("[".to_owned()),
+            ..with_include("file")
+        };
+        assert!(torrent.is_downloadable("file.txt", 1).unwrap());
     }
 }
