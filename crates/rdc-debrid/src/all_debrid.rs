@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use jiff::Timestamp;
-use rdc_model::{RemoteFile, Torrent};
+use rdc_model::{Provider, RemoteFile, Torrent, TorrentStatus};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
@@ -26,6 +26,12 @@ const AGENT: &str = "rd-client";
 
 /// Error code of an unknown magnet.
 const MAGNET_INVALID_ID: &str = "MAGNET_INVALID_ID";
+
+/// Status code of a magnet whose files are ready.
+const READY: i64 = 4;
+
+/// Raw status given to torrents AllDebrid no longer knows.
+const DELETED_STATUS: &str = "deleted";
 
 /// Extra listings searched for the id of an added magnet AllDebrid did not
 /// return, one per [`ID_LOOKUP_INTERVAL`].
@@ -200,6 +206,79 @@ impl AllDebrid {
         ))
     }
 
+    /// Copies the AllDebrid state into the torrent's `rd_*` fields.
+    ///
+    /// Torrents without provider id are left untouched; without `remote` the
+    /// magnet status is fetched. A ready magnet whose status carries no files
+    /// gets them from `magnet/files` while the torrent has none stored, and a
+    /// magnet AllDebrid no longer knows only gets `rd_status_raw = "deleted"`.
+    pub async fn refresh(
+        &self,
+        torrent: &mut Torrent,
+        remote: Option<&RemoteTorrent>,
+    ) -> Result<(), DebridError> {
+        let Some(id) = torrent.rd_id.clone() else {
+            return Ok(());
+        };
+        match self.refresh_known(torrent, &id, remote).await {
+            Err(error) if error.is_not_found() => {
+                tracing::debug!(%id, "magnet no longer exists on AllDebrid");
+                torrent.rd_status_raw = Some(DELETED_STATUS.to_owned());
+                Ok(())
+            }
+            result => result,
+        }
+    }
+
+    async fn refresh_known(
+        &self,
+        torrent: &mut Torrent,
+        id: &str,
+        remote: Option<&RemoteTorrent>,
+    ) -> Result<(), DebridError> {
+        let fetched;
+        let remote = if let Some(remote) = remote {
+            remote
+        } else {
+            fetched = self.status(id).await?;
+            &fetched
+        };
+        let mut files = remote.files.clone().unwrap_or_default();
+        if files.is_empty() && remote.status_code == READY && torrent.files().is_empty() {
+            files = self.files(id).await?;
+        }
+        apply(torrent, remote, &files);
+        Ok(())
+    }
+
+    /// Status of one magnet, including its files once ready.
+    async fn status(&self, id: &str) -> Result<RemoteTorrent, DebridError> {
+        let request = self
+            .request(Method::GET, "magnet/status")?
+            .query(&[("id", id)]);
+        let list: MagnetList = self.call(request).await?;
+        list.magnets
+            .and_then(|magnets| magnets.into_iter().next())
+            .map(|magnet| magnet.to_remote())
+            .ok_or_else(|| DebridError::Provider(format!("Unable to find magnet with ID {id}")))
+    }
+
+    /// The flattened file tree of one magnet.
+    async fn files(&self, id: &str) -> Result<Vec<RemoteFile>, DebridError> {
+        let request = self
+            .request(Method::GET, "magnet/files")?
+            .query(&[("id[]", id)]);
+        let list: FilesList = self.call(request).await?;
+        let entry = list
+            .magnets
+            .and_then(|magnets| magnets.into_iter().next())
+            .unwrap_or_default();
+        if let Some(error) = entry.error.filter(ApiError::has_message) {
+            return Err(error.into_error());
+        }
+        Ok(entry.files.as_deref().map(flatten).unwrap_or_default())
+    }
+
     /// An authenticated request carrying the application name.
     fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, DebridError> {
         Ok(self
@@ -326,6 +405,55 @@ struct Uploaded {
 struct MagnetList {
     #[serde(default, deserialize_with = "json::one_or_many")]
     magnets: Option<Vec<Magnet>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FilesList {
+    #[serde(default, deserialize_with = "json::one_or_many")]
+    magnets: Option<Vec<MagnetFiles>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct MagnetFiles {
+    #[serde(default, deserialize_with = "json::one_or_many")]
+    files: Option<Vec<FileNode>>,
+    error: Option<ApiError>,
+}
+
+/// Copies `remote` into the torrent's `rd_*` fields; `files` replace the
+/// stored list only when not empty.
+fn apply(torrent: &mut Torrent, remote: &RemoteTorrent, files: &[RemoteFile]) {
+    if !remote.filename.trim().is_empty() {
+        torrent.rd_name = Some(remote.filename.clone());
+    }
+    if remote.bytes > 0 {
+        torrent.rd_size = Some(remote.bytes);
+    }
+    if !files.is_empty() {
+        torrent.set_files(files);
+    }
+    torrent.client_kind = Some(Provider::AllDebrid);
+    torrent.rd_host.clone_from(&remote.host);
+    torrent.rd_split = Some(remote.split);
+    torrent.rd_progress = Some(remote.progress);
+    torrent.rd_added = remote.added;
+    torrent.rd_ended = remote.ended;
+    torrent.rd_speed = remote.speed;
+    torrent.rd_seeders = remote.seeders;
+    torrent.rd_status_raw.clone_from(&remote.status);
+    torrent.rd_status = Some(status_of(remote.status_code));
+}
+
+/// The rd-client status of an AllDebrid status code; codes 5 and above are
+/// errors.
+fn status_of(status_code: i64) -> TorrentStatus {
+    match status_code {
+        0 => TorrentStatus::Processing,
+        1 | 2 => TorrentStatus::Downloading,
+        3 => TorrentStatus::Uploading,
+        READY => TorrentStatus::Finished,
+        _ => TorrentStatus::Error,
+    }
 }
 
 /// The magnet state of the current live-mode session.

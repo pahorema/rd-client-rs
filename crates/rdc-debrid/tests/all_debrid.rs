@@ -6,7 +6,7 @@ use std::time::Duration;
 use rdc_debrid::{
     AllDebrid, DebridError, ProviderConfig, ProviderHttp, RateLimitCoordinator, RetryPolicy,
 };
-use rdc_model::Torrent;
+use rdc_model::{Provider, Torrent, TorrentStatus};
 use serde_json::json;
 use wiremock::matchers::{bearer_token, body_string_contains, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -536,4 +536,150 @@ async fn rate_limit_texts_on_add_are_two_minute_rate_limits() {
     let error = client(&server).add_magnet("x").await.expect_err("limited");
 
     assert_eq!(error.retry_after(), Some(Duration::from_secs(120)));
+}
+
+/// A `magnet/status` answer for one magnet, sent as an object like the API does.
+fn status_response(magnet: &serde_json::Value) -> ResponseTemplate {
+    success(json!({ "magnets": magnet }))
+}
+
+async fn mock_status(server: &MockServer, response: ResponseTemplate, expected_calls: u64) {
+    Mock::given(method("GET"))
+        .and(path("/v4.1/magnet/status"))
+        .and(query_param("id", "1"))
+        .respond_with(response)
+        .expect(expected_calls)
+        .mount(server)
+        .await;
+}
+
+async fn mock_files(server: &MockServer, files: serde_json::Value, expected_calls: u64) {
+    Mock::given(method("GET"))
+        .and(path("/v4.1/magnet/files"))
+        .and(query_param("id[]", "1"))
+        .respond_with(success(json!({"magnets": [{"id": "1", "files": files}]})))
+        .expect(expected_calls)
+        .mount(server)
+        .await;
+}
+
+fn tree() -> serde_json::Value {
+    json!([{"n": "file1.txt", "s": 123, "l": "https://fake.url/file1.txt"},
+           {"n": "folder", "e": [{"n": "file2.txt", "s": 180, "l": "https://fake.url/file2.txt"}]}])
+}
+
+#[tokio::test]
+async fn refreshing_a_torrent_without_provider_id_changes_nothing() {
+    let server = MockServer::start().await;
+    let mut torrent = Torrent::default();
+
+    client(&server)
+        .refresh(&mut torrent, None)
+        .await
+        .expect("refreshed");
+
+    assert_eq!(torrent, Torrent::default());
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn refreshing_without_listing_entry_fetches_the_magnet_status() {
+    let server = MockServer::start().await;
+    mock_status(
+        &server,
+        status_response(
+            &json!({"id": 1, "filename": "Name", "size": 303, "status": "Ready",
+                                "statusCode": 4, "files": tree()}),
+        ),
+        1,
+    )
+    .await;
+    let mut torrent = torrent_with_id("1");
+
+    client(&server)
+        .refresh(&mut torrent, None)
+        .await
+        .expect("refreshed");
+
+    assert_eq!(torrent.client_kind, Some(Provider::AllDebrid));
+    assert_eq!(torrent.rd_name.as_deref(), Some("Name"));
+    assert_eq!(torrent.rd_size, Some(303));
+    assert_eq!(torrent.rd_status, Some(TorrentStatus::Finished));
+    assert_eq!(torrent.rd_status_raw.as_deref(), Some("Ready"));
+    let paths: Vec<String> = torrent.files().into_iter().map(|file| file.path).collect();
+    assert_eq!(paths, ["file1.txt", "folder/file2.txt"]);
+}
+
+#[tokio::test]
+async fn refreshing_a_magnet_deleted_from_the_provider_marks_it_deleted() {
+    let server = MockServer::start().await;
+    mock_status(&server, failure("MAGNET_INVALID_ID", "Magnet not found"), 1).await;
+    let mut torrent = torrent_with_id("1");
+
+    client(&server)
+        .refresh(&mut torrent, None)
+        .await
+        .expect("refreshed");
+
+    assert_eq!(torrent.rd_status_raw.as_deref(), Some("deleted"));
+    assert_eq!(torrent.rd_status, None);
+}
+
+#[tokio::test]
+async fn refreshing_from_a_listing_entry_does_not_fetch_the_status() {
+    let server = MockServer::start().await;
+    let remote = rdc_debrid::RemoteTorrent {
+        id: "1".to_owned(),
+        filename: "Listed".to_owned(),
+        bytes: 50,
+        status: Some("Downloading".to_owned()),
+        status_code: 1,
+        progress: 40,
+        ..rdc_debrid::RemoteTorrent::default()
+    };
+    let mut torrent = torrent_with_id("1");
+
+    client(&server)
+        .refresh(&mut torrent, Some(&remote))
+        .await
+        .expect("refreshed");
+
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
+    assert_eq!(torrent.rd_name.as_deref(), Some("Listed"));
+    assert_eq!(torrent.rd_size, Some(50));
+    assert_eq!(torrent.rd_progress, Some(40));
+    assert_eq!(torrent.rd_status, Some(TorrentStatus::Downloading));
+    assert_eq!(torrent.rd_split, Some(0));
+}
+
+#[tokio::test]
+async fn refreshing_a_ready_magnet_without_files_loads_them() {
+    let server = MockServer::start().await;
+    mock_files(&server, tree(), 1).await;
+    let remote = rdc_debrid::RemoteTorrent {
+        id: "1".to_owned(),
+        status: Some("Ready".to_owned()),
+        status_code: 4,
+        ..rdc_debrid::RemoteTorrent::default()
+    };
+    let mut torrent = torrent_with_id("1");
+
+    client(&server)
+        .refresh(&mut torrent, Some(&remote))
+        .await
+        .expect("refreshed");
+
+    assert_eq!(torrent.files().len(), 2);
 }
