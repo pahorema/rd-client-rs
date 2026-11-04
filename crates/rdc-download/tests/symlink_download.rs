@@ -131,3 +131,21 @@ async fn cancel_before_start_completes_the_engine() {
     let error = engine.start().await.expect_err("cancelled");
     assert_eq!(error.message(), CANCELLED_MESSAGE);
 }
+
+#[tokio::test]
+async fn compressed_files_are_refused() {
+    let layout = Layout::new();
+    for name in [
+        "Movie/archive.zip",
+        "Movie/archive.rar",
+        "Movie/archive.tar",
+    ] {
+        layout.mount_file(name);
+        let (result, _) = link(layout.request(name)).await;
+        assert_eq!(
+            result,
+            Err("Cant handle compressed files with symlink downloader".to_owned()),
+            "file {name}"
+        );
+    }
+}

@@ -12,6 +12,9 @@ use crate::engine::{
     completion_channel,
 };
 
+/// Extensions the engine refuses: archives have to be downloaded and unpacked.
+const COMPRESSED_EXTENSIONS: [&str; 3] = [".zip", ".rar", ".tar"];
+
 /// What to link and where.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymlinkRequest {
@@ -32,6 +35,9 @@ pub enum SymlinkError {
         /// The mount directory, without trailing separators or `*`.
         mount: String,
     },
+    /// The file is an archive.
+    #[error("Cant handle compressed files with symlink downloader")]
+    Compressed,
     /// The file was not found on the mount, or the link could not be created.
     #[error("Could not find file from rclone mount!")]
     NotFound,
@@ -80,6 +86,9 @@ impl SymlinkDownload {
             .extension()
             .map(|extension| format!(".{}", extension.to_string_lossy()))
             .unwrap_or_default();
+        if COMPRESSED_EXTENSIONS.contains(&extension.as_str()) {
+            return Err(SymlinkError::Compressed);
+        }
         let stem = if extension.is_empty() {
             file_name.clone()
         } else {
@@ -95,6 +104,7 @@ impl SymlinkDownload {
         let candidates = candidate_directories(&mount, &search_path, &file_name, &stem);
         let found = find_file(&mount, &candidates, &file_name).await;
         let Some(source) = found else {
+            log_mount_contents(&mount).await;
             return Err(SymlinkError::NotFound);
         };
         tracing::debug!(
@@ -220,6 +230,30 @@ async fn find_file(root: &Path, candidates: &[PathBuf], file_name: &str) -> Opti
         }
     }
     None
+}
+
+async fn log_mount_contents(mount: &Path) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+    let mut names = Vec::new();
+    match tokio::fs::read_dir(mount).await {
+        Ok(mut entries) => {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                names.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        Err(error) => {
+            tracing::error!("Unable to list {}: {error}", mount.display());
+            return;
+        }
+    }
+    names.sort();
+    tracing::debug!(
+        "Unable to find the file in the mount. Entries of {}: {}",
+        mount.display(),
+        names.join(", ")
+    );
 }
 
 /// Creates a symbolic link at `link` to `source`.
