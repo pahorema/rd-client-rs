@@ -23,6 +23,7 @@
 		type TorrentSortField
 	} from '#lib/torrent-list.js';
 	import { cn } from '#lib/utils.js';
+	import { resolve } from '$app/paths';
 	import ArrowDownIcon from '@lucide/svelte/icons/arrow-down';
 	import ArrowUpIcon from '@lucide/svelte/icons/arrow-up';
 	import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
@@ -242,7 +243,10 @@
 							/>
 						</Table.Cell>
 						<Table.Cell class="max-w-md font-medium break-all whitespace-normal">
-							{torrent.rdName ?? torrent.hash}
+							<a
+								href={resolve('/(app)/torrent/[id]', { id: torrent.torrentId })}
+								class="hover:underline">{torrent.rdName ?? torrent.hash}</a
+							>
 						</Table.Cell>
 						<Table.Cell>{torrent.category ?? ''}</Table.Cell>
 						<Table.Cell class="text-right tabular-nums">{torrent.priority ?? ''}</Table.Cell>
@@ -279,7 +283,11 @@
 					onCheckedChange={(checked) => toggle(torrent.torrentId, checked)}
 				/>
 				<div class="grid min-w-0 flex-1 gap-2">
-					<p class="text-sm font-medium break-all">{torrent.rdName ?? torrent.hash}</p>
+					<a
+						href={resolve('/(app)/torrent/[id]', { id: torrent.torrentId })}
+						class="text-sm font-medium break-all hover:underline"
+						>{torrent.rdName ?? torrent.hash}</a
+					>
 					<TorrentProgress {torrent} />
 					<p class="flex flex-wrap gap-x-3 text-xs text-muted-foreground">
 						{#if torrent.category}<span>{torrent.category}</span>{/if}
