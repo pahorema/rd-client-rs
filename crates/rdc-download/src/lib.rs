@@ -4,6 +4,7 @@
 //! caller can keep a heterogeneous set of active transfers:
 //!
 //! - [`HttpDownload`]: the internal multi-connection HTTP downloader;
+//! - [`SymlinkDownload`]: links a file of a mounted provider drive into the download folder.
 //!
 //! Inputs are plain values (links, paths, configuration structs), so the crate does not depend
 //! on the domain model. [`verify_file_size`] checks a finished file against the size the
@@ -12,10 +13,6 @@
 mod bind;
 mod engine;
 mod http;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the symlink engine built on the search follows")
-)]
 mod symlink;
 mod verify;
 
@@ -25,4 +22,5 @@ pub use self::engine::{
     STOPPED_UNEXPECTEDLY_MESSAGE, StartError, completion_channel,
 };
 pub use self::http::{HttpDownload, InternalConfig};
+pub use self::symlink::{SymlinkDownload, SymlinkError, SymlinkRequest};
 pub use self::verify::{VerifyFileSizeError, verify_file_size};
