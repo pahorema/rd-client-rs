@@ -9,6 +9,8 @@ mod remote_file;
 mod size;
 mod torrent;
 
+pub mod paths;
+
 pub use download::{Download, DownloadInfo};
 pub use enums::{
     AuthenticationType, DownloadClient, DownloadClientLogLevel, LogLevel, ParseEnumError, Provider,
