@@ -2,10 +2,19 @@
 
 mod common;
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use jiff::Timestamp;
-use rdc_debrid::{DebridError, TorBox};
+use rdc_debrid::{DebridError, ProviderHttp, RateLimitCoordinator, RetryPolicy, TorBox};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// Retries transport failures twice without waiting.
+const FAST_RETRY: RetryPolicy = RetryPolicy {
+    max_retries: 2,
+    base_delay: Duration::ZERO,
+};
 
 async fn client() -> (MockServer, TorBox) {
     let server = MockServer::start().await;
@@ -118,4 +127,65 @@ async fn missing_items_are_not_found() {
     let error = client.user().await.expect_err("missing");
 
     assert!(error.is_not_found(), "{error:?}");
+}
+
+#[tokio::test]
+async fn limit_errors_are_rate_limits_that_block_the_host() {
+    for body in [
+        r#"{"success":false,"error":"ACTIVE_LIMIT","detail":"Active limit reached"}"#,
+        r#"{"success":false,"error":"rate_limit","detail":"Too fast"}"#,
+        r#"{"success":true,"detail":"You hit the rate limit of 60 per minute"}"#,
+        r#"{"success":false,"error":"PLAN","detail":"Only 10 per 1 hour"}"#,
+    ] {
+        let (server, client) = client().await;
+        mount_user(&server, json(body)).await;
+
+        let error = client.user().await.expect_err("rate limited");
+
+        assert_eq!(
+            error.retry_after(),
+            Some(Duration::from_secs(120)),
+            "{body}"
+        );
+        let second = client.user().await.expect_err("cooling down");
+        assert!(second.to_string().contains("cooldown"), "{second}");
+        assert_eq!(server.received_requests().await.expect("recorded").len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn slow_down_messages_are_rate_limits() {
+    let coordinator = Arc::new(RateLimitCoordinator::new());
+    let server = MockServer::start().await;
+    let http = ProviderHttp::new(Duration::from_secs(5), Arc::clone(&coordinator))
+        .expect("client builds")
+        .with_retry_policy(FAST_RETRY);
+    let client = TorBox::new(&common::config(), http).with_base_url(&server.uri());
+    mount_user(
+        &server,
+        ResponseTemplate::new(503).set_body_string("slow_down"),
+    )
+    .await;
+
+    let error = client.user().await.expect_err("rate limited");
+
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(120)));
+    let host = server.address().ip().to_string();
+    assert!(coordinator.remaining_cooldown(&host) > Duration::from_secs(110));
+}
+
+#[tokio::test]
+async fn too_many_requests_is_a_rate_limit() {
+    let (server, client) = client().await;
+    mount_user(
+        &server,
+        ResponseTemplate::new(429)
+            .insert_header("Retry-After", "30")
+            .set_body_string(r#"{"success":false,"error":"RATE_LIMIT"}"#),
+    )
+    .await;
+
+    let error = client.user().await.expect_err("rate limited");
+
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(30)));
 }

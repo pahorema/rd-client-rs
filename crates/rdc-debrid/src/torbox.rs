@@ -8,16 +8,19 @@ use std::fmt;
 use std::time::Duration;
 
 use jiff::Timestamp;
-use reqwest::{Method, RequestBuilder, StatusCode};
+use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 
 use crate::error::DebridError;
-use crate::http::ProviderHttp;
+use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp};
 use crate::provider::{DebridUser, ProviderConfig};
 
 /// Address of the TorBox API.
 pub const DEFAULT_BASE_URL: &str = "https://api.torbox.app/v1/api/";
+
+/// Error codes meaning the account has to wait before adding more work.
+const RATE_LIMIT_ERRORS: [&str; 2] = ["RATE_LIMIT", "ACTIVE_LIMIT"];
 
 /// Longest part of an unexpected response body quoted in error messages.
 const BODY_EXCERPT_CHARS: usize = 300;
@@ -27,6 +30,8 @@ const BODY_EXCERPT_CHARS: usize = 300;
 pub struct TorBox {
     http: ProviderHttp,
     base_url: String,
+    /// Host whose cooldown is extended when TorBox asks to slow down.
+    host: String,
     api_key: String,
     timeout: Duration,
     prefer_zipped_downloads: bool,
@@ -48,6 +53,7 @@ impl TorBox {
         Self {
             http,
             base_url: String::new(),
+            host: String::new(),
             api_key: config.api_key.clone(),
             timeout: config.timeout,
             prefer_zipped_downloads: config.prefer_zipped_downloads,
@@ -63,6 +69,10 @@ impl TorBox {
         } else {
             format!("{base_url}/")
         };
+        self.host = Url::parse(&self.base_url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_default();
         self
     }
 
@@ -118,7 +128,9 @@ impl TorBox {
         &self,
         build: impl Fn() -> Result<RequestBuilder, DebridError> + Send + Sync,
     ) -> Result<Option<T>, DebridError> {
-        self.call_once(build()?).await.map_err(Self::to_error)
+        self.call_once(build()?)
+            .await
+            .map_err(|failure| self.to_error(failure))
     }
 
     async fn call_once<T: DeserializeOwned>(
@@ -131,14 +143,34 @@ impl TorBox {
         parse_response(status, &body)
     }
 
-    /// Turns a failure into the error reported to callers.
-    fn to_error(failure: Failure) -> DebridError {
-        match failure {
+    /// Turns a failure into the error reported to callers, starting a
+    /// cooldown when TorBox asks to slow down.
+    fn to_error(&self, failure: Failure) -> DebridError {
+        let error = match failure {
+            Failure::Api(error) if error.is_rate_limit() => {
+                return self.rate_limited(error.message);
+            }
             Failure::Api(error) if error.code.eq_ignore_ascii_case("ITEM_NOT_FOUND") => {
                 DebridError::NotFound(error.message)
             }
             Failure::Api(error) => DebridError::Provider(error.message),
             Failure::Other(error) => error,
+        };
+        if !matches!(error, DebridError::RateLimited { .. })
+            && error.to_string().to_lowercase().contains("slow_down")
+        {
+            return self.rate_limited(error.to_string());
+        }
+        error
+    }
+
+    fn rate_limited(&self, message: String) -> DebridError {
+        self.http
+            .coordinator()
+            .update_cooldown(&self.host, DEFAULT_RATE_LIMIT_COOLDOWN);
+        DebridError::RateLimited {
+            message,
+            retry_after: DEFAULT_RATE_LIMIT_COOLDOWN,
         }
     }
 }
@@ -183,6 +215,12 @@ impl ApiError {
             message,
         }
     }
+
+    fn is_rate_limit(&self) -> bool {
+        RATE_LIMIT_ERRORS
+            .iter()
+            .any(|code| self.code.eq_ignore_ascii_case(code))
+    }
 }
 
 /// The status part of a TorBox envelope.
@@ -215,6 +253,12 @@ fn parse_response<T: DeserializeOwned>(
         return Ok(None);
     }
     match serde_json::from_str::<Status>(body) {
+        Ok(envelope) if envelope.detail.as_deref().is_some_and(is_rate_limit_detail) => {
+            return Err(Failure::Api(ApiError::new(
+                Some("RATE_LIMIT"),
+                envelope.detail.as_deref(),
+            )));
+        }
         Ok(envelope) if envelope.error.is_some() || envelope.success == Some(false) => {
             return Err(Failure::Api(ApiError::new(
                 envelope.error.as_deref(),
@@ -222,6 +266,9 @@ fn parse_response<T: DeserializeOwned>(
             )));
         }
         Ok(_) => {}
+        Err(_) if is_rate_limit_detail(body) => {
+            return Err(Failure::Api(ApiError::new(Some("RATE_LIMIT"), Some(body))));
+        }
         Err(_) if status.is_success() => {}
         Err(_) => {
             return Err(Failure::Other(DebridError::Provider(format!(
@@ -244,6 +291,11 @@ fn parse_response<T: DeserializeOwned>(
                 excerpt(body)
             )))
         })
+}
+
+fn is_rate_limit_detail(detail: &str) -> bool {
+    let detail = detail.to_lowercase();
+    detail.contains("rate limit") || detail.contains("per 1 hour")
 }
 
 fn starts_with_ignore_case(text: &str, prefix: &str) -> bool {
