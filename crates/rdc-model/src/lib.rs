@@ -5,6 +5,7 @@
 mod download;
 mod enums;
 mod remote_file;
+mod torrent;
 
 pub use download::{Download, DownloadInfo};
 pub use enums::{
@@ -13,3 +14,4 @@ pub use enums::{
     UnknownValueError,
 };
 pub use remote_file::RemoteFile;
+pub use torrent::Torrent;
