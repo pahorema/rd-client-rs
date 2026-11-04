@@ -236,6 +236,60 @@ numeric_enum! {
     legacy { "HIGHWAY" => Highway }
 }
 
+numeric_enum! {
+    /// Engine that transfers finished files from the provider to the host.
+    DownloadClient {
+        /// The built-in multi-connection HTTP downloader.
+        Internal = 0 => "Internal downloader",
+        /// An external aria2 instance driven over JSON-RPC.
+        Aria2c = 1 => "Aria2c",
+        /// Symbolic links into an rclone mount of the provider.
+        Symlink = 2 => "Symlink Downloader",
+        /// A Synology Download Station.
+        DownloadStation = 3 => "Synology DownloadStation",
+    }
+    // Legacy stored name.
+    legacy { "Bezzad" => Internal }
+}
+
+numeric_enum! {
+    /// Which files of a torrent are selected on the provider.
+    TorrentDownloadAction {
+        /// Every file of the torrent.
+        DownloadAll = 0 => "Download All Files",
+        /// Every file the provider already has available.
+        DownloadAvailableFiles = 1 => "Download All Available Files",
+        /// Only the files listed in `download_manual_files`.
+        DownloadManual = 2 => "Manually Select Files",
+    }
+}
+
+numeric_enum! {
+    /// What to remove once every file reached the host.
+    TorrentFinishedAction {
+        /// Keep the torrent everywhere.
+        None = 0 => "No Action",
+        /// Remove the torrent from the provider and from rd-client.
+        RemoveAllTorrents = 1 => "Remove Torrent From Client And Provider",
+        /// Remove the torrent from the provider only.
+        RemoveProvider = 2 => "Remove Torrent From Provider",
+        /// Remove the torrent from rd-client only.
+        RemoveClient = 3 => "Remove Torrent From Client",
+    }
+    // Legacy stored name.
+    legacy { "RemoveRealDebrid" => RemoveProvider }
+}
+
+numeric_enum! {
+    /// Whether finished provider files are transferred to the host at all.
+    TorrentHostDownloadAction {
+        /// Download every selected file to the host.
+        DownloadAll = 0 => "Download all files to host",
+        /// Keep the files on the provider only.
+        DownloadNone = 1 => "Don't download any files to host",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,6 +300,23 @@ mod tests {
         assert_eq!(values, [0, 1, 2, 3, 4, 5, 99]);
         let values: Vec<i32> = Provider::ALL.iter().map(|p| p.as_i32()).collect();
         assert_eq!(values, [0, 1, 2, 3, 4, 5]);
+        let values: Vec<i32> = DownloadClient::ALL.iter().map(|c| c.as_i32()).collect();
+        assert_eq!(values, [0, 1, 2, 3]);
+        let values: Vec<i32> = TorrentDownloadAction::ALL
+            .iter()
+            .map(|a| a.as_i32())
+            .collect();
+        assert_eq!(values, [0, 1, 2]);
+        let values: Vec<i32> = TorrentFinishedAction::ALL
+            .iter()
+            .map(|a| a.as_i32())
+            .collect();
+        assert_eq!(values, [0, 1, 2, 3]);
+        let values: Vec<i32> = TorrentHostDownloadAction::ALL
+            .iter()
+            .map(|a| a.as_i32())
+            .collect();
+        assert_eq!(values, [0, 1]);
     }
 
     #[test]
@@ -269,11 +340,34 @@ mod tests {
         );
         assert_eq!("DebridLink".parse(), Ok(Provider::DebridLink));
         assert_eq!("Highway".parse(), Ok(Provider::Highway));
+        assert_eq!("Internal".parse(), Ok(DownloadClient::Internal));
+        assert_eq!(
+            "DownloadStation".parse(),
+            Ok(DownloadClient::DownloadStation)
+        );
+        assert_eq!(
+            "DownloadManual".parse(),
+            Ok(TorrentDownloadAction::DownloadManual)
+        );
+        assert_eq!("None".parse(), Ok(TorrentFinishedAction::None));
+        assert_eq!(
+            "RemoveProvider".parse(),
+            Ok(TorrentFinishedAction::RemoveProvider)
+        );
+        assert_eq!(
+            "DownloadNone".parse(),
+            Ok(TorrentHostDownloadAction::DownloadNone)
+        );
     }
 
     #[test]
     fn parses_legacy_names() {
         assert_eq!("HIGHWAY".parse(), Ok(Provider::Highway));
+        assert_eq!("Bezzad".parse(), Ok(DownloadClient::Internal));
+        assert_eq!(
+            "RemoveRealDebrid".parse(),
+            Ok(TorrentFinishedAction::RemoveProvider)
+        );
     }
 
     #[test]
@@ -290,6 +384,11 @@ mod tests {
     fn displays_canonical_name() {
         assert_eq!(Provider::Highway.to_string(), "Highway");
         assert_eq!(TorrentStatus::Queued.to_string(), "Queued");
+        assert_eq!(DownloadClient::Internal.to_string(), "Internal");
+        assert_eq!(
+            TorrentFinishedAction::RemoveProvider.to_string(),
+            "RemoveProvider"
+        );
     }
 
     #[test]
@@ -298,6 +397,27 @@ mod tests {
         assert_eq!(Provider::RealDebrid.label(), "RealDebrid");
         assert_eq!(TorrentStatus::Error.label(), "Error");
         assert_eq!(Provider::OPTIONS[5], (5, "HIGHWAY"));
+        assert_eq!(DownloadClient::Internal.label(), "Internal downloader");
+        assert_eq!(
+            DownloadClient::DownloadStation.label(),
+            "Synology DownloadStation"
+        );
+        assert_eq!(
+            TorrentFinishedAction::RemoveProvider.label(),
+            "Remove Torrent From Provider"
+        );
+        assert_eq!(
+            TorrentHostDownloadAction::DownloadNone.label(),
+            "Don't download any files to host"
+        );
+        assert_eq!(
+            TorrentDownloadAction::OPTIONS,
+            &[
+                (0, "Download All Files"),
+                (1, "Download All Available Files"),
+                (2, "Manually Select Files"),
+            ]
+        );
     }
 
     #[test]
