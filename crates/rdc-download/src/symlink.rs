@@ -20,6 +20,17 @@ const COMPRESSED_EXTENSIONS: [&str; 3] = [".zip", ".rar", ".tar"];
 /// Default wait unit between search rounds; round `n` waits `n` units.
 const DEFAULT_RETRY_STEP: Duration = Duration::from_secs(1);
 
+/// How the source file is located on the mount.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum SourceLookup {
+    /// Search the candidate directories of the mount.
+    #[default]
+    Search,
+    /// Try `<mount>/<relative path>` first, then search; for providers whose mount layout
+    /// matches the relative path exactly.
+    DirectThenSearch,
+}
+
 /// What to link and where.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymlinkRequest {
@@ -30,6 +41,8 @@ pub struct SymlinkRequest {
     pub relative_path: String,
     /// The link to create.
     pub destination: PathBuf,
+    /// How the source file is located.
+    pub lookup: SourceLookup,
 }
 
 /// Why linking failed; the message is shown to the user.
@@ -118,10 +131,25 @@ impl SymlinkDownload {
         let search_path = mount.join(parent);
         self.progress.send_replace(Progress::default());
 
-        let candidates = candidate_directories(&mount, &search_path, &file_name, &stem);
-        let found = self
-            .search(&mount, search_subdirectories, &candidates, &file_name)
-            .await;
+        let mut found = None;
+        if self.request.lookup == SourceLookup::DirectThenSearch {
+            let direct = mount.join(relative);
+            if is_file(&direct).await {
+                tracing::debug!("Found {relative} at {}", direct.display());
+                found = Some(direct);
+            } else {
+                tracing::warn!(
+                    "Expected {relative} at {}, but it is not there; searching the mount",
+                    direct.display()
+                );
+            }
+        }
+        if found.is_none() {
+            let candidates = candidate_directories(&mount, &search_path, &file_name, &stem);
+            found = self
+                .search(&mount, search_subdirectories, &candidates, &file_name)
+                .await;
+        }
         let Some(source) = found else {
             log_mount_contents(&mount).await;
             return Err(SymlinkError::NotFound);

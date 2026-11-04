@@ -22,5 +22,5 @@ pub use self::engine::{
     STOPPED_UNEXPECTEDLY_MESSAGE, StartError, completion_channel,
 };
 pub use self::http::{HttpDownload, InternalConfig};
-pub use self::symlink::{SymlinkDownload, SymlinkError, SymlinkRequest};
+pub use self::symlink::{SourceLookup, SymlinkDownload, SymlinkError, SymlinkRequest};
 pub use self::verify::{VerifyFileSizeError, verify_file_size};

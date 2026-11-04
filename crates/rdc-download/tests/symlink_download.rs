@@ -5,7 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rdc_download::{CANCELLED_MESSAGE, DownloadEngine, Progress, SymlinkDownload, SymlinkRequest};
+use rdc_download::{
+    CANCELLED_MESSAGE, DownloadEngine, Progress, SourceLookup, SymlinkDownload, SymlinkRequest,
+};
 
 struct Layout {
     _root: tempfile::TempDir,
@@ -40,6 +42,7 @@ impl Layout {
             mount_path: format!("{}/", self.mount.display()),
             relative_path: relative.to_owned(),
             destination: self.downloads.join(file_name(relative)),
+            lookup: SourceLookup::Search,
         }
     }
 }
@@ -197,4 +200,25 @@ async fn trailing_star_searches_the_mount_subdirectories() {
     let (result, destination) = link(request).await;
     assert_eq!(result, Ok(source.display().to_string()));
     assert_links_to(&destination, &source);
+}
+
+#[tokio::test]
+async fn direct_lookup_uses_the_exact_relative_path() {
+    let layout = Layout::new();
+    let source = layout.mount_file("magnets/Movie/sub/Movie.mkv");
+    let mut request = layout.request("magnets/Movie/sub/Movie.mkv");
+    request.lookup = SourceLookup::DirectThenSearch;
+    let (result, destination) = link(request).await;
+    assert_eq!(result, Ok(source.display().to_string()));
+    assert_links_to(&destination, &source);
+}
+
+#[tokio::test]
+async fn direct_lookup_falls_back_to_searching() {
+    let layout = Layout::new();
+    let source = layout.mount_file("Movie.mkv");
+    let mut request = layout.request("magnets/Movie/Movie.mkv");
+    request.lookup = SourceLookup::DirectThenSearch;
+    let (result, _) = link(request).await;
+    assert_eq!(result, Ok(source.display().to_string()));
 }
