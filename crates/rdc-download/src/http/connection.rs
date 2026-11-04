@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use reqwest::header::{ACCEPT, ACCEPT_ENCODING, CACHE_CONTROL};
+use reqwest::header::{ACCEPT, ACCEPT_ENCODING, CACHE_CONTROL, RANGE};
 use reqwest::{Client, Response, Url, redirect};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -16,7 +16,23 @@ const USER_AGENT: &str = concat!("rd-client/", env!("CARGO_PKG_VERSION"));
 /// Redirects followed before a request fails.
 const MAX_REDIRECTS: usize = 50;
 
-/// State shared by every request of one download.
+/// An inclusive byte range to request; `end: None` reads to the end of the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ByteRange {
+    pub(crate) start: u64,
+    pub(crate) end: Option<u64>,
+}
+
+impl ByteRange {
+    fn header_value(self) -> String {
+        match self.end {
+            Some(end) => format!("bytes={}-{end}", self.start),
+            None => format!("bytes={}-", self.start),
+        }
+    }
+}
+
+/// State shared by the probe and every request of one download.
 #[derive(Debug)]
 pub(crate) struct Context {
     pub(crate) config: watch::Receiver<InternalConfig>,
@@ -60,18 +76,22 @@ impl Context {
         }
     }
 
-    /// Sends a GET for `url` and returns a successful response.
+    /// Sends a GET for `url`, optionally limited to `range`, and returns a successful response.
     pub(crate) async fn get(
         &self,
         url: &Url,
+        range: Option<ByteRange>,
         cancel: &CancellationToken,
     ) -> Result<Response, TransferError> {
-        let request = self
+        let mut request = self
             .client()?
             .get(url.clone())
             .header(ACCEPT, "*/*")
             .header(ACCEPT_ENCODING, "identity")
             .header(CACHE_CONTROL, "no-cache");
+        if let Some(range) = range {
+            request = request.header(RANGE, range.header_value());
+        }
         let limit = self.config.borrow().header_timeout();
         let response =
             match Self::cancellable(cancel, tokio::time::timeout(limit, request.send())).await? {
@@ -109,6 +129,20 @@ fn build_client() -> Result<Client, TransferError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn range_header_values() {
+        let closed = ByteRange {
+            start: 0,
+            end: Some(0),
+        };
+        assert_eq!(closed.header_value(), "bytes=0-0");
+        let open = ByteRange {
+            start: 42,
+            end: None,
+        };
+        assert_eq!(open.header_value(), "bytes=42-");
+    }
 
     #[test]
     fn user_agent_names_the_product_and_version() {

@@ -5,12 +5,12 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use reqwest::Url;
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 
 use super::connection::Context;
 use super::error::TransferError;
+use super::probe::RemoteFile;
 
 /// Suffix of the file a download is written to until it completes.
 const PARTIAL_SUFFIX: &str = ".download";
@@ -32,14 +32,14 @@ pub(crate) async fn remove_file_if_exists(path: &Path) -> Result<(), TransferErr
     }
 }
 
-/// Downloads `url` into `partial` and returns the final size in bytes.
+/// Downloads `remote` into `partial` and returns the final size in bytes.
 pub(crate) async fn fetch_file(
     context: &Arc<Context>,
-    url: &Url,
+    remote: &RemoteFile,
     partial: &Path,
 ) -> Result<u64, TransferError> {
     let io_error = |error| TransferError::io(partial, error);
-    let mut response = context.get(url, &context.cancel).await?;
+    let mut response = context.get(&remote.url, None, &context.cancel).await?;
     let file = File::create(partial).await.map_err(io_error)?;
     let config = context.config();
     let timeout = config.read_timeout();

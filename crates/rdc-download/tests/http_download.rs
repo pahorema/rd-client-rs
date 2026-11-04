@@ -9,7 +9,7 @@ use std::time::Duration;
 use rdc_download::{
     CANCELLED_MESSAGE, DownloadEngine, HttpDownload, InternalConfig, Outcome, Progress,
 };
-use support::{FileOptions, Reply, TestServer, file_reply, test_data};
+use support::{FileOptions, Framing, Reply, TestServer, file_reply, test_data};
 use tokio::sync::watch;
 
 const WAIT_LIMIT: Duration = Duration::from_secs(15);
@@ -230,4 +230,76 @@ async fn stalled_reads_fail_with_a_timeout() {
     assert_eq!(outcome, Err("No data was received for 150 ms.".to_owned()));
     assert!(!run.target.exists());
     assert!(!run.partial().exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn probes_with_a_first_byte_range_request() {
+    let data = test_data(4096);
+    let server = TestServer::file(Arc::clone(&data), FileOptions::default()).await;
+    let (_run, outcome) = download(&server.url("/file.bin"), config()).await;
+    assert_eq!(outcome, Ok(()));
+    let first = server.requests().first().cloned().expect("probe");
+    assert_eq!(first.range(), Some((0, Some(0))));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn servers_without_range_support_get_one_plain_request() {
+    let data = test_data(20_000);
+    let options = FileOptions {
+        ranges: false,
+        ..FileOptions::default()
+    };
+    let server = TestServer::file(Arc::clone(&data), options).await;
+    let (run, outcome) = download(&server.url("/file.bin"), config()).await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+    let transfers = server.transfer_requests();
+    assert_eq!(transfers.len(), 1);
+    assert_eq!(transfers[0].header("range"), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unknown_size_is_finalised_to_the_received_bytes() {
+    let data = test_data(50_000);
+    let options = FileOptions {
+        ranges: false,
+        framing: Framing::CloseDelimited,
+        ..FileOptions::default()
+    };
+    let server = TestServer::file(Arc::clone(&data), options).await;
+    let (run, outcome) = download(&server.url("/file.bin"), config()).await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+    assert_eq!(
+        *run.download.progress().borrow(),
+        Progress {
+            bytes_done: 50_000,
+            bytes_total: 50_000,
+            speed: 0
+        }
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn redirects_are_followed() {
+    let data = test_data(8192);
+    let server = {
+        let data = Arc::clone(&data);
+        TestServer::start(move |request| {
+            if request.path() == "/old" {
+                return Reply::status(302).header("Location", "/file.bin");
+            }
+            file_reply(&data, request, &FileOptions::default())
+        })
+        .await
+    };
+    let (run, outcome) = download(&server.url("/old"), config()).await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+    assert!(
+        server
+            .transfer_requests()
+            .iter()
+            .all(|request| request.path() == "/file.bin" || request.path() == "/old")
+    );
 }

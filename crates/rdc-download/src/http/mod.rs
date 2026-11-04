@@ -1,12 +1,14 @@
 //! The internal HTTP engine.
 //!
-//! A download writes into `<file>.download` — removing a stale one first — and renames it to
+//! A download first probes the link with a `Range: bytes=0-0` request (following redirects)
+//! to learn the file size and whether the server serves byte ranges. It then writes into `<file>.download` — removing a stale one first — and renames it to
 //! `<file>` on success, replacing an existing file. On failure or cancellation the partial file
 //! is removed.
 
 mod config;
 mod connection;
 mod error;
+mod probe;
 mod transfer;
 
 use std::path::{Path, PathBuf};
@@ -180,7 +182,13 @@ async fn download(
     progress: &watch::Sender<Progress>,
 ) -> Result<u64, TransferError> {
     transfer::remove_file_if_exists(partial).await?;
-    let fetch = transfer::fetch_file(context, url, partial);
+    let remote = probe::probe(context, url).await?;
+    progress.send_replace(Progress {
+        bytes_done: 0,
+        bytes_total: remote.size.unwrap_or(0),
+        speed: 0,
+    });
+    let fetch = transfer::fetch_file(context, &remote, partial);
     tokio::pin!(fetch);
     let mut ticker = tokio::time::interval(PROGRESS_INTERVAL);
     let size = loop {
