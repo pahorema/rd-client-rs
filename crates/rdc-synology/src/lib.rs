@@ -5,7 +5,9 @@
 //! nothing about torrents.
 
 mod api;
+mod client;
 mod codes;
 mod error;
 
+pub use client::{Client, DEFAULT_TIMEOUT};
 pub use error::{ApiError, Error, ErrorDetail, SESSION_ERROR_CODES};

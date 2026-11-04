@@ -1,7 +1,5 @@
 //! The DSM Web APIs this client uses and their discovered locations.
 
-#![expect(dead_code, reason = "used by the DSM client")]
-
 use std::collections::HashMap;
 
 use serde::Deserialize;
