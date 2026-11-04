@@ -7,6 +7,8 @@
 
 mod bind;
 mod engine;
+#[expect(dead_code, reason = "the engine built on the transfer follows")]
+mod http;
 mod verify;
 
 pub use self::bind::{is_local_unicast_address, resolve_bind_address};
@@ -14,4 +16,5 @@ pub use self::engine::{
     CANCELLED_MESSAGE, Completion, CompletionSender, DownloadEngine, Outcome, Progress,
     STOPPED_UNEXPECTEDLY_MESSAGE, StartError, completion_channel,
 };
+pub use self::http::InternalConfig;
 pub use self::verify::{VerifyFileSizeError, verify_file_size};

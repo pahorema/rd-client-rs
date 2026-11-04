@@ -1163,10 +1163,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "if-addrs",
+ "reqwest",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
