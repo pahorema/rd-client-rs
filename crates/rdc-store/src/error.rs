@@ -24,6 +24,22 @@ pub enum StoreError {
     /// is unknown and it is left untouched.
     #[error("the database contains tables but no migration history")]
     UnversionedDatabase,
+    /// The migration history lists a migration this version does not know,
+    /// so the database was upgraded by a newer version.
+    #[error("the database was upgraded by a newer version (migration {migration})")]
+    NewerDatabase {
+        /// The unknown migration.
+        migration: String,
+    },
+    /// A migration failed; the database stays at the previous migration.
+    #[error("database migration {migration} failed")]
+    Migration {
+        /// The failed migration.
+        migration: &'static str,
+        /// The underlying failure.
+        #[source]
+        source: sqlx::Error,
+    },
     /// A stored value could not be decoded.
     #[error("invalid value in column {column}: {value}")]
     InvalidValue {

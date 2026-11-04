@@ -2,6 +2,7 @@
 //! user account, stored in the existing database layout.
 
 mod error;
+mod schema;
 
 use std::{path::Path, time::Duration};
 
@@ -26,7 +27,10 @@ pub struct Store {
 
 impl Store {
     /// Opens the database at `path`, creating its directory and the file
-    /// when they are missing.
+    /// when they are missing, and brings it to the current layout.
+    ///
+    /// An empty file receives the current layout; a database with a
+    /// migration history gets every missing migration applied in order.
     ///
     /// Every pooled connection enforces foreign keys and uses write-ahead
     /// logging, `NORMAL` synchronisation, a five second busy timeout and a
@@ -34,8 +38,11 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Fails when the directory cannot be created or the database cannot be
-    /// opened.
+    /// Fails when the directory cannot be created, the database cannot be
+    /// opened, it has tables but no migration history
+    /// ([`StoreError::UnversionedDatabase`]), it was upgraded by a newer
+    /// version ([`StoreError::NewerDatabase`]) or a migration fails
+    /// ([`StoreError::Migration`]).
     pub async fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path
@@ -50,6 +57,7 @@ impl Store {
             })?;
         }
         let options = connect_options(path);
+        schema::prepare(&options).await?;
         let pool = SqlitePoolOptions::new().connect_with(options).await?;
         Ok(Self { pool })
     }

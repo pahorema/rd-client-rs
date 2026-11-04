@@ -1,0 +1,3 @@
+ALTER TABLE "Torrents" ADD "FileOrMagnet" TEXT NULL;
+
+ALTER TABLE "Torrents" ADD "IsFile" INTEGER NOT NULL DEFAULT 0;

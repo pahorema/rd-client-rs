@@ -1,0 +1,1 @@
+ALTER TABLE "Downloads" ADD "RetryCount" INTEGER NOT NULL DEFAULT 0;

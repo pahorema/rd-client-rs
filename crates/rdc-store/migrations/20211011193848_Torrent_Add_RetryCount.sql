@@ -1,0 +1,1 @@
+ALTER TABLE "Torrents" ADD "RetryCount" INTEGER NOT NULL DEFAULT 0;
