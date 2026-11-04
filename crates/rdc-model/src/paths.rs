@@ -234,6 +234,24 @@ fn strip_torrent_name_prefix<'a>(sub_path: &'a str, directory: &str) -> &'a str 
     }
 }
 
+/// Size in bytes the provider reports for the download's file.
+///
+/// `None` unless exactly one provider file with a non-blank path ends with
+/// the download's [`file_name`] and reports a positive size; a blank file
+/// name matches nothing.
+pub fn expected_file_size(torrent: &Torrent, download: &Download) -> Option<i64> {
+    let file_name = file_name(download).filter(|name| !name.trim().is_empty())?;
+    let files = torrent.files();
+    let mut matching = files
+        .iter()
+        .filter(|file| !file.path.trim().is_empty() && file.path.ends_with(&file_name));
+    let file = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    (file.bytes > 0).then_some(file.bytes)
+}
+
 /// Case-insensitive comparison using simple Unicode upper-casing.
 pub(crate) fn eq_ignore_case(left: &str, right: &str) -> bool {
     left.chars()
@@ -593,6 +611,47 @@ mod tests {
             assert_eq!(last_segment("/a/dir/"), "dir/");
             assert_eq!(last_segment("/"), "/");
             assert_eq!(last_segment(""), "");
+        }
+
+        fn sized_torrent(files: &[(&str, i64)]) -> Torrent {
+            let files: Vec<RemoteFile> = files
+                .iter()
+                .map(|&(path, bytes)| RemoteFile {
+                    path: path.to_owned(),
+                    bytes,
+                    ..RemoteFile::default()
+                })
+                .collect();
+            let mut torrent = torrent(Some(TORRENT_NAME), &[]);
+            torrent.set_files(&files);
+            torrent
+        }
+
+        #[test]
+        fn expected_size_comes_from_the_single_matching_file() {
+            let torrent = sized_torrent(&[("dir/file.txt", 42), ("dir/other.txt", 7)]);
+            assert_eq!(expected_file_size(&torrent, &file_download()), Some(42));
+        }
+
+        #[test]
+        fn expected_size_is_unknown_when_ambiguous_or_missing() {
+            let torrent = sized_torrent(&[("a/file.txt", 42), ("b/file.txt", 42)]);
+            assert_eq!(expected_file_size(&torrent, &file_download()), None);
+            let torrent = sized_torrent(&[("dir/other.txt", 7)]);
+            assert_eq!(expected_file_size(&torrent, &file_download()), None);
+        }
+
+        #[test]
+        fn expected_size_ignores_blank_paths_and_non_positive_sizes() {
+            let torrent = sized_torrent(&[(" ", 5), ("dir/file.txt", 0)]);
+            assert_eq!(expected_file_size(&torrent, &file_download()), None);
+        }
+
+        #[test]
+        fn expected_size_needs_a_file_name() {
+            let torrent = sized_torrent(&[("dir/file.txt", 42)]);
+            let download = download(Some("https://fake.url"), None);
+            assert_eq!(expected_file_size(&torrent, &download), None);
         }
     }
 }
