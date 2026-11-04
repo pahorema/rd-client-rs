@@ -4,8 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rdc_debrid::{
-    DebridError, ProviderConfig, ProviderHttp, RateLimitCoordinator, RealDebrid, RetryPolicy,
+    DebridError, ProviderConfig, ProviderHttp, RateLimitCoordinator, RealDebrid, RemoteTorrent,
+    RetryPolicy,
 };
+use rdc_model::{Provider, Torrent, TorrentStatus};
 use serde_json::json;
 use wiremock::matchers::{
     bearer_token, body_bytes, body_string, method, path, query_param, query_param_is_missing,
@@ -409,4 +411,202 @@ async fn other_add_errors_are_not_rate_limits() {
 
     assert_eq!(error.retry_after(), None);
     assert_eq!(error.to_string(), "Torrent file invalid");
+}
+
+fn torrent_with_id(id: &str) -> Torrent {
+    Torrent {
+        rd_id: Some(id.to_owned()),
+        ..Torrent::default()
+    }
+}
+
+fn info_body() -> serde_json::Value {
+    json!({"id": "ID", "filename": "Name.mkv", "original_filename": "Original Name",
+           "hash": "abc", "bytes": 0, "original_bytes": 300, "host": "real-debrid.com",
+           "split": 2000, "progress": 37, "status": "downloading",
+           "added": "2024-05-01T12:00:00.000Z", "ended": null, "speed": 1000, "seeders": 4,
+           "files": [{"id": 1, "path": "/Name/a.mkv", "bytes": 200, "selected": 1},
+                     {"id": 2, "path": "/Name/b.nfo", "bytes": 100, "selected": 0}],
+           "links": []})
+}
+
+async fn mock_info(server: &MockServer, response: ResponseTemplate, expected_calls: u64) {
+    Mock::given(method("GET"))
+        .and(path("/rest/1.0/torrents/info/ID"))
+        .respond_with(response)
+        .expect(expected_calls)
+        .mount(server)
+        .await;
+}
+
+fn finished_remote() -> RemoteTorrent {
+    RemoteTorrent {
+        id: "ID".to_owned(),
+        filename: "Listed.mkv".to_owned(),
+        bytes: 50,
+        original_bytes: 80,
+        progress: 100,
+        status: Some("downloaded".to_owned()),
+        added: Some("2024-05-01T10:00:00Z".parse().expect("timestamp")),
+        ended: Some("2024-05-01T11:00:00Z".parse().expect("timestamp")),
+        files: Some(Vec::new()),
+        ..RemoteTorrent::default()
+    }
+}
+
+#[tokio::test]
+async fn refreshing_a_torrent_without_provider_id_changes_nothing() {
+    let server = MockServer::start().await;
+    let mut torrent = Torrent::default();
+
+    client(&server)
+        .refresh(&mut torrent, None)
+        .await
+        .expect("refreshed");
+
+    assert_eq!(torrent, Torrent::default());
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn refreshing_without_listing_entry_fetches_the_torrent_details() {
+    let server = MockServer::start().await;
+    mock_server_time(&server, "2024-05-01T13:00:00+01:00").await;
+    mock_info(
+        &server,
+        ResponseTemplate::new(200).set_body_json(info_body()),
+        1,
+    )
+    .await;
+    let mut torrent = torrent_with_id("ID");
+
+    client(&server)
+        .refresh(&mut torrent, None)
+        .await
+        .expect("refreshed");
+
+    assert_eq!(torrent.client_kind, Some(Provider::RealDebrid));
+    assert_eq!(torrent.rd_name.as_deref(), Some("Original Name"));
+    assert_eq!(torrent.rd_size, Some(300));
+    assert_eq!(torrent.rd_host.as_deref(), Some("real-debrid.com"));
+    assert_eq!(
+        (torrent.rd_split, torrent.rd_progress),
+        (Some(2000), Some(37))
+    );
+    assert_eq!(
+        (torrent.rd_speed, torrent.rd_seeders),
+        (Some(1000), Some(4))
+    );
+    assert_eq!(torrent.rd_status_raw.as_deref(), Some("downloading"));
+    assert_eq!(torrent.rd_status, Some(TorrentStatus::Downloading));
+    assert_eq!(
+        torrent.rd_added,
+        Some("2024-05-01T11:00:00Z".parse().expect("timestamp"))
+    );
+    assert_eq!(torrent.rd_ended, None);
+    assert_eq!(
+        torrent.rd_files.as_deref(),
+        Some(concat!(
+            r#"[{"Id":1,"Path":"/Name/a.mkv","Bytes":200,"Selected":true,"DownloadLink":null},"#,
+            r#"{"Id":2,"Path":"/Name/b.nfo","Bytes":100,"Selected":false,"DownloadLink":null}]"#
+        ))
+    );
+}
+
+#[tokio::test]
+async fn refreshing_from_a_finished_listing_entry_sends_no_request() {
+    let server = MockServer::start().await;
+    let mut torrent = torrent_with_id("ID");
+    torrent.rd_files = Some("[]".to_owned());
+    torrent.rd_name = Some("Old".to_owned());
+
+    client(&server)
+        .refresh(&mut torrent, Some(&finished_remote()))
+        .await
+        .expect("refreshed");
+
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
+    assert_eq!(torrent.rd_name.as_deref(), Some("Listed.mkv"));
+    assert_eq!(torrent.rd_size, Some(50));
+    assert_eq!(torrent.rd_status, Some(TorrentStatus::Finished));
+    assert_eq!(torrent.rd_ended, finished_remote().ended);
+    assert_eq!(
+        torrent.rd_files.as_deref(),
+        Some("[]"),
+        "empty lists never clear files"
+    );
+}
+
+#[tokio::test]
+async fn refreshing_from_an_unfinished_listing_entry_fetches_the_details() {
+    let server = MockServer::start().await;
+    mock_server_time(&server, "2024-05-01T12:00:00+00:00").await;
+    mock_info(
+        &server,
+        ResponseTemplate::new(200).set_body_json(info_body()),
+        1,
+    )
+    .await;
+    let remote = RemoteTorrent {
+        ended: None,
+        ..finished_remote()
+    };
+    let mut torrent = torrent_with_id("ID");
+
+    client(&server)
+        .refresh(&mut torrent, Some(&remote))
+        .await
+        .expect("refreshed");
+
+    assert_eq!(torrent.rd_status_raw.as_deref(), Some("downloading"));
+}
+
+#[tokio::test]
+async fn refreshing_a_torrent_unknown_to_the_provider_marks_it_deleted() {
+    let server = MockServer::start().await;
+    mock_server_time(&server, "2024-05-01T12:00:00+00:00").await;
+    let response = ResponseTemplate::new(404)
+        .set_body_json(json!({"error": "unknown_ressource", "error_code": 7}));
+    mock_info(&server, response, 1).await;
+    let mut torrent = torrent_with_id("ID");
+    torrent.rd_status = Some(TorrentStatus::Downloading);
+
+    client(&server)
+        .refresh(&mut torrent, None)
+        .await
+        .expect("refreshed");
+
+    assert_eq!(torrent.rd_status_raw.as_deref(), Some("deleted"));
+    assert_eq!(torrent.rd_status, Some(TorrentStatus::Downloading));
+    assert_eq!(torrent.client_kind, None);
+}
+
+#[tokio::test]
+async fn other_refresh_errors_are_returned() {
+    let server = MockServer::start().await;
+    mock_server_time(&server, "2024-05-01T12:00:00+00:00").await;
+    let response =
+        ResponseTemplate::new(401).set_body_json(json!({"error": "bad_token", "error_code": 8}));
+    mock_info(&server, response, 1).await;
+    let mut torrent = torrent_with_id("ID");
+
+    let error = client(&server)
+        .refresh(&mut torrent, None)
+        .await
+        .expect_err("bad token");
+
+    assert_eq!(error.to_string(), "Bad token");
+    assert_eq!(torrent.rd_status_raw, None);
 }

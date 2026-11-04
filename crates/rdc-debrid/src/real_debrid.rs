@@ -1,7 +1,7 @@
 //! Client of the Real-Debrid REST API.
 
 use jiff::{SignedDuration, Timestamp};
-use rdc_model::RemoteFile;
+use rdc_model::{Provider, RemoteFile, Torrent, TorrentStatus};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -22,6 +22,9 @@ const RESOURCE_NOT_FOUND: i64 = 7;
 
 /// Torrents requested per listing page.
 const PAGE_SIZE: usize = 5000;
+
+/// Raw status given to torrents Real-Debrid no longer knows.
+const DELETED_STATUS: &str = "deleted";
 
 /// Real-Debrid account access.
 ///
@@ -125,6 +128,52 @@ impl RealDebrid {
         }
         tracing::debug!(id = %added.id, "torrent added to Real-Debrid");
         Ok(added.id)
+    }
+
+    /// Copies the Real-Debrid state into the torrent's `rd_*` fields.
+    ///
+    /// Torrents without provider id are left untouched. The torrent details
+    /// are fetched when `remote` is missing, unfinished (no end time) or has
+    /// no name; a torrent Real-Debrid no longer knows only gets
+    /// `rd_status_raw = "deleted"`. The stored file list is only replaced by
+    /// a non-empty one, so listings never clear it.
+    pub async fn refresh(
+        &self,
+        torrent: &mut Torrent,
+        remote: Option<&RemoteTorrent>,
+    ) -> Result<(), DebridError> {
+        let Some(id) = torrent.rd_id.clone() else {
+            return Ok(());
+        };
+        let fetched;
+        let remote = match remote {
+            Some(remote) if remote.ended.is_some() && !remote.filename.is_empty() => remote,
+            _ => match self.info(&id).await {
+                Ok(info) => {
+                    fetched = info;
+                    &fetched
+                }
+                Err(error) if error.is_not_found() => {
+                    tracing::debug!(%id, "torrent no longer exists on Real-Debrid");
+                    torrent.rd_status_raw = Some(DELETED_STATUS.to_owned());
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            },
+        };
+        apply(torrent, remote);
+        Ok(())
+    }
+
+    /// Details of one torrent, including its files and links.
+    async fn info(&self, id: &str) -> Result<RemoteTorrent, DebridError> {
+        let server_offset = self.server_offset().await?;
+        let request = self.request(Method::GET, &format!("torrents/info/{id}"))?;
+        let info: TorrentInfo = self.call(request).await?;
+        if info.id.is_empty() {
+            return Err(DebridError::NotFound("Resource not found".to_owned()));
+        }
+        Ok(info.into_remote(server_offset))
     }
 
     /// The UTC offset of the Real-Debrid server clock, read once.
@@ -272,6 +321,50 @@ impl TorrentInfo {
     }
 }
 
+/// Copies `remote` into the torrent's `rd_*` fields.
+fn apply(torrent: &mut Torrent, remote: &RemoteTorrent) {
+    if !remote.filename.trim().is_empty() {
+        torrent.rd_name = Some(remote.filename.clone());
+    }
+    if let Some(original) = remote
+        .original_filename
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+    {
+        torrent.rd_name = Some(original.to_owned());
+    }
+    if remote.bytes > 0 {
+        torrent.rd_size = Some(remote.bytes);
+    } else if remote.original_bytes > 0 {
+        torrent.rd_size = Some(remote.original_bytes);
+    }
+    if let Some(files) = remote.files.as_deref().filter(|files| !files.is_empty()) {
+        torrent.set_files(files);
+    }
+    torrent.client_kind = Some(Provider::RealDebrid);
+    torrent.rd_host.clone_from(&remote.host);
+    torrent.rd_split = Some(remote.split);
+    torrent.rd_progress = Some(remote.progress);
+    torrent.rd_added = remote.added;
+    torrent.rd_ended = remote.ended;
+    torrent.rd_speed = remote.speed;
+    torrent.rd_seeders = remote.seeders;
+    torrent.rd_status_raw.clone_from(&remote.status);
+    torrent.rd_status = Some(status_of(remote.status.as_deref()));
+}
+
+/// The rd-client status of a raw Real-Debrid status; unknown ones are errors.
+fn status_of(status: Option<&str>) -> TorrentStatus {
+    match status {
+        Some("magnet_conversion") => TorrentStatus::Processing,
+        Some("waiting_files_selection") => TorrentStatus::WaitingForFileSelection,
+        Some("queued" | "downloading" | "compressing") => TorrentStatus::Downloading,
+        Some("downloaded") => TorrentStatus::Finished,
+        Some("uploading") => TorrentStatus::Uploading,
+        _ => TorrentStatus::Error,
+    }
+}
+
 /// The real instant of a Real-Debrid timestamp written in server local time.
 fn server_time(text: Option<&str>, server_offset: SignedDuration) -> Option<Timestamp> {
     parse_timestamp(text?)?.checked_sub(server_offset).ok()
@@ -409,5 +502,30 @@ mod tests {
             user_url(&client(Some("api-1.real-debrid.com"))),
             "https://api-1.real-debrid.com/rest/1.0/user"
         );
+    }
+
+    #[test]
+    fn raw_statuses_map_to_torrent_statuses() {
+        let expected = [
+            ("magnet_error", TorrentStatus::Error),
+            ("magnet_conversion", TorrentStatus::Processing),
+            (
+                "waiting_files_selection",
+                TorrentStatus::WaitingForFileSelection,
+            ),
+            ("queued", TorrentStatus::Downloading),
+            ("downloading", TorrentStatus::Downloading),
+            ("downloaded", TorrentStatus::Finished),
+            ("error", TorrentStatus::Error),
+            ("virus", TorrentStatus::Error),
+            ("compressing", TorrentStatus::Downloading),
+            ("uploading", TorrentStatus::Uploading),
+            ("dead", TorrentStatus::Error),
+            ("something_new", TorrentStatus::Error),
+        ];
+        for (raw, status) in expected {
+            assert_eq!(status_of(Some(raw)), status, "{raw}");
+        }
+        assert_eq!(status_of(None), TorrentStatus::Error);
     }
 }
