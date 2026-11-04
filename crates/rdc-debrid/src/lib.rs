@@ -1,6 +1,7 @@
 //! Clients for the supported debrid services behind one [`DebridProvider`] trait,
 //! plus the HTTP and rate-limit plumbing they share.
 
+pub mod all_debrid;
 pub mod debrid_link;
 mod endpoint;
 pub mod error;
@@ -14,6 +15,7 @@ pub mod real_debrid;
 mod text_rate_limit;
 pub mod torbox;
 
+pub use all_debrid::AllDebrid;
 pub use debrid_link::DebridLink;
 pub use error::DebridError;
 pub use highway::{Highway, is_spool_id};
