@@ -1,8 +1,11 @@
 //! Engine ownership, settings publication and shared runtime state.
 
 use crate::{
-    DownloadFactory, EngineError, EngineEvent, EngineOptions, Profile, RateLimitStatus,
+    DownloadFactory, DownloadStats, EngineError, EngineEvent, EngineOptions, Profile,
+    RateLimitStatus,
     disk_space::{DiskSpaceConfig, DiskSpaceStatus},
+    registry::Registry,
+    tracker_list::TrackerList,
     update_check::UpdateChecker,
     watch_folder::WatchFolderConfig,
 };
@@ -23,6 +26,7 @@ use tokio::{
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 /// Torrent operations and background monitoring, sharing one runtime across cheap clones.
 #[derive(Clone)]
@@ -43,8 +47,11 @@ pub(crate) struct Inner {
     pub settings: RwLock<Arc<Settings>>,
     pub provider: RwLock<Arc<dyn DebridProvider>>,
     pub provider_lock: Mutex<()>,
+    pub reset_lock: Mutex<()>,
     pub coordinator: Arc<RateLimitCoordinator>,
     pub cancel: CancellationToken,
+    pub trackers: TrackerList,
+    pub registry: Registry,
     pub events: broadcast::Sender<EngineEvent>,
     pub ui_connected: AtomicBool,
     pub disk_status: RwLock<Option<DiskSpaceStatus>>,
@@ -78,8 +85,11 @@ impl Engine {
                 settings: RwLock::new(settings.clone()),
                 provider: RwLock::new(provider),
                 provider_lock: Mutex::new(()),
+                reset_lock: Mutex::new(()),
                 coordinator,
                 cancel: CancellationToken::new(),
+                trackers: TrackerList::new()?,
+                registry: Registry::default(),
                 events,
                 ui_connected: AtomicBool::new(false),
                 disk_status: RwLock::new(None),
@@ -96,7 +106,7 @@ impl Engine {
         engine.notify_settings(settings);
         Ok(engine)
     }
-    /// Cancels engine operations across all clones.
+    /// Stops background jobs, then waits for active transfers and extractions to stop.
     ///
     /// All clones observe shutdown; repeated or simultaneous calls are safe. The store
     /// remains open because the host application may still need its user/settings APIs.
@@ -108,6 +118,7 @@ impl Engine {
                 tracing::error!(%error, "engine background job stopped unexpectedly");
             }
         }
+        self.inner.registry.cancel_all().await;
     }
 
     /// Returns a coherent immutable settings snapshot without database I/O.
@@ -193,6 +204,21 @@ impl Engine {
                     .max(0.0)
             }),
         }
+    }
+
+    /// Returns live bytes and speed, extraction percentage, or zeroes for inactive rows.
+    pub fn download_stats(&self, download_id: Uuid) -> DownloadStats {
+        self.inner.registry.stats(download_id)
+    }
+
+    /// Sum of the current speeds of active host transfers in bytes per second.
+    pub fn active_download_speed_sum(&self) -> u64 {
+        self.inner.registry.speed_sum()
+    }
+
+    /// Actual bytes received by host transfers during this engine session.
+    pub fn session_downloaded_bytes(&self) -> u64 {
+        self.inner.registry.session_bytes()
     }
 
     /// Subscribes to the live internal downloader settings used by transfer constructors.

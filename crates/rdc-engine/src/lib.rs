@@ -1,9 +1,22 @@
-//! Public torrent engine contracts and independent monitoring utilities.
+//! The torrent lifecycle of rd-client: adding torrents to the debrid
+//! provider, selecting files, downloading and unpacking them on the host,
+//! completing, retrying and cleaning up, plus the background jobs that keep
+//! it running.
+//!
+//! [`Engine::start`] loads settings and prepares shared lifecycle state.
+//! Provider queue dispatch is shared by adds and polling; host transfer orchestration
+//! and startup repair are intentionally owned by the lifecycle runner.
 
 mod core;
 mod error;
+mod operations;
 mod options;
+mod registry;
+mod sync;
 mod types;
+
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 
 pub use core::Engine;
 pub use error::EngineError;
@@ -22,8 +35,7 @@ pub mod tracker_list;
 pub mod update_check;
 pub mod watch_folder;
 
-#[cfg(any(test, feature = "testing"))]
-pub mod testing;
-
 #[cfg(test)]
 mod core_tests;
+#[cfg(test)]
+mod test_download;

@@ -74,6 +74,27 @@ impl TorrentTemplate {
             lifetime: defaults.torrent_lifetime,
         }
     }
+
+    pub(crate) fn into_torrent(self) -> Torrent {
+        Torrent {
+            category: self.category,
+            download_action: self.download_action,
+            finished_action: self.finished_action,
+            finished_action_delay: self.finished_action_delay,
+            host_download_action: self.host_download_action,
+            download_min_size: self.download_min_size,
+            include_regex: self.include_regex,
+            exclude_regex: self.exclude_regex,
+            download_manual_files: self.download_manual_files,
+            download_client: self.download_client,
+            priority: self.priority,
+            download_retry_attempts: self.download_retry_attempts,
+            torrent_retry_attempts: self.torrent_retry_attempts,
+            delete_on_error: self.delete_on_error,
+            lifetime: self.lifetime,
+            ..Torrent::default()
+        }
+    }
 }
 
 impl From<&Torrent> for TorrentTemplate {
