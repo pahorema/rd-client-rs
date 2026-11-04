@@ -181,14 +181,6 @@ async fn read_stable(
             Err(error) if is_lock_conflict(&error) => return Ok(None),
             Err(error) => return Err(error),
         };
-        let locked = match FileExt::try_lock_exclusive(&file) {
-            Ok(locked) => locked,
-            Err(error) if is_lock_conflict(&error) => false,
-            Err(error) => return Err(error),
-        };
-        if !locked {
-            return Ok(None);
-        }
         let fingerprint = Fingerprint::new(&file.metadata()?);
         Ok::<_, io::Error>(Some((file, fingerprint)))
     })
@@ -197,6 +189,8 @@ async fn read_stable(
     let Some((mut file, initial)) = opened else {
         return Ok(None);
     };
+    // Observe before locking: Windows enforces the lock, which would stall a writer
+    // that ignores locks and make its unfinished file look stable.
     tokio::select! {
         biased;
         () = cancel.cancelled() => return Ok(None),
@@ -206,6 +200,14 @@ async fn read_stable(
     tokio::task::spawn_blocking(move || {
         let current = Fingerprint::new(&std::fs::metadata(&owned_path)?);
         if current != initial || Fingerprint::new(&file.metadata()?) != initial {
+            return Ok(None);
+        }
+        let locked = match FileExt::try_lock_exclusive(&file) {
+            Ok(locked) => locked,
+            Err(error) if is_lock_conflict(&error) => false,
+            Err(error) => return Err(error),
+        };
+        if !locked {
             return Ok(None);
         }
         let mut bytes = Vec::new();
@@ -278,9 +280,10 @@ async fn move_replacing(source: &Path, directory: &Path) -> Result<(), WatchFold
 /// Scans one directory, importing stable files and moving each attempted import.
 ///
 /// Only regular top-level files with `.torrent` or `.magnet` extensions are considered,
-/// case-insensitively. Symlinks and subdirectories are not followed. An exclusive
-/// advisory lock and an unchanged 100 ms metadata observation defer active writers;
-/// writers that ignore locks and pause longer than that window cannot be detected.
+/// case-insensitively. Symlinks and subdirectories are not followed. An unchanged
+/// 100 ms metadata observation precedes the exclusive lock so Windows writers can
+/// finish during observation. Writers that pause longer than that window cannot
+/// be detected reliably.
 /// The importer supplies application defaults and returns `Ok(())` for duplicate adds.
 /// Cancellation drops an in-flight importer and leaves its source in place. Once an
 /// importer returns, its move is completed before cancellation is observed again.
