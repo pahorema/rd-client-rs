@@ -10,7 +10,7 @@ use rdc_debrid::{DebridError, ProviderHttp, RateLimitCoordinator, RetryPolicy, T
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// Retries transport failures twice without waiting.
+/// Retries transient errors twice without waiting.
 const FAST_RETRY: RetryPolicy = RetryPolicy {
     max_retries: 2,
     base_delay: Duration::ZERO,
@@ -18,7 +18,9 @@ const FAST_RETRY: RetryPolicy = RetryPolicy {
 
 async fn client() -> (MockServer, TorBox) {
     let server = MockServer::start().await;
-    let client = TorBox::new(&common::config(), common::http()).with_base_url(&server.uri());
+    let client = TorBox::new(&common::config(), common::http())
+        .with_base_url(&server.uri())
+        .with_error_retry_policy(FAST_RETRY);
     (server, client)
 }
 
@@ -127,6 +129,43 @@ async fn missing_items_are_not_found() {
     let error = client.user().await.expect_err("missing");
 
     assert!(error.is_not_found(), "{error:?}");
+}
+
+#[tokio::test]
+async fn transient_errors_are_retried() {
+    let (server, client) = client().await;
+    Mock::given(path("/user/me"))
+        .respond_with(json(
+            r#"{"success":false,"error":"DATABASE_ERROR","detail":"busy"}"#,
+        ))
+        .up_to_n_times(2)
+        .mount(&server)
+        .await;
+    mount_user(
+        &server,
+        json(r#"{"success":true,"data":{"email":"me@example.com"}}"#),
+    )
+    .await;
+
+    let user = client.user().await.expect("recovered");
+
+    assert_eq!(user.username.as_deref(), Some("me@example.com"));
+    assert_eq!(server.received_requests().await.expect("recorded").len(), 3);
+}
+
+#[tokio::test]
+async fn unsuccessful_envelopes_without_code_give_up_after_the_retries() {
+    let (server, client) = client().await;
+    mount_user(
+        &server,
+        json(r#"{"success":false,"detail":"Something broke."}"#),
+    )
+    .await;
+
+    let error = client.user().await.expect_err("still failing");
+
+    assert_eq!(error.to_string(), "UNKNOWN_ERROR: Something broke.");
+    assert_eq!(server.received_requests().await.expect("recorded").len(), 3);
 }
 
 #[tokio::test]

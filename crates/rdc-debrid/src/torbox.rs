@@ -13,17 +13,35 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 
 use crate::error::DebridError;
-use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp};
+use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp, RetryPolicy};
 use crate::provider::{DebridUser, ProviderConfig};
 
 /// Address of the TorBox API.
 pub const DEFAULT_BASE_URL: &str = "https://api.torbox.app/v1/api/";
+
+/// Error codes TorBox reports for failures that usually go away on retry.
+const TRANSIENT_ERRORS: [&str; 4] = [
+    "DATABASE_ERROR",
+    "DOWNLOAD_SERVER_ERROR",
+    "UNKNOWN_ERROR",
+    "NO_SERVERS_AVAILABLE_ERROR",
+];
 
 /// Error codes meaning the account has to wait before adding more work.
 const RATE_LIMIT_ERRORS: [&str; 2] = ["RATE_LIMIT", "ACTIVE_LIMIT"];
 
 /// Longest part of an unexpected response body quoted in error messages.
 const BODY_EXCERPT_CHARS: usize = 300;
+
+/// Longest wait between retries of a transient TorBox error.
+const MAX_ERROR_RETRY_DELAY: Duration = Duration::from_secs(30);
+
+/// How transient TorBox error codes are retried by default: five retries
+/// waiting 1, 2, 4, 8 and 16 seconds.
+const DEFAULT_ERROR_RETRY: RetryPolicy = RetryPolicy {
+    max_retries: 5,
+    base_delay: Duration::from_secs(1),
+};
 
 /// Client for a TorBox account.
 #[derive(Clone)]
@@ -35,6 +53,7 @@ pub struct TorBox {
     api_key: String,
     timeout: Duration,
     prefer_zipped_downloads: bool,
+    error_retry: RetryPolicy,
 }
 
 impl fmt::Debug for TorBox {
@@ -43,6 +62,7 @@ impl fmt::Debug for TorBox {
             .field("base_url", &self.base_url)
             .field("timeout", &self.timeout)
             .field("prefer_zipped_downloads", &self.prefer_zipped_downloads)
+            .field("error_retry", &self.error_retry)
             .finish_non_exhaustive()
     }
 }
@@ -57,6 +77,7 @@ impl TorBox {
             api_key: config.api_key.clone(),
             timeout: config.timeout,
             prefer_zipped_downloads: config.prefer_zipped_downloads,
+            error_retry: DEFAULT_ERROR_RETRY,
         }
         .with_base_url(DEFAULT_BASE_URL)
     }
@@ -73,6 +94,14 @@ impl TorBox {
             .ok()
             .and_then(|url| url.host_str().map(str::to_owned))
             .unwrap_or_default();
+        self
+    }
+
+    /// Replaces how transient TorBox error codes are retried; each retry
+    /// waits twice as long as the previous one, at most 30 seconds.
+    #[must_use]
+    pub fn with_error_retry_policy(mut self, policy: RetryPolicy) -> Self {
+        self.error_retry = policy;
         self
     }
 
@@ -123,14 +152,31 @@ impl TorBox {
             .timeout(self.timeout))
     }
 
-    /// Sends the request made by `build` and returns the envelope's `data`.
+    /// Sends the request made by `build` and returns the envelope's `data`,
+    /// retrying transient TorBox errors with a freshly built request.
     async fn call<T: DeserializeOwned>(
         &self,
         build: impl Fn() -> Result<RequestBuilder, DebridError> + Send + Sync,
     ) -> Result<Option<T>, DebridError> {
-        self.call_once(build()?)
-            .await
-            .map_err(|failure| self.to_error(failure))
+        let mut attempt = 0;
+        loop {
+            match self.call_once(build()?).await {
+                Ok(data) => return Ok(data),
+                Err(Failure::Api(error))
+                    if error.is_transient() && attempt < self.error_retry.max_retries =>
+                {
+                    let delay = self
+                        .error_retry
+                        .base_delay
+                        .saturating_mul(2u32.saturating_pow(attempt))
+                        .min(MAX_ERROR_RETRY_DELAY);
+                    tracing::debug!(code = %error.code, attempt, ?delay, "retrying TorBox request");
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+                Err(failure) => return Err(self.to_error(failure)),
+            }
+        }
     }
 
     async fn call_once<T: DeserializeOwned>(
@@ -214,6 +260,12 @@ impl ApiError {
             code: code.to_owned(),
             message,
         }
+    }
+
+    fn is_transient(&self) -> bool {
+        TRANSIENT_ERRORS
+            .iter()
+            .any(|code| self.code.eq_ignore_ascii_case(code))
     }
 
     fn is_rate_limit(&self) -> bool {
