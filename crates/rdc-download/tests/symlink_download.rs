@@ -109,7 +109,7 @@ async fn missing_mount_is_reported() {
 }
 
 #[tokio::test]
-async fn missing_files_are_not_found() {
+async fn subdirectories_are_not_searched_without_trailing_star() {
     let layout = Layout::new();
     layout.mount_file("torrents/Movie/Movie.mkv");
     let (result, destination) = link(layout.request("Movie/Movie.mkv")).await;
@@ -186,4 +186,15 @@ async fn file_appearing_during_the_search_is_found() {
     creator.await.expect("creator");
     assert_eq!(result, source.display().to_string());
     assert!(engine.progress().borrow().bytes_done > 0);
+}
+
+#[tokio::test]
+async fn trailing_star_searches_the_mount_subdirectories() {
+    let layout = Layout::new();
+    let source = layout.mount_file("torrents/Movie/Movie.mkv");
+    let mut request = layout.request("Movie/Movie.mkv");
+    request.mount_path = format!("{}/*", layout.mount.display());
+    let (result, destination) = link(request).await;
+    assert_eq!(result, Ok(source.display().to_string()));
+    assert_links_to(&destination, &source);
 }

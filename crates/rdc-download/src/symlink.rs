@@ -23,7 +23,8 @@ const DEFAULT_RETRY_STEP: Duration = Duration::from_secs(1);
 /// What to link and where.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymlinkRequest {
-    /// Directory the provider drive is mounted at.
+    /// Directory the provider drive is mounted at. A trailing `*` also searches its direct
+    /// subdirectories.
     pub mount_path: String,
     /// Path of the file relative to the mount (usually `<torrent>/<sub dirs>/<file>`).
     pub relative_path: String,
@@ -85,7 +86,7 @@ impl SymlinkDownload {
     }
 
     async fn link(&self) -> Result<PathBuf, SymlinkError> {
-        let mount = parse_mount_path(&self.request.mount_path);
+        let (mount, search_subdirectories) = parse_mount_path(&self.request.mount_path);
         if !is_dir(&mount).await {
             return Err(SymlinkError::MountMissing {
                 mount: mount.display().to_string(),
@@ -118,7 +119,9 @@ impl SymlinkDownload {
         self.progress.send_replace(Progress::default());
 
         let candidates = candidate_directories(&mount, &search_path, &file_name, &stem);
-        let found = self.search(&mount, &candidates, &file_name).await;
+        let found = self
+            .search(&mount, search_subdirectories, &candidates, &file_name)
+            .await;
         let Some(source) = found else {
             log_mount_contents(&mount).await;
             return Err(SymlinkError::NotFound);
@@ -151,6 +154,7 @@ impl SymlinkDownload {
     async fn search(
         &self,
         mount: &Path,
+        search_subdirectories: bool,
         candidates: &[PathBuf],
         file_name: &str,
     ) -> Option<PathBuf> {
@@ -166,6 +170,13 @@ impl SymlinkDownload {
             );
             if let Some(file) = find_file(mount, candidates, file_name).await {
                 return Some(file);
+            }
+            if search_subdirectories {
+                for subdirectory in subdirectories(mount).await {
+                    if let Some(file) = find_file(&subdirectory, candidates, file_name).await {
+                        return Some(file);
+                    }
+                }
             }
             let delay = self
                 .retry_step
@@ -224,9 +235,13 @@ impl DownloadEngine for SymlinkDownload {
     async fn resume(&self) {}
 }
 
-/// The mount directory of the configured mount path, without trailing separators.
-fn parse_mount_path(configured: &str) -> PathBuf {
-    PathBuf::from(configured.trim_end_matches(['\\', '/']))
+/// Splits the configured mount path into the directory and whether to search one level of
+/// subdirectories (trailing `*`).
+fn parse_mount_path(configured: &str) -> (PathBuf, bool) {
+    let trimmed = configured.trim_end_matches(['\\', '/']);
+    let search_subdirectories = trimmed.ends_with('*');
+    let mount = trimmed.trim_end_matches('*').trim_end_matches(['\\', '/']);
+    (PathBuf::from(mount), search_subdirectories)
 }
 
 /// Directories (relative to a search root, or absolute) that may contain the file, in order:
@@ -273,6 +288,22 @@ async fn find_file(root: &Path, candidates: &[PathBuf], file_name: &str) -> Opti
         }
     }
     None
+}
+
+/// Direct subdirectories of `directory`, sorted.
+async fn subdirectories(directory: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(mut entries) = tokio::fs::read_dir(directory).await else {
+        return found;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if is_dir(&path).await {
+            found.push(path);
+        }
+    }
+    found.sort();
+    found
 }
 
 async fn log_mount_contents(mount: &Path) {
@@ -327,8 +358,26 @@ mod tests {
 
     #[test]
     fn mount_path_drops_trailing_separators() {
-        assert_eq!(parse_mount_path("/mnt/rd/"), PathBuf::from("/mnt/rd"));
-        assert_eq!(parse_mount_path("/mnt/rd"), PathBuf::from("/mnt/rd"));
+        assert_eq!(
+            parse_mount_path("/mnt/rd/"),
+            (PathBuf::from("/mnt/rd"), false)
+        );
+        assert_eq!(
+            parse_mount_path("/mnt/rd"),
+            (PathBuf::from("/mnt/rd"), false)
+        );
+    }
+
+    #[test]
+    fn trailing_star_enables_subdirectory_search() {
+        assert_eq!(
+            parse_mount_path("/mnt/rd/*"),
+            (PathBuf::from("/mnt/rd"), true)
+        );
+        assert_eq!(
+            parse_mount_path("/mnt/rd*/"),
+            (PathBuf::from("/mnt/rd"), true)
+        );
     }
 
     #[test]
