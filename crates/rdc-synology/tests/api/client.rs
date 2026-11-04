@@ -142,6 +142,24 @@ async fn login_requiring_two_step_verification_is_reported() {
 }
 
 #[tokio::test]
+async fn login_rejects_blank_credentials_without_a_request() {
+    let server = MockServer::start().await;
+    mount_info(&server).await;
+    Mock::given(method("POST"))
+        .respond_with(ok(&json!({"sid": SID})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let client = Client::connect(&server.uri()).await.unwrap();
+
+    for (account, password) in [("", "pass"), ("user", " ")] {
+        let error = client.login(account, password).await.unwrap_err();
+
+        assert!(matches!(error, Error::InvalidArgument(_)), "{error:?}");
+    }
+}
+
+#[tokio::test]
 async fn logout_sends_the_session_id() {
     let server = MockServer::start().await;
     let session = logged_in(&server).await;

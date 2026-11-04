@@ -106,10 +106,16 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// [`Error::Api`] when DSM
+    /// [`Error::InvalidArgument`] for a blank account or password, [`Error::Api`] when DSM
     /// refuses the login (for example code 400 for wrong credentials or 403 when 2-step
     /// verification is required), or any other [`Error`] of the round trip.
     pub async fn login(&self, account: &str, password: &str) -> Result<Session, Error> {
+        if account.trim().is_empty() {
+            return Err(Error::InvalidArgument("the Synology account is required"));
+        }
+        if password.trim().is_empty() {
+            return Err(Error::InvalidArgument("the Synology password is required"));
+        }
         let api = &self.inner.apis.auth;
         let params = [
             ("account", account),
