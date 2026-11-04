@@ -5,8 +5,8 @@ mod common;
 use std::time::Duration;
 
 use jiff::Timestamp;
-use rdc_debrid::{DebridError, Premiumize, RemoteTorrent};
-use rdc_model::{DownloadInfo, Provider, Torrent, TorrentStatus};
+use rdc_debrid::{DebridError, DebridProvider, Premiumize, RemoteTorrent};
+use rdc_model::{Download, DownloadInfo, Provider, Torrent, TorrentStatus};
 use wiremock::matchers::{body_string, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -555,4 +555,51 @@ async fn download_infos_wait_for_a_provider_id_and_need_the_transfer() {
         .await
         .expect_err("missing");
     assert!(error.is_not_found(), "{error:?}");
+}
+
+#[tokio::test]
+async fn provider_selects_once_and_passes_links_through() {
+    let (server, client) = client().await;
+    let provider: &dyn DebridProvider = &client;
+    let torrent = sent_torrent("t1");
+
+    assert_eq!(provider.kind(), Provider::Premiumize);
+    assert_eq!(
+        provider.select_files(&torrent).await.expect("select"),
+        Some(1)
+    );
+    assert_eq!(
+        provider
+            .unrestrict(&torrent, "https://dl/movie.mkv")
+            .await
+            .expect("link"),
+        "https://dl/movie.mkv"
+    );
+    assert_eq!(
+        provider.available_files("abc").await.expect("files"),
+        Vec::new()
+    );
+    provider
+        .delete(&Torrent::default())
+        .await
+        .expect("nothing to delete");
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn provider_file_name_comes_from_the_download() {
+    let (_server, client) = client().await;
+    let provider: &dyn DebridProvider = &client;
+    let named = Download {
+        file_name: Some("movie.mkv".to_owned()),
+        ..Download::default()
+    };
+
+    assert_eq!(provider.file_name(&named).await.expect("name"), "movie.mkv");
 }

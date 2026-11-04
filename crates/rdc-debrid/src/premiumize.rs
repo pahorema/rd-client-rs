@@ -12,8 +12,9 @@ use std::fmt;
 use std::pin::Pin;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use jiff::Timestamp;
-use rdc_model::{DownloadInfo, FileFilter, Provider, Torrent, TorrentStatus};
+use rdc_model::{Download, DownloadInfo, FileFilter, Provider, Torrent, TorrentStatus};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
@@ -21,7 +22,7 @@ use serde::de::{DeserializeOwned, IgnoredAny};
 
 use crate::error::DebridError;
 use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp};
-use crate::provider::{DebridUser, ProviderConfig, RemoteTorrent};
+use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
 
 /// Address of the Premiumize API.
 pub const DEFAULT_BASE_URL: &str = "https://www.premiumize.me/api/";
@@ -510,4 +511,75 @@ struct Item {
 
 fn non_blank(text: Option<&str>) -> Option<&str> {
     text.filter(|text| !text.trim().is_empty())
+}
+
+#[async_trait]
+impl DebridProvider for Premiumize {
+    fn kind(&self) -> Provider {
+        Provider::Premiumize
+    }
+
+    async fn list_torrents(&self) -> Result<Vec<RemoteTorrent>, DebridError> {
+        self.list_torrents().await
+    }
+
+    async fn user(&self) -> Result<DebridUser, DebridError> {
+        self.user().await
+    }
+
+    async fn add_magnet(&self, magnet: &str) -> Result<String, DebridError> {
+        self.add_magnet(magnet).await
+    }
+
+    async fn add_torrent_file(&self, bytes: &[u8]) -> Result<String, DebridError> {
+        self.add_torrent_file(bytes).await
+    }
+
+    /// Premiumize has no per-file availability lookup.
+    async fn available_files(&self, _hash: &str) -> Result<Vec<AvailableFile>, DebridError> {
+        Ok(Vec::new())
+    }
+
+    /// Premiumize downloads whole torrents; the file list is only known once
+    /// the transfer finished, so selection always succeeds.
+    async fn select_files(&self, _torrent: &Torrent) -> Result<Option<usize>, DebridError> {
+        Ok(Some(1))
+    }
+
+    async fn delete(&self, torrent: &Torrent) -> Result<(), DebridError> {
+        match torrent.rd_id.as_deref() {
+            Some(id) => self.delete_transfer(id).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Folder links are already direct download links.
+    async fn unrestrict(&self, _torrent: &Torrent, link: &str) -> Result<String, DebridError> {
+        Ok(link.to_owned())
+    }
+
+    async fn refresh(
+        &self,
+        torrent: &mut Torrent,
+        remote: Option<&RemoteTorrent>,
+    ) -> Result<(), DebridError> {
+        self.refresh(torrent, remote).await
+    }
+
+    async fn download_infos(
+        &self,
+        torrent: &Torrent,
+    ) -> Result<Option<Vec<DownloadInfo>>, DebridError> {
+        self.download_infos(torrent).await
+    }
+
+    async fn file_name(&self, download: &Download) -> Result<String, DebridError> {
+        download
+            .file_name
+            .clone()
+            .or_else(|| rdc_model::paths::file_name(download))
+            .ok_or_else(|| {
+                DebridError::InvalidResponse("Premiumize reported no name for this file".to_owned())
+            })
+    }
 }
