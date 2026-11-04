@@ -3,6 +3,7 @@
 //! completing, retrying and cleaning up, plus the background jobs that keep
 //! it running.
 
+pub mod completion;
 pub mod copy_added;
 pub mod disk_space;
 pub mod tracker_list;
