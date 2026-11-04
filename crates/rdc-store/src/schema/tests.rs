@@ -419,3 +419,144 @@ async fn sources_move_to_the_payload_table() {
         .map(|(table, action)| (table.to_owned(), action.to_owned()));
     assert_eq!(references, expected);
 }
+
+async fn layout(
+    connection: &mut SqliteConnection,
+) -> Vec<(String, String, String, Option<String>)> {
+    sqlx::query_as("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name")
+        .fetch_all(connection)
+        .await
+        .expect("schema")
+}
+
+#[tokio::test]
+async fn new_databases_get_the_layout_left_by_every_migration() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let created = dir.path().join("created.db");
+    let replayed = dir.path().join("replayed.db");
+    reopen(&created).await.expect("create");
+    let mut replayed = connect(&replayed).await;
+    upgrade(&mut replayed, MIGRATIONS).await.expect("replay");
+
+    let mut created = connect(&created).await;
+    assert_eq!(layout(&mut created).await, layout(&mut replayed).await);
+    assert_eq!(history(&mut created).await, history(&mut replayed).await);
+}
+
+#[tokio::test]
+async fn new_databases_have_the_expected_tables_and_indexes() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("rd-client.db");
+    reopen(&path).await.expect("create");
+    let names: Vec<(String, String)> = sqlx::query_as(
+        "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite%' ORDER BY type, name",
+    )
+    .fetch_all(&mut connect(&path).await)
+    .await
+    .expect("names");
+    let expected = [
+        ("index", "EmailIndex"),
+        ("index", "IX_AspNetRoleClaims_RoleId"),
+        ("index", "IX_AspNetUserClaims_UserId"),
+        ("index", "IX_AspNetUserLogins_UserId"),
+        ("index", "IX_AspNetUserRoles_RoleId"),
+        ("index", "IX_Downloads_TorrentId_Path"),
+        ("index", "RoleNameIndex"),
+        ("index", "UserNameIndex"),
+        ("table", "AspNetRoleClaims"),
+        ("table", "AspNetRoles"),
+        ("table", "AspNetUserClaims"),
+        ("table", "AspNetUserLogins"),
+        ("table", "AspNetUserRoles"),
+        ("table", "AspNetUserTokens"),
+        ("table", "AspNetUsers"),
+        ("table", "Downloads"),
+        ("table", "Settings"),
+        ("table", "TorrentPayloads"),
+        ("table", "Torrents"),
+        ("table", "__EFMigrationsHistory"),
+    ]
+    .map(|(kind, name)| (kind.to_owned(), name.to_owned()));
+    assert_eq!(names, expected);
+}
+
+#[tokio::test]
+async fn replaying_every_migration_keeps_existing_data() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("rd-client.db");
+    let mut connection = connect(&path).await;
+    migrate_through(&mut connection, "20210110025102_Initial").await;
+    execute(
+        &mut connection,
+        r#"INSERT INTO "Torrents" ("TorrentId", "Hash", "Category", "Added", "Completed",
+               "AutoDownload", "AutoUnpack", "AutoDelete", "RdId", "RdName", "RdSize", "RdHost",
+               "RdSplit", "RdProgress", "RdStatus", "RdStatusRaw", "RdAdded", "RdEnded", "RdSpeed",
+               "RdSeeders", "RdFiles")
+           VALUES ('0A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10', 'abc', 'tv', '2021-01-10 02:51:02+00:00',
+               '2021-01-11 02:51:02+00:00', 1, 0, 1, 'RD1', 'Name', 10, 'host', 2, 100, 4,
+               'downloaded', '2021-01-10 02:51:02+00:00', '2021-01-10 03:51:02+00:00', 5, 6, '[]');
+           INSERT INTO "Downloads" ("DownloadId", "TorrentId", "Link", "Added", "Completed", "Error")
+           VALUES ('1A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10', '0A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10',
+               'https://host/file', '2021-01-10 02:51:03+00:00', '2021-01-10 04:51:03+00:00', 'boom');
+           INSERT INTO "Settings" ("SettingId", "Value", "Type") VALUES ('LogLevel', '0', 'Enum');
+           INSERT INTO "AspNetUsers" ("Id", "UserName", "NormalizedUserName", "EmailConfirmed",
+               "PasswordHash", "SecurityStamp", "PhoneNumberConfirmed", "TwoFactorEnabled",
+               "LockoutEnabled", "AccessFailedCount")
+           VALUES ('c0ffee00-0000-0000-0000-000000000000', 'admin', 'ADMIN', 0, 'HASH', 'STAMP', 0,
+               0, 1, 0);"#,
+    )
+    .await;
+
+    reopen(&path).await.expect("upgrade");
+
+    let torrent: (String, String, String, String, String, i64, i64, String) = sqlx::query_as(
+        r#"SELECT "Hash", "Category", "Completed", "RdId", "RdName", "RdSize", "RdStatus", "RdFiles"
+           FROM "Torrents""#,
+    )
+    .fetch_one(&mut connection)
+    .await
+    .expect("torrent survives");
+    assert_eq!(
+        torrent,
+        (
+            "abc".to_owned(),
+            "tv".to_owned(),
+            "2021-01-11 02:51:02+00:00".to_owned(),
+            "RD1".to_owned(),
+            "Name".to_owned(),
+            10,
+            4,
+            "[]".to_owned()
+        )
+    );
+    let download: (String, String, String, String) =
+        sqlx::query_as(r#"SELECT "TorrentId", "Path", "Link", "Error" FROM "Downloads""#)
+            .fetch_one(&mut connection)
+            .await
+            .expect("download survives");
+    assert_eq!(
+        download,
+        (
+            "0A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10".to_owned(),
+            String::new(),
+            "https://host/file".to_owned(),
+            "boom".to_owned()
+        )
+    );
+    assert_eq!(
+        settings(&mut connection).await,
+        [("General:LogLevel".to_owned(), Some("1".to_owned()))]
+    );
+    let user: (String, String) =
+        sqlx::query_as(r#"SELECT "NormalizedUserName", "PasswordHash" FROM "AspNetUsers""#)
+            .fetch_one(&mut connection)
+            .await
+            .expect("user survives");
+    assert_eq!(user, ("ADMIN".to_owned(), "HASH".to_owned()));
+    let payloads: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "TorrentPayloads""#)
+        .fetch_one(&mut connection)
+        .await
+        .expect("payload count");
+    assert_eq!(payloads, 0);
+    assert_eq!(history(&mut connection).await.len(), MIGRATIONS.len());
+}
