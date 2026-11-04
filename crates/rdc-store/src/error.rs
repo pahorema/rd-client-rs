@@ -56,5 +56,14 @@ pub enum StoreError {
     DownloadNotFound(Uuid),
 }
 
+impl StoreError {
+    pub(crate) fn invalid(column: &'static str, value: &(impl ToString + ?Sized)) -> Self {
+        Self::InvalidValue {
+            column,
+            value: value.to_string(),
+        }
+    }
+}
+
 /// Result of a store operation.
 pub type Result<T, E = StoreError> = std::result::Result<T, E>;

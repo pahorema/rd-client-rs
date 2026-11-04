@@ -1,8 +1,14 @@
 //! SQLite persistence for rd-client: torrents, downloads, settings and the
 //! user account, stored in the existing database layout.
 
+mod codec;
+mod downloads;
 mod error;
+mod row;
 mod schema;
+#[cfg(test)]
+mod test_support;
+mod torrents;
 
 use std::{path::Path, time::Duration};
 
@@ -12,6 +18,7 @@ use sqlx::{
 };
 
 pub use error::{Result, StoreError};
+pub use torrents::Torrents;
 
 /// How long a connection waits for a lock held by another connection.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -60,6 +67,11 @@ impl Store {
         schema::prepare(&options).await?;
         let pool = SqlitePoolOptions::new().connect_with(options).await?;
         Ok(Self { pool })
+    }
+
+    /// Torrent operations.
+    pub fn torrents(&self) -> Torrents<'_> {
+        Torrents::new(&self.pool)
     }
 
     /// Waits for running operations and closes every connection.
