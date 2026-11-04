@@ -1219,6 +1219,7 @@ dependencies = [
  "fastrand",
  "if-addrs",
  "rdc-aria2",
+ "rdc-synology",
  "reqwest",
  "serde_json",
  "tempfile",

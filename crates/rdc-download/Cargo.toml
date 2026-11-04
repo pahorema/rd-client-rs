@@ -13,6 +13,7 @@ async-trait.workspace = true
 fastrand.workspace = true
 if-addrs.workspace = true
 rdc-aria2.workspace = true
+rdc-synology.workspace = true
 reqwest = { workspace = true, features = ["rustls"] }
 thiserror = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "sync", "time"] }

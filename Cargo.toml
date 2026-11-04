@@ -20,6 +20,7 @@ if-addrs = "0.15"
 jiff = { version = "0.2", default-features = false }
 rdc-aria2 = { path = "crates/rdc-aria2" }
 rdc-model = { path = "crates/rdc-model" }
+rdc-synology = { path = "crates/rdc-synology" }
 reqwest = { version = "0.13", default-features = false }
 serde = { version = "1", default-features = false }
 serde_json = "1"
