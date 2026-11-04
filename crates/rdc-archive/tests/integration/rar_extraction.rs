@@ -3,7 +3,10 @@ use std::fs;
 use rdc_archive::{Error, extract, list_entries};
 use tokio_util::sync::CancellationToken;
 
-use crate::common::{copy_fixtures, files_below};
+use crate::common::{big_text, copy_fixtures, copy_fixtures_as, files_below};
+
+const MULTI: [&str; 3] = ["multi.part1.rar", "multi.part2.rar", "multi.part3.rar"];
+const LEGACY: [&str; 3] = ["legacy.rar", "legacy.r00", "legacy.r01"];
 
 fn extract_all(archive: &std::path::Path, destination: &std::path::Path) -> Result<(), Error> {
     extract(archive, destination, |_| {}, &CancellationToken::new())
@@ -65,6 +68,85 @@ fn rar_listing_returns_files_with_sizes() {
             ("top.txt".to_owned(), 4)
         ]
     );
+}
+
+#[test]
+fn new_style_multi_volume_set_is_extracted_from_its_first_volume() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = copy_fixtures(dir.path(), &MULTI);
+    let destination = dir.path().join("out");
+    let mut seen = Vec::new();
+
+    extract(
+        &archive,
+        &destination,
+        |percent| seen.push(percent),
+        &CancellationToken::new(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(destination.join("big.txt")).unwrap(),
+        big_text()
+    );
+    assert_eq!(seen, [0, 100]);
+}
+
+#[test]
+fn old_style_multi_volume_set_is_extracted() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = copy_fixtures(dir.path(), &LEGACY);
+    let destination = dir.path().join("out");
+
+    extract_all(&archive, &destination).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(destination.join("big.txt")).unwrap(),
+        big_text()
+    );
+}
+
+#[test]
+fn numerically_named_volumes_are_followed() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = copy_fixtures_as(
+        dir.path(),
+        &[
+            ("legacy.rar", "set.001"),
+            ("legacy.r00", "set.002"),
+            ("legacy.r01", "set.003"),
+        ],
+    );
+    let destination = dir.path().join("out");
+
+    extract_all(&archive, &destination).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(destination.join("big.txt")).unwrap(),
+        big_text()
+    );
+}
+
+#[test]
+fn multi_volume_listing_reports_a_split_file_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = copy_fixtures(dir.path(), &MULTI);
+
+    let entries = list_entries(&archive).unwrap();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "big.txt");
+    assert_eq!(entries[0].size, 16_500);
+}
+
+#[test]
+fn a_missing_volume_fails_the_extraction() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = copy_fixtures(dir.path(), &MULTI[..2]);
+
+    let error = extract_all(&archive, &dir.path().join("out")).unwrap_err();
+
+    assert!(matches!(error, Error::Read { .. }), "{error}");
 }
 
 #[test]

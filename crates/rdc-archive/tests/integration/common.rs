@@ -46,6 +46,15 @@ pub(crate) fn copy_fixtures_as(dir: &Path, names: &[(&str, &str)]) -> PathBuf {
     dir.join(names[0].1)
 }
 
+/// Content of `big.txt` in the RAR fixtures: 1500 numbered lines.
+pub(crate) fn big_text() -> String {
+    use std::fmt::Write as _;
+    (0..1500).fold(String::new(), |mut text, line| {
+        writeln!(text, "line {line:05}").expect("writing to a String cannot fail");
+        text
+    })
+}
+
 /// Every file below `dir`, as `/`-separated paths relative to `dir`, sorted.
 pub(crate) fn files_below(dir: &Path) -> Vec<String> {
     fn walk(root: &Path, dir: &Path, files: &mut Vec<String>) {
