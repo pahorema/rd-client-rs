@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use rdc_aria2::{Client, Error};
+use rdc_aria2::{Client, DownloadState, Error};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -276,4 +276,138 @@ fn debug_output_redacts_the_secret() {
     let debug = format!("{client:?}");
 
     assert!(!debug.contains("hunter2"), "{debug}");
+}
+
+fn status_json(gid: &str, status: &str, uri: &str) -> Value {
+    json!({
+        "gid": gid,
+        "status": status,
+        "totalLength": "1048576",
+        "completedLength": "524288",
+        "downloadSpeed": "2048",
+        "uploadSpeed": "0",
+        "connections": "1",
+        "dir": "/downloads/Some.Release",
+        "errorCode": "0",
+        "files": [{
+            "index": "1",
+            "path": "/downloads/Some.Release/file.mkv",
+            "length": "1048576",
+            "completedLength": "524288",
+            "selected": "true",
+            "uris": [{"status": "used", "uri": uri}]
+        }]
+    })
+}
+
+#[tokio::test]
+async fn tell_status_parses_the_download() {
+    let server = MockServer::start().await;
+    expect_call(
+        &server,
+        "aria2.tellStatus",
+        json!(["token:secret", "2089b05ecca3d829"]),
+        result(&status_json(
+            "2089b05ecca3d829",
+            "active",
+            "https://host/file.mkv",
+        )),
+    )
+    .await;
+
+    let status = client(&server, "secret")
+        .tell_status("2089b05ecca3d829")
+        .await
+        .unwrap();
+
+    assert_eq!(status.gid, "2089b05ecca3d829");
+    assert_eq!(status.status, DownloadState::Active);
+    assert_eq!(status.total_length, 1_048_576);
+    assert_eq!(status.completed_length, 524_288);
+    assert_eq!(status.download_speed, 2048);
+    assert_eq!(status.error_code.as_deref(), Some("0"));
+    assert_eq!(status.error_message, None);
+    assert_eq!(status.dir, "/downloads/Some.Release");
+    assert_eq!(status.files.len(), 1);
+    assert_eq!(status.files[0].path, "/downloads/Some.Release/file.mkv");
+    assert_eq!(status.files[0].uris[0].uri, "https://host/file.mkv");
+    assert_eq!(status.files[0].uris[0].status, "used");
+    assert!(status.has_uri("https://host/file.mkv"));
+    assert!(!status.has_uri("https://host/other.mkv"));
+}
+
+#[tokio::test]
+async fn tell_status_reports_error_details() {
+    let server = MockServer::start().await;
+    expect_call(
+        &server,
+        "aria2.tellStatus",
+        json!(["token:secret", "abc"]),
+        result(&json!({
+            "gid": "abc", "status": "error", "totalLength": "0", "completedLength": "0",
+            "downloadSpeed": "0", "errorCode": "3", "errorMessage": "Resource not found", "dir": "/d", "files": []
+        })),
+    )
+    .await;
+
+    let status = client(&server, "secret").tell_status("abc").await.unwrap();
+
+    assert_eq!(status.status, DownloadState::Error);
+    assert_eq!(status.error_code.as_deref(), Some("3"));
+    assert_eq!(status.error_message.as_deref(), Some("Resource not found"));
+}
+
+#[tokio::test]
+async fn tell_active_sends_only_the_token() {
+    let server = MockServer::start().await;
+    expect_call(
+        &server,
+        "aria2.tellActive",
+        json!(["token:secret"]),
+        result(&json!([status_json("a", "active", "https://host/a")])),
+    )
+    .await;
+
+    let active = client(&server, "secret").tell_active().await.unwrap();
+
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].gid, "a");
+}
+
+#[tokio::test]
+async fn tell_waiting_sends_offset_and_count() {
+    let server = MockServer::start().await;
+    expect_call(
+        &server,
+        "aria2.tellWaiting",
+        json!(["token:secret", 0, 1000]),
+        result(&json!([status_json("w", "paused", "https://host/w")])),
+    )
+    .await;
+
+    let waiting = client(&server, "secret")
+        .tell_waiting(0, 1000)
+        .await
+        .unwrap();
+
+    assert_eq!(waiting[0].status, DownloadState::Paused);
+}
+
+#[tokio::test]
+async fn tell_stopped_sends_offset_and_count() {
+    let server = MockServer::start().await;
+    expect_call(
+        &server,
+        "aria2.tellStopped",
+        json!(["token:secret", -1, 10]),
+        result(&json!([status_json("s", "complete", "https://host/s")])),
+    )
+    .await;
+
+    let stopped = client(&server, "secret")
+        .tell_stopped(-1, 10)
+        .await
+        .unwrap();
+
+    assert_eq!(stopped[0].status, DownloadState::Complete);
 }

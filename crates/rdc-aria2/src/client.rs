@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::Error;
+use crate::{DownloadStatus, Error};
 
 /// Request timeout used when [`ClientBuilder::timeout`] is not called.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -190,6 +190,52 @@ impl Client {
     /// Any [`Error`] of the RPC round trip.
     pub async fn version(&self) -> Result<Version, Error> {
         self.call("aria2.getVersion", Vec::new()).await
+    }
+
+    /// `aria2.tellStatus`: the status of the download `gid`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Rpc`] when aria2 does not know the GID, or any other [`Error`] of the round trip.
+    pub async fn tell_status(&self, gid: &str) -> Result<DownloadStatus, Error> {
+        self.call("aria2.tellStatus", vec![Value::from(gid)]).await
+    }
+
+    /// `aria2.tellActive`: every active download.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Error`] of the RPC round trip.
+    pub async fn tell_active(&self) -> Result<Vec<DownloadStatus>, Error> {
+        self.call("aria2.tellActive", Vec::new()).await
+    }
+
+    /// `aria2.tellWaiting`: at most `num` waiting or paused downloads starting at `offset`
+    /// (a negative offset counts from the end of the queue).
+    ///
+    /// # Errors
+    ///
+    /// Any [`Error`] of the RPC round trip.
+    pub async fn tell_waiting(&self, offset: i64, num: u32) -> Result<Vec<DownloadStatus>, Error> {
+        self.call(
+            "aria2.tellWaiting",
+            vec![Value::from(offset), Value::from(num)],
+        )
+        .await
+    }
+
+    /// `aria2.tellStopped`: at most `num` stopped downloads starting at `offset`
+    /// (a negative offset counts from the most recently stopped one).
+    ///
+    /// # Errors
+    ///
+    /// Any [`Error`] of the RPC round trip.
+    pub async fn tell_stopped(&self, offset: i64, num: u32) -> Result<Vec<DownloadStatus>, Error> {
+        self.call(
+            "aria2.tellStopped",
+            vec![Value::from(offset), Value::from(num)],
+        )
+        .await
     }
 
     /// Calls `method` with the secret token (when configured) followed by `args`.
