@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use jiff::{SignedDuration, Timestamp};
 use rdc_debrid::{
-    DebridError, DebridLink, ProviderConfig, ProviderHttp, RateLimitCoordinator, RetryPolicy,
+    DebridError, DebridLink, ProviderConfig, ProviderHttp, RateLimitCoordinator, RemoteTorrent,
+    RetryPolicy,
 };
-use rdc_model::Torrent;
+use rdc_model::{DownloadInfo, Provider, Torrent, TorrentStatus};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_string_contains, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -373,4 +374,205 @@ async fn deleting_a_torrent_without_provider_id_sends_nothing() {
             .expect("recorded")
             .is_empty()
     );
+}
+
+fn info_by_id(id: &str, items: &Value) -> Mock {
+    Mock::given(method("GET"))
+        .and(path("/seedbox/list"))
+        .and(query_param("ids", id))
+        .respond_with(ok(items))
+}
+
+fn with_id(id: &str) -> Torrent {
+    Torrent {
+        rd_id: Some(id.to_owned()),
+        ..Torrent::default()
+    }
+}
+
+#[tokio::test]
+async fn refresh_without_a_listing_entry_looks_the_torrent_up() {
+    let server = MockServer::start().await;
+    info_by_id("t1", &json!([seedbox_torrent("t1")]))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut torrent = with_id("t1");
+
+    client(&server)
+        .refresh(&mut torrent, None)
+        .await
+        .expect("refreshed");
+
+    assert_eq!(torrent.client_kind, Some(Provider::DebridLink));
+    assert_eq!(torrent.rd_name.as_deref(), Some("Some.Release"));
+    assert_eq!(torrent.rd_size, Some(8162));
+    assert_eq!(torrent.rd_host.as_deref(), Some("srv-7"));
+    assert_eq!(torrent.rd_split, Some(0));
+    assert_eq!(torrent.rd_progress, Some(42));
+    assert_eq!(
+        torrent.rd_added,
+        Some(Timestamp::from_second(1_700_000_000).expect("valid"))
+    );
+    assert_eq!(torrent.rd_ended, None);
+    assert_eq!(torrent.rd_speed, Some(2048));
+    assert_eq!(torrent.rd_seeders, Some(12));
+    assert_eq!(torrent.rd_status_raw.as_deref(), Some("4"));
+    assert_eq!(torrent.rd_status, Some(TorrentStatus::Downloading));
+    let files = torrent.files();
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0].path, "Some.Release/a.mkv");
+}
+
+#[tokio::test]
+async fn refresh_uses_the_listing_entry_without_a_request() {
+    let server = MockServer::start().await;
+    let remote = RemoteTorrent {
+        id: "t1".to_owned(),
+        filename: "Listed.Name".to_owned(),
+        status: Some("100".to_owned()),
+        ..RemoteTorrent::default()
+    };
+    let mut torrent = with_id("t1");
+
+    client(&server)
+        .refresh(&mut torrent, Some(&remote))
+        .await
+        .expect("refreshed");
+
+    assert_eq!(torrent.rd_name.as_deref(), Some("Listed.Name"));
+    assert_eq!(torrent.rd_status, Some(TorrentStatus::Finished));
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn refresh_maps_every_seedbox_status() {
+    let server = MockServer::start().await;
+    let cases = [
+        ("0", TorrentStatus::Error),
+        ("1", TorrentStatus::Processing),
+        ("2", TorrentStatus::Processing),
+        ("3", TorrentStatus::Processing),
+        ("4", TorrentStatus::Downloading),
+        ("5", TorrentStatus::Finished),
+        ("6", TorrentStatus::Finished),
+        ("100", TorrentStatus::Finished),
+        ("42", TorrentStatus::Error),
+    ];
+    for (raw, expected) in cases {
+        let remote = RemoteTorrent {
+            status: Some(raw.to_owned()),
+            ..RemoteTorrent::default()
+        };
+        let mut torrent = with_id("t1");
+
+        client(&server)
+            .refresh(&mut torrent, Some(&remote))
+            .await
+            .expect("refreshed");
+
+        assert_eq!(torrent.rd_status, Some(expected), "status {raw}");
+        assert_eq!(torrent.rd_status_raw.as_deref(), Some(raw));
+    }
+}
+
+#[tokio::test]
+async fn refresh_marks_a_torrent_missing_from_the_seedbox_as_deleted() {
+    let server = MockServer::start().await;
+    info_by_id("gone", &json!([])).mount(&server).await;
+    let mut torrent = Torrent {
+        rd_status: Some(TorrentStatus::Downloading),
+        ..with_id("gone")
+    };
+
+    client(&server)
+        .refresh(&mut torrent, None)
+        .await
+        .expect("refreshed");
+
+    assert_eq!(torrent.rd_status_raw.as_deref(), Some("deleted"));
+    assert_eq!(torrent.rd_status, Some(TorrentStatus::Downloading));
+}
+
+#[tokio::test]
+async fn refresh_without_provider_id_leaves_the_torrent_untouched() {
+    let server = MockServer::start().await;
+    let mut torrent = Torrent::default();
+
+    client(&server)
+        .refresh(&mut torrent, None)
+        .await
+        .expect("refreshed");
+
+    assert_eq!(torrent, Torrent::default());
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn download_infos_list_linked_files_that_pass_the_filter() {
+    let server = MockServer::start().await;
+    let mut listed = seedbox_torrent("t1");
+    listed["files"]
+        .as_array_mut()
+        .expect("files")
+        .push(json!({ "name": "Some.Release/c.mkv", "size": 9000, "downloadUrl": null }));
+    info_by_id("t1", &json!([listed])).mount(&server).await;
+    let torrent = Torrent {
+        exclude_regex: Some(r"\.nfo$".to_owned()),
+        ..with_id("t1")
+    };
+
+    let infos = client(&server)
+        .download_infos(&torrent)
+        .await
+        .expect("infos")
+        .expect("ready");
+
+    assert_eq!(
+        infos,
+        [DownloadInfo {
+            file_name: Some("a.mkv".to_owned()),
+            restricted_link: "https://dl.example/a.mkv".to_owned(),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn download_infos_are_not_ready_while_the_torrent_has_no_files() {
+    let server = MockServer::start().await;
+    let mut listed = seedbox_torrent("t1");
+    listed.as_object_mut().expect("object").remove("files");
+    info_by_id("t1", &json!([listed])).mount(&server).await;
+
+    let infos = client(&server)
+        .download_infos(&with_id("t1"))
+        .await
+        .expect("infos");
+
+    assert_eq!(infos, None);
+}
+
+#[tokio::test]
+async fn download_infos_of_a_missing_torrent_are_not_found() {
+    let server = MockServer::start().await;
+    info_by_id("gone", &json!([])).mount(&server).await;
+
+    let error = client(&server)
+        .download_infos(&with_id("gone"))
+        .await
+        .expect_err("missing");
+
+    assert!(error.is_not_found(), "{error:?}");
 }

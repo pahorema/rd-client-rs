@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use jiff::{SignedDuration, Timestamp};
-use rdc_model::{RemoteFile, Torrent};
+use rdc_model::{DownloadInfo, Provider, RemoteFile, Torrent, TorrentStatus};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
@@ -13,6 +13,9 @@ use serde::de::{DeserializeOwned, IgnoredAny};
 use crate::error::DebridError;
 use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp};
 use crate::provider::{DebridUser, ProviderConfig, RemoteTorrent};
+
+/// `rd_status_raw` of a torrent the provider no longer knows.
+const DELETED: &str = "deleted";
 
 /// Base URL of the public Debrid-Link API.
 pub const DEFAULT_BASE_URL: &str = "https://debrid-link.fr/api/v2/";
@@ -144,6 +147,78 @@ impl DebridLink {
         Ok(())
     }
 
+    /// Copies the provider state into the torrent's `rd_*` fields.
+    ///
+    /// Uses `remote` when given and otherwise looks the torrent up; a torrent
+    /// the seedbox no longer lists gets `rd_status_raw = "deleted"`.
+    pub async fn refresh(
+        &self,
+        torrent: &mut Torrent,
+        remote: Option<&RemoteTorrent>,
+    ) -> Result<(), DebridError> {
+        let Some(id) = non_blank(torrent.rd_id.as_deref()) else {
+            return Ok(());
+        };
+        let fetched;
+        let remote = match remote {
+            Some(remote) => remote,
+            None => match self.info(id).await {
+                Ok(info) => {
+                    fetched = info;
+                    &fetched
+                }
+                Err(DebridError::NotFound(_)) => {
+                    torrent.rd_status_raw = Some(DELETED.to_owned());
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            },
+        };
+        apply(torrent, remote);
+        Ok(())
+    }
+
+    /// Lists the downloadable files with their direct links; `None` while the
+    /// seedbox reports no files yet.
+    pub async fn download_infos(
+        &self,
+        torrent: &Torrent,
+    ) -> Result<Option<Vec<DownloadInfo>>, DebridError> {
+        let Some(id) = non_blank(torrent.rd_id.as_deref()) else {
+            return Ok(None);
+        };
+        let remote = self.info(id).await?;
+        if remote.links.is_none() {
+            return Ok(None);
+        }
+        let filter = torrent.file_filter()?;
+        let mut infos = Vec::new();
+        for file in remote.files.unwrap_or_default() {
+            let Some(link) = file.download_link else {
+                continue;
+            };
+            if filter.is_downloadable(&file.path, file.bytes)? {
+                infos.push(DownloadInfo {
+                    file_name: Some(file_name_of(&file.path).to_owned()),
+                    restricted_link: link,
+                });
+            }
+        }
+        Ok(Some(infos))
+    }
+
+    async fn info(&self, id: &str) -> Result<RemoteTorrent, DebridError> {
+        let request = self
+            .request(Method::GET, "seedbox/list")?
+            .query(&[("ids", id)]);
+        let items: Vec<SeedboxTorrent> = self.send(request).await?.unwrap_or_default();
+        items
+            .into_iter()
+            .next()
+            .map(SeedboxTorrent::into_remote)
+            .ok_or_else(|| DebridError::NotFound(format!("Debrid-Link torrent {id} was not found")))
+    }
+
     fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, DebridError> {
         if self.api_key.trim().is_empty() {
             return Err(DebridError::NotConfigured(
@@ -243,6 +318,48 @@ fn rate_limit_from_text(error: DebridError) -> DebridError {
 
 fn non_blank(value: Option<&str>) -> Option<&str> {
     value.filter(|value| !value.trim().is_empty())
+}
+
+/// Last component of a provider file path.
+fn file_name_of(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+fn apply(torrent: &mut Torrent, remote: &RemoteTorrent) {
+    if !remote.filename.trim().is_empty() {
+        torrent.rd_name = Some(remote.filename.clone());
+    }
+    if let Some(original) = non_blank(remote.original_filename.as_deref()) {
+        torrent.rd_name = Some(original.to_owned());
+    }
+    if remote.bytes > 0 {
+        torrent.rd_size = Some(remote.bytes);
+    } else if remote.original_bytes > 0 {
+        torrent.rd_size = Some(remote.original_bytes);
+    }
+    if let Some(files) = &remote.files {
+        torrent.set_files(files);
+    }
+    torrent.client_kind = Some(Provider::DebridLink);
+    torrent.rd_host.clone_from(&remote.host);
+    torrent.rd_split = Some(remote.split);
+    torrent.rd_progress = Some(remote.progress);
+    torrent.rd_added = remote.added;
+    torrent.rd_ended = remote.ended;
+    torrent.rd_speed = remote.speed;
+    torrent.rd_seeders = remote.seeders;
+    torrent.rd_status_raw.clone_from(&remote.status);
+    torrent.rd_status = Some(status_of(remote.status.as_deref()));
+}
+
+/// Maps the stringified numeric seedbox status.
+fn status_of(raw: Option<&str>) -> TorrentStatus {
+    match raw {
+        Some("1" | "2" | "3") => TorrentStatus::Processing,
+        Some("4") => TorrentStatus::Downloading,
+        Some("5" | "6" | "100") => TorrentStatus::Finished,
+        _ => TorrentStatus::Error,
+    }
 }
 
 /// `account/infos` value.
