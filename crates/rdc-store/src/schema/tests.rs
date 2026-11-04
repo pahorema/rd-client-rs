@@ -267,13 +267,6 @@ async fn missing_hashes_and_paths_become_empty_and_provider_fields_nullable() {
                "RdSplit" = NULL, "RdStatus" = NULL"#,
     )
     .await;
-    let index: Option<String> = sqlx::query_scalar(
-        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'IX_Downloads_TorrentId'",
-    )
-    .fetch_optional(&mut connection)
-    .await
-    .expect("index lookup");
-    assert!(index.is_some(), "torrent index recreated");
 }
 
 #[tokio::test]
@@ -310,4 +303,119 @@ async fn stored_enum_numbers_follow_the_renumbered_values() {
         .map(|(key, value)| (key.to_owned(), Some(value.to_owned())));
         assert_eq!(settings(&mut connection).await, expected, "client {client}");
     }
+}
+
+#[tokio::test]
+async fn duplicate_downloads_keep_the_oldest_row_and_become_unique() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("rd-client.db");
+    let mut connection = connect(&path).await;
+    migrate_through(&mut connection, "20251224022148_AddDownloadTypeToTorrent").await;
+    execute(
+        &mut connection,
+        r#"INSERT INTO "Torrents" ("TorrentId", "Hash", "Added", "DeleteOnError", "DownloadAction",
+               "DownloadClient", "DownloadMinSize", "DownloadRetryAttempts", "FinishedAction",
+               "FinishedActionDelay", "HostDownloadAction", "IsFile", "Lifetime", "RetryCount",
+               "TorrentRetryAttempts", "Type")
+           VALUES ('0A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10', 'abc', '2026-04-23 03:17:19+00:00',
+               0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+           INSERT INTO "Downloads" ("DownloadId", "TorrentId", "Path", "Added", "RetryCount") VALUES
+               ('00000000-0000-0000-0000-00000000000C', '0A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10',
+                   'https://host/a', '2026-04-23 03:17:19+00:00', 1),
+               ('00000000-0000-0000-0000-00000000000B', '0A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10',
+                   'https://host/a', '2026-04-23 03:17:20+00:00', 2),
+               ('00000000-0000-0000-0000-00000000000A', '0A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10',
+                   'https://host/b', '2026-04-23 03:17:21+00:00', 3);"#,
+    )
+    .await;
+
+    reopen(&path).await.expect("upgrade");
+
+    let kept: Vec<(String, i64)> =
+        sqlx::query_as(r#"SELECT "Path", "RetryCount" FROM "Downloads" ORDER BY "Path""#)
+            .fetch_all(&mut connection)
+            .await
+            .expect("downloads");
+    assert_eq!(
+        kept,
+        [
+            ("https://host/a".to_owned(), 1),
+            ("https://host/b".to_owned(), 3)
+        ]
+    );
+    let indexes: Vec<(String, i64)> = sqlx::query_as(
+        r#"SELECT name, "unique" FROM pragma_index_list('Downloads') WHERE origin = 'c'"#,
+    )
+    .fetch_all(&mut connection)
+    .await
+    .expect("indexes");
+    assert_eq!(indexes, [("IX_Downloads_TorrentId_Path".to_owned(), 1)]);
+}
+
+#[tokio::test]
+async fn sources_move_to_the_payload_table() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("rd-client.db");
+    let mut connection = connect(&path).await;
+    migrate_through(
+        &mut connection,
+        "20260423031719_Downloads_Add_TorrentIdPath_Unique",
+    )
+    .await;
+    for (id, source) in [
+        (
+            "0A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10",
+            Some("magnet:?xt=urn:btih:legacy-hash"),
+        ),
+        ("1A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10", Some("")),
+        ("2A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10", None),
+    ] {
+        sqlx::query(
+            r#"INSERT INTO "Torrents" ("TorrentId", "Hash", "DownloadAction", "FinishedAction",
+                   "FinishedActionDelay", "HostDownloadAction", "DownloadMinSize", "DownloadClient",
+                   "Added", "Type", "FileOrMagnet", "IsFile", "RetryCount", "DownloadRetryAttempts",
+                   "TorrentRetryAttempts", "DeleteOnError", "Lifetime", "RdName")
+               VALUES (?, 'legacy-hash', 0, 0, 0, 0, 0, 0, '2026-05-28 16:30:00+00:00', 0, ?, 0,
+                   0, 0, 0, 0, 0, 'Legacy')"#,
+        )
+        .bind(id)
+        .bind(source)
+        .execute(&mut connection)
+        .await
+        .expect("insert torrent");
+    }
+
+    reopen(&path).await.expect("upgrade");
+
+    let payloads: Vec<(String, String)> =
+        sqlx::query_as(r#"SELECT "TorrentId", "Content" FROM "TorrentPayloads" ORDER BY 1"#)
+            .fetch_all(&mut connection)
+            .await
+            .expect("payloads");
+    let expected = [
+        (
+            "0A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10",
+            "magnet:?xt=urn:btih:legacy-hash",
+        ),
+        ("1A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10", ""),
+    ]
+    .map(|(id, content)| (id.to_owned(), content.to_owned()));
+    assert_eq!(payloads, expected);
+    let torrent_columns = columns(&mut connection, "Torrents").await;
+    assert!(
+        !torrent_columns
+            .iter()
+            .any(|column| column == "FileOrMagnet")
+    );
+    assert_eq!(torrent_columns.len(), 39);
+    let references: Vec<(String, String)> = sqlx::query_as(
+        r#"SELECT "table", on_delete FROM pragma_foreign_key_list('Downloads')
+           UNION ALL SELECT "table", on_delete FROM pragma_foreign_key_list('TorrentPayloads')"#,
+    )
+    .fetch_all(&mut connection)
+    .await
+    .expect("foreign keys");
+    let expected = [("Torrents", "RESTRICT"), ("Torrents", "NO ACTION")]
+        .map(|(table, action)| (table.to_owned(), action.to_owned()));
+    assert_eq!(references, expected);
 }

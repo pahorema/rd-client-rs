@@ -53,4 +53,6 @@ pub(crate) const MIGRATIONS: &[Migration] = migrations![
     "20250706204358_AddFinishedActionDelay",
     "20251007021253_Settings_Migrate_InternalDownloader2",
     "20251224022148_AddDownloadTypeToTorrent",
+    "20260423031719_Downloads_Add_TorrentIdPath_Unique",
+    "20260528163000_MoveSourcePayloadToPayloadTable",
 ];
