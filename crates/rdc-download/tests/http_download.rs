@@ -786,3 +786,40 @@ async fn pause_keeps_the_connection_when_ranges_are_unsupported() {
     assert_downloaded(&run, &data);
     assert_eq!(server.transfer_requests().len(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn requests_go_through_the_configured_proxy() {
+    let data = test_data(4096);
+    let proxy = TestServer::file(Arc::clone(&data), FileOptions::default()).await;
+    let proxied = InternalConfig {
+        proxy: Some(proxy.url("")),
+        ..config()
+    };
+    let (run, outcome) = download("http://download.invalid/file.bin", proxied).await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+    assert!(
+        proxy
+            .requests()
+            .iter()
+            .all(|request| request.target.starts_with("http://download.invalid/"))
+    );
+}
+
+#[tokio::test]
+async fn invalid_proxy_fails_the_download() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let bad_proxy = InternalConfig {
+        proxy: Some("::not a proxy::".to_owned()),
+        ..config()
+    };
+    let (_tx, rx) = watch::channel(bad_proxy);
+    let download = HttpDownload::new("http://127.0.0.1:9/file", dir.path().join("file"), rx);
+    download.start().await.expect("start");
+    let outcome = download.completion().wait().await;
+    let message = outcome.expect_err("invalid proxy");
+    assert!(
+        message.starts_with("Invalid proxy server ::not a proxy::"),
+        "{message}"
+    );
+}

@@ -31,6 +31,11 @@ pub(crate) enum TransferError {
     RangeIgnored,
     #[error("The download was interrupted: {0}")]
     Interrupted(String),
+    #[error("Invalid proxy server {proxy}: {}", describe(.error))]
+    Proxy {
+        proxy: String,
+        error: reqwest::Error,
+    },
     #[error("Unable to write {}: {source}", .path.display())]
     Io {
         path: PathBuf,
@@ -59,6 +64,7 @@ impl TransferError {
             Self::ReadTimeout(_) | Self::HeaderTimeout(_) => true,
             Self::Incomplete { .. }
             | Self::RangeIgnored
+            | Self::Proxy { .. }
             | Self::Io { .. }
             | Self::Interrupted(_)
             | Self::Cancelled => false,

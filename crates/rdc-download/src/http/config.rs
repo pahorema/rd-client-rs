@@ -22,7 +22,7 @@ const MAX_BUFFER_SIZE: usize = 64 * 1024 * 1024;
 /// Integer fields take the raw values of the settings they come from; out-of-range values
 /// are normalised as documented on each field. Speed and connection limits apply to running
 /// downloads immediately; the chunk count, timeout and buffer size apply to downloads and
-/// connections started afterwards.
+/// connections started afterwards; the proxy applies to new connections.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InternalConfig {
     /// Speed limit of one download in bytes per second, shared by its connections; `0` means
@@ -37,6 +37,8 @@ pub struct InternalConfig {
     pub timeout_ms: i32,
     /// Read/write buffer of each connection in bytes; `0` or less means 64 KiB.
     pub buffer_size: i32,
+    /// Proxy URL every request goes through; blank means a direct connection.
+    pub proxy: Option<String>,
 }
 
 impl InternalConfig {
@@ -79,6 +81,13 @@ impl InternalConfig {
             .filter(|size| *size > 0)
             .unwrap_or(DEFAULT_BUFFER_SIZE)
             .clamp(MIN_BUFFER_SIZE, MAX_BUFFER_SIZE)
+    }
+
+    pub(crate) fn proxy_url(&self) -> Option<&str> {
+        self.proxy
+            .as_deref()
+            .map(str::trim)
+            .filter(|proxy| !proxy.is_empty())
     }
 }
 
@@ -157,5 +166,23 @@ mod tests {
         assert_eq!(buffer(10), 4 * 1024);
         assert_eq!(buffer(4 * 1024 * 1024), 4 * 1024 * 1024);
         assert_eq!(buffer(i32::MAX), 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn blank_proxy_means_direct_connection() {
+        let proxy = |value: Option<&str>| {
+            InternalConfig {
+                proxy: value.map(str::to_owned),
+                ..InternalConfig::new()
+            }
+            .proxy_url()
+            .map(str::to_owned)
+        };
+        assert_eq!(proxy(None), None);
+        assert_eq!(proxy(Some("  ")), None);
+        assert_eq!(
+            proxy(Some(" http://proxy:8080 ")),
+            Some("http://proxy:8080".to_owned())
+        );
     }
 }

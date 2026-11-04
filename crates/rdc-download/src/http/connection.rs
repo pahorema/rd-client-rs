@@ -42,7 +42,13 @@ pub(crate) struct Context {
     pub(crate) paused: watch::Receiver<bool>,
     pub(crate) throttle: Throttle,
     received: AtomicU64,
-    client: Mutex<Option<Client>>,
+    client: Mutex<Option<CachedClient>>,
+}
+
+#[derive(Debug)]
+struct CachedClient {
+    proxy: Option<String>,
+    client: Client,
 }
 
 impl Context {
@@ -141,26 +147,40 @@ impl Context {
         Ok(response)
     }
 
-    /// Returns the download's client, building it on first use.
+    /// Returns a client for the current proxy setting, building it when it changed.
     fn client(&self) -> Result<Client, TransferError> {
+        let proxy = self.config.borrow().proxy_url().map(str::to_owned);
         let mut cached = self.client.lock().expect("client cache lock poisoned");
-        if let Some(client) = cached.as_ref() {
-            return Ok(client.clone());
+        if let Some(current) = cached.as_ref()
+            && current.proxy == proxy
+        {
+            return Ok(current.client.clone());
         }
-        let client = build_client()?;
-        *cached = Some(client.clone());
+        let client = build_client(proxy.as_deref())?;
+        *cached = Some(CachedClient {
+            proxy,
+            client: client.clone(),
+        });
         Ok(client)
     }
 }
 
-fn build_client() -> Result<Client, TransferError> {
-    Client::builder()
+fn build_client(proxy: Option<&str>) -> Result<Client, TransferError> {
+    let mut builder = Client::builder()
         .user_agent(USER_AGENT)
         .http1_only()
-        .redirect(redirect::Policy::limited(MAX_REDIRECTS))
-        .no_proxy()
-        .build()
-        .map_err(TransferError::Http)
+        .redirect(redirect::Policy::limited(MAX_REDIRECTS));
+    builder = match proxy {
+        Some(proxy) => {
+            let proxy_error = |error| TransferError::Proxy {
+                proxy: proxy.to_owned(),
+                error,
+            };
+            builder.proxy(reqwest::Proxy::all(proxy).map_err(proxy_error)?)
+        }
+        None => builder.no_proxy(),
+    };
+    builder.build().map_err(TransferError::Http)
 }
 
 #[cfg(test)]
@@ -186,6 +206,17 @@ mod tests {
         assert_eq!(
             USER_AGENT,
             format!("rd-client/{}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn invalid_proxy_is_reported() {
+        let error = build_client(Some("::not a url::")).expect_err("invalid proxy");
+        assert!(
+            error
+                .to_string()
+                .starts_with("Invalid proxy server ::not a url::"),
+            "{error}"
         );
     }
 }
