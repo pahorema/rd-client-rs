@@ -21,6 +21,7 @@ fancy-regex = "0.20"
 fastrand = "2"
 fs4 = "0.13"
 getrandom = "0.4"
+hmac = "0.13"
 if-addrs = "0.15"
 jiff = { version = "0.2", default-features = false }
 mime_guess = "2"
