@@ -47,6 +47,17 @@ impl Run {
     fn partial(&self) -> PathBuf {
         partial_of(&self.target)
     }
+
+    async fn wait_for_bytes(&self, at_least: u64) {
+        let mut progress = self.download.progress();
+        tokio::time::timeout(
+            WAIT_LIMIT,
+            progress.wait_for(|progress| progress.bytes_done >= at_least),
+        )
+        .await
+        .expect("progress in time")
+        .expect("progress channel open");
+    }
 }
 
 fn partial_of(target: &Path) -> PathBuf {
@@ -71,6 +82,14 @@ fn assert_downloaded(run: &Run, data: &[u8]) {
         data.len()
     );
     assert!(!run.partial().exists(), "partial file removed");
+}
+
+fn slow_options() -> FileOptions {
+    FileOptions {
+        write_size: 2048,
+        write_delay: Duration::from_millis(20),
+        ..FileOptions::default()
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -165,4 +184,24 @@ async fn cancel_before_start_completes_and_start_then_fails() {
     );
     let error = download.start().await.expect_err("cancelled");
     assert_eq!(error.message(), CANCELLED_MESSAGE);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancel_stops_the_download_and_removes_the_partial_file() {
+    let data = test_data(128 * 1024);
+    let server = TestServer::file(Arc::clone(&data), slow_options()).await;
+    let (_tx, rx) = watch::channel(config());
+    let run = Run::start(&server.url("/file.bin"), rx).await;
+    run.wait_for_bytes(1).await;
+    tokio::time::timeout(WAIT_LIMIT, run.download.cancel())
+        .await
+        .expect("cancel returns");
+    assert_eq!(
+        run.download.completion().outcome(),
+        Some(Err(CANCELLED_MESSAGE.to_owned()))
+    );
+    assert!(!run.partial().exists());
+    assert!(!run.target.exists());
+    run.download.cancel().await;
+    assert_eq!(run.finish().await, Err(CANCELLED_MESSAGE.to_owned()));
 }

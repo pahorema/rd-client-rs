@@ -12,6 +12,7 @@ mod transfer;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use reqwest::Url;
@@ -25,6 +26,9 @@ use crate::engine::{
     CANCELLED_MESSAGE, Completion, CompletionSender, DownloadEngine, Outcome, Progress, StartError,
     completion_channel,
 };
+
+/// How often progress is published while a download runs.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Downloads one HTTP(S) link to a local file with the internal engine.
 ///
@@ -121,7 +125,14 @@ impl DownloadEngine for HttpDownload {
 async fn run(shared: Arc<Shared>, url: Url) {
     let context = Arc::new(Context::new(shared.config.clone(), shared.cancel.clone()));
     let partial = transfer::partial_path(&shared.file_path);
-    let outcome: Outcome = match download(&context, &url, &shared.file_path, &partial).await {
+    let download = download(
+        &context,
+        &url,
+        &shared.file_path,
+        &partial,
+        &shared.progress,
+    );
+    let outcome: Outcome = match download.await {
         Ok(total) => {
             shared.progress.send_replace(Progress {
                 bytes_done: total,
@@ -147,15 +158,27 @@ async fn run(shared: Arc<Shared>, url: Url) {
     shared.completion.complete(outcome);
 }
 
-/// Fetches the file into `partial` and moves it to `target`; returns its size.
+/// Fetches the file into `partial` while publishing progress and moves it to `target`;
+/// returns its size.
 async fn download(
     context: &Arc<Context>,
     url: &Url,
     target: &Path,
     partial: &Path,
+    progress: &watch::Sender<Progress>,
 ) -> Result<u64, TransferError> {
     transfer::remove_file_if_exists(partial).await?;
-    let size = transfer::fetch_file(context, url, partial).await?;
+    let fetch = transfer::fetch_file(context, url, partial);
+    tokio::pin!(fetch);
+    let mut ticker = tokio::time::interval(PROGRESS_INTERVAL);
+    let size = loop {
+        tokio::select! {
+            result = &mut fetch => break result?,
+            _ = ticker.tick() => {
+                progress.send_modify(|progress| progress.bytes_done = context.received());
+            }
+        }
+    };
     if context.cancel.is_cancelled() {
         return Err(TransferError::Cancelled);
     }
