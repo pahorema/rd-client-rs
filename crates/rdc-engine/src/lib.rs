@@ -8,3 +8,4 @@ pub mod copy_added;
 pub mod disk_space;
 pub mod tracker_list;
 pub mod update_check;
+pub mod watch_folder;
