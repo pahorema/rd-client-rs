@@ -18,7 +18,10 @@ mod client;
 mod codes;
 mod error;
 mod session;
+mod task;
+mod wire;
 
 pub use client::{Client, DEFAULT_TIMEOUT};
 pub use error::{ApiError, Error, ErrorDetail, SESSION_ERROR_CODES};
 pub use session::Session;
+pub use task::TaskStatus;
