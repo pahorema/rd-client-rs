@@ -4,6 +4,7 @@
 
 mod download;
 mod enums;
+mod filter;
 mod remote_file;
 mod torrent;
 
@@ -13,5 +14,6 @@ pub use enums::{
     TorrentDownloadAction, TorrentFinishedAction, TorrentHostDownloadAction, TorrentStatus,
     UnknownValueError,
 };
+pub use filter::FileFilter;
 pub use remote_file::RemoteFile;
 pub use torrent::Torrent;
