@@ -1,0 +1,10 @@
+# Package managers
+bun.lock
+
+# Generated
+/build/
+/.svelte-kit/
+/node_modules/
+
+# Static assets
+/static/
