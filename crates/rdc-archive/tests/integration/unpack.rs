@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use rdc_archive::{Error, UnpackRequest, unpack};
 use tokio_util::sync::CancellationToken;
 
-use crate::common::{copy_fixtures, files_below, write_zip};
+use crate::common::{big_text, copy_fixtures, files_below, fixtures, write_zip};
 
 const MULTI: [&str; 3] = ["multi.part1.rar", "multi.part2.rar", "multi.part3.rar"];
 
@@ -129,6 +129,54 @@ async fn a_failed_extraction_keeps_the_archive() {
 
     assert!(matches!(error, Error::Read { .. }), "{error}");
     assert!(archive.exists());
+}
+
+#[tokio::test]
+async fn an_archive_wrapping_an_old_style_set_is_unpacked_through_the_set() {
+    let downloads = Downloads::new();
+    let archive = downloads.torrent.join("wrapper.zip");
+    let volumes: Vec<(&str, Vec<u8>)> = ["legacy.rar", "legacy.r00", "legacy.r01"]
+        .into_iter()
+        .map(|name| (name, fs::read(fixtures().join(name)).unwrap()))
+        .collect();
+    let entries: Vec<(&str, &[u8])> = volumes
+        .iter()
+        .map(|(name, content)| (*name, content.as_slice()))
+        .collect();
+    write_zip(&archive, &entries);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+
+    unpack(
+        downloads.request(&archive),
+        move |percent| record.lock().unwrap().push(percent),
+        CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(files_below(&downloads.destination), ["Show/big.txt"]);
+    assert_eq!(
+        fs::read_to_string(downloads.torrent.join("big.txt")).unwrap(),
+        big_text()
+    );
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.last(), Some(&100));
+    assert!(seen.windows(2).all(|pair| pair[0] < pair[1]), "{seen:?}");
+}
+
+#[tokio::test]
+async fn a_wrapper_without_a_top_level_set_keeps_its_extracted_content() {
+    let downloads = Downloads::new();
+    let archive = downloads.torrent.join("wrapper.zip");
+    write_zip(&archive, &[("sub/inner.r00", b"volume")]);
+
+    run(downloads.request(&archive)).await.unwrap();
+
+    let files = files_below(&downloads.torrent);
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].ends_with("/sub/inner.r00"), "{files:?}");
+    assert!(!archive.exists());
 }
 
 #[tokio::test]

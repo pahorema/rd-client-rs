@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
+use uuid::Uuid;
 
 use crate::path::join_name;
 use crate::{Error, extract, list_entries};
@@ -19,6 +20,10 @@ const DELETE_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(2),
     Duration::from_secs(3),
 ];
+
+/// Extension of the second volume of an old-style RAR set; an archive whose entries contain
+/// it wraps such a set.
+const WRAPPED_SET_MARKER: &str = ".r00";
 
 /// What to unpack and where.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,7 +44,12 @@ pub struct UnpackRequest {
 /// 2. When some entry already sits below a folder named like the torrent (`<name>/…` or
 ///    `<name>\…`), the archive is extracted into `destination`; otherwise into
 ///    `destination/<name>`.
-/// 3. The archive is extracted, then deleted.
+/// 3. When an entry name contains `.r00`, the archive wraps an old-style RAR set: it is
+///    extracted into a fresh temporary folder inside the extraction folder and deleted, then
+///    each wrapped set (found through its `.r00` volume at the top of that folder) is
+///    extracted from its `.rar` volume, and the temporary folder is removed. Without any
+///    top-level `.r00` volume the temporary folder is kept, so its content is not lost.
+/// 4. Otherwise the archive is extracted and deleted.
 ///
 /// `on_progress` receives an increasing percentage of the whole procedure, ending with 100 on
 /// success. Deletes are retried a few times over several seconds before failing. The work runs
@@ -105,8 +115,61 @@ where
         join_name(destination, torrent_name)?
     };
 
-    extract(archive, &extract_path, on_progress, cancel)?;
-    remove_with_retry(archive, |path| fs::remove_file(path), "delete")
+    let mut progress = Monotonic::new(on_progress);
+    let wraps_set = entries
+        .iter()
+        .any(|entry| entry.name.contains(WRAPPED_SET_MARKER));
+    if wraps_set {
+        let temp = extract_path.join(Uuid::new_v4().to_string());
+        fs::create_dir_all(&temp).map_err(Error::io("create directory", &temp))?;
+        extract(
+            archive,
+            &temp,
+            |percent| progress.report(percent / 2),
+            cancel,
+        )?;
+        remove_with_retry(archive, |path| fs::remove_file(path), "delete")?;
+        let wrapped = wrapped_sets(&temp)?;
+        for second_volume in &wrapped {
+            let first_volume = second_volume.with_extension("rar");
+            if first_volume.is_file() {
+                extract(
+                    &first_volume,
+                    &extract_path,
+                    |percent| progress.report(50 + percent / 2),
+                    cancel,
+                )?;
+            }
+        }
+        if !wrapped.is_empty() {
+            remove_with_retry(&temp, |path| fs::remove_dir_all(path), "remove directory")?;
+        }
+    } else {
+        extract(
+            archive,
+            &extract_path,
+            |percent| progress.report(percent),
+            cancel,
+        )?;
+        remove_with_retry(archive, |path| fs::remove_file(path), "delete")?;
+    }
+    progress.report(100);
+    Ok(())
+}
+
+/// Top-level `.r00` files of `dir`, sorted.
+fn wrapped_sets(dir: &Path) -> Result<Vec<PathBuf>, Error> {
+    let mut found = Vec::new();
+    for entry in fs::read_dir(dir).map_err(Error::io("list directory", dir))? {
+        let entry = entry.map_err(Error::io("list directory", dir))?;
+        let path = entry.path();
+        let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
+        if is_file && path.extension().is_some_and(|ext| ext == "r00") {
+            found.push(path);
+        }
+    }
+    found.sort();
+    Ok(found)
 }
 
 /// Runs `remove` on `path`, retrying after [`DELETE_RETRY_DELAYS`]; a missing path counts as
@@ -128,6 +191,29 @@ fn remove_with_retry(
                 }
                 None => return Err(Error::io(action, path)(error)),
             },
+        }
+    }
+}
+
+/// Forwards only percentages above the last one forwarded, so the phases of one procedure
+/// add up to a single increasing progress.
+struct Monotonic<F> {
+    on_progress: F,
+    last: Option<u8>,
+}
+
+impl<F: FnMut(u8)> Monotonic<F> {
+    fn new(on_progress: F) -> Self {
+        Self {
+            on_progress,
+            last: None,
+        }
+    }
+
+    fn report(&mut self, percent: u8) {
+        if self.last.is_none_or(|last| percent > last) {
+            self.last = Some(percent);
+            (self.on_progress)(percent);
         }
     }
 }
