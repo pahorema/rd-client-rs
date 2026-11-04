@@ -4,13 +4,14 @@ use std::fmt;
 use std::time::Duration;
 
 use jiff::{SignedDuration, Timestamp};
-use rdc_model::RemoteFile;
+use rdc_model::{RemoteFile, Torrent};
+use reqwest::multipart::{Form, Part};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, IgnoredAny};
 
 use crate::error::DebridError;
-use crate::http::ProviderHttp;
+use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp};
 use crate::provider::{DebridUser, ProviderConfig, RemoteTorrent};
 
 /// Base URL of the public Debrid-Link API.
@@ -103,6 +104,46 @@ impl DebridLink {
         }
     }
 
+    /// Adds a magnet link and returns the id of the new torrent (empty when
+    /// the API returns none).
+    pub async fn add_magnet(&self, magnet: &str) -> Result<String, DebridError> {
+        let request = self.request(Method::POST, "seedbox/add")?.form(&[
+            ("url", magnet),
+            ("wait", "false"),
+            ("async", "false"),
+        ]);
+        self.add(request).await
+    }
+
+    /// Uploads a `.torrent` file and returns the id of the new torrent (empty
+    /// when the API returns none).
+    pub async fn add_torrent_file(&self, bytes: &[u8]) -> Result<String, DebridError> {
+        let file = Part::bytes(bytes.to_vec())
+            .file_name("1.torrent")
+            .mime_str("application/x-bittorrent")?;
+        let request = self
+            .request(Method::POST, "seedbox/add")?
+            .multipart(Form::new().part("file", file));
+        self.add(request).await
+    }
+
+    async fn add(&self, request: RequestBuilder) -> Result<String, DebridError> {
+        let torrent: Option<SeedboxTorrent> =
+            self.send(request).await.map_err(rate_limit_from_text)?;
+        Ok(torrent.and_then(|torrent| torrent.id).unwrap_or_default())
+    }
+
+    /// Removes the torrent from the seedbox; a torrent without provider id is
+    /// left alone.
+    pub async fn delete(&self, torrent: &Torrent) -> Result<(), DebridError> {
+        let Some(id) = non_blank(torrent.rd_id.as_deref()) else {
+            return Ok(());
+        };
+        let request = self.request(Method::DELETE, &format!("seedbox/{id}/remove"))?;
+        self.send::<IgnoredAny>(request).await?;
+        Ok(())
+    }
+
     fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, DebridError> {
         if self.api_key.trim().is_empty() {
             return Err(DebridError::NotConfigured(
@@ -181,6 +222,27 @@ fn http_error(status: StatusCode) -> DebridError {
     DebridError::Provider(format!(
         "Debrid-Link answered with unexpected HTTP status {status}"
     ))
+}
+
+/// Treats an add failure whose text asks to slow down as a two-minute rate limit.
+fn rate_limit_from_text(error: DebridError) -> DebridError {
+    if matches!(error, DebridError::RateLimited { .. }) {
+        return error;
+    }
+    let message = error.to_string();
+    let lowercase = message.to_lowercase();
+    if lowercase.contains("slow_down") || lowercase.contains("rate limit exceeded") {
+        DebridError::RateLimited {
+            message,
+            retry_after: DEFAULT_RATE_LIMIT_COOLDOWN,
+        }
+    } else {
+        error
+    }
+}
+
+fn non_blank(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 /// `account/infos` value.

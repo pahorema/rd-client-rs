@@ -7,8 +7,9 @@ use jiff::{SignedDuration, Timestamp};
 use rdc_debrid::{
     DebridError, DebridLink, ProviderConfig, ProviderHttp, RateLimitCoordinator, RetryPolicy,
 };
+use rdc_model::Torrent;
 use serde_json::{Value, json};
-use wiremock::matchers::{header, method, path, query_param};
+use wiremock::matchers::{body_string_contains, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn config(api_key: &str) -> ProviderConfig {
@@ -238,5 +239,138 @@ async fn listing_maps_torrent_fields_and_reports_the_download_speed() {
     assert_eq!(
         files[0].download_link.as_deref(),
         Some("https://dl.example/a.mkv")
+    );
+}
+
+#[tokio::test]
+async fn adding_a_magnet_posts_the_url_and_returns_the_new_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/seedbox/add"))
+        .and(body_string_contains(
+            "url=magnet%3A%3Fxt%3Durn%3Abtih%3Aabc",
+        ))
+        .and(body_string_contains("wait=false"))
+        .and(body_string_contains("async=false"))
+        .respond_with(ok(&seedbox_torrent("t9")))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let id = client(&server)
+        .add_magnet("magnet:?xt=urn:btih:abc")
+        .await
+        .expect("added");
+
+    assert_eq!(id, "t9");
+}
+
+#[tokio::test]
+async fn adding_a_torrent_file_uploads_it_as_a_multipart_part() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/seedbox/add"))
+        .and(body_string_contains(
+            "name=\"file\"; filename=\"1.torrent\"",
+        ))
+        .and(body_string_contains("application/x-bittorrent"))
+        .and(body_string_contains("d8:announce"))
+        .respond_with(ok(&json!({ "id": "t10" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let id = client(&server)
+        .add_torrent_file(b"d8:announce0:e")
+        .await
+        .expect("added");
+
+    assert_eq!(id, "t10");
+}
+
+#[tokio::test]
+async fn adding_without_an_id_in_the_answer_returns_an_empty_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ok(&Value::Null))
+        .mount(&server)
+        .await;
+
+    let id = client(&server).add_magnet("magnet:?").await.expect("added");
+
+    assert_eq!(id, "");
+}
+
+#[tokio::test]
+async fn adding_maps_slow_down_errors_to_a_two_minute_rate_limit() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "success": false, "error": "slow_down" })),
+        )
+        .mount(&server)
+        .await;
+
+    let error = client(&server)
+        .add_magnet("magnet:?")
+        .await
+        .expect_err("rate limited");
+
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(120)));
+    assert!(error.to_string().contains("slow_down"), "{error}");
+}
+
+#[tokio::test]
+async fn adding_keeps_other_errors() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "success": false, "error": "maxTorrent" })),
+        )
+        .mount(&server)
+        .await;
+
+    let error = client(&server)
+        .add_magnet("magnet:?")
+        .await
+        .expect_err("limit");
+
+    assert!(matches!(error, DebridError::Provider(_)), "{error:?}");
+}
+
+#[tokio::test]
+async fn deleting_removes_the_torrent_by_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/seedbox/t1/remove"))
+        .respond_with(ok(&json!(["t1"])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let torrent = Torrent {
+        rd_id: Some("t1".to_owned()),
+        ..Torrent::default()
+    };
+
+    client(&server).delete(&torrent).await.expect("deleted");
+}
+
+#[tokio::test]
+async fn deleting_a_torrent_without_provider_id_sends_nothing() {
+    let server = MockServer::start().await;
+
+    client(&server)
+        .delete(&Torrent::default())
+        .await
+        .expect("nothing to delete");
+
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .is_empty()
     );
 }
