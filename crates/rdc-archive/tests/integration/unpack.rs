@@ -34,12 +34,100 @@ impl Downloads {
             archive: archive.to_path_buf(),
             destination: self.destination.clone(),
             torrent_name: "Show".to_owned(),
+            flatten_hash_dir: None,
+        }
+    }
+
+    fn flattening_request(&self, archive: &Path) -> UnpackRequest {
+        UnpackRequest {
+            flatten_hash_dir: Some(HASH.to_owned()),
+            ..self.request(archive)
         }
     }
 }
 
 async fn run(request: UnpackRequest) -> Result<(), Error> {
     unpack(request, |_| {}, CancellationToken::new()).await
+}
+
+const HASH: &str = "0123456789abcdef0123456789abcdef01234567";
+
+#[tokio::test]
+async fn a_hash_folder_is_flattened_into_the_torrent_folder() {
+    let downloads = Downloads::new();
+    let archive = downloads.torrent.join("show.zip");
+    write_zip(
+        &archive,
+        &[
+            (&format!("{HASH}/Show.Inner/episode.mkv"), b"video"),
+            (&format!("{HASH}/Show.Inner/subs/en.srt"), b"text"),
+        ],
+    );
+
+    run(downloads.flattening_request(&archive)).await.unwrap();
+
+    assert_eq!(
+        files_below(&downloads.destination),
+        ["Show/episode.mkv", "Show/subs/en.srt"]
+    );
+    assert!(!downloads.torrent.join(HASH).exists());
+}
+
+#[tokio::test]
+async fn outside_the_torrent_folder_the_hash_folder_receives_the_content() {
+    let downloads = Downloads::new();
+    let archive = downloads.torrent.join("show.zip");
+    write_zip(
+        &archive,
+        &[
+            ("Show/readme.txt", b"read me"),
+            (&format!("{HASH}/Show.Inner/episode.mkv"), b"video"),
+        ],
+    );
+
+    run(downloads.flattening_request(&archive)).await.unwrap();
+
+    assert_eq!(
+        files_below(&downloads.destination),
+        [format!("{HASH}/episode.mkv"), "Show/readme.txt".to_owned()]
+    );
+}
+
+#[tokio::test]
+async fn a_hash_folder_with_other_content_is_kept_after_flattening() {
+    let downloads = Downloads::new();
+    let archive = downloads.torrent.join("show.zip");
+    write_zip(
+        &archive,
+        &[
+            (&format!("{HASH}/Show.Inner/episode.mkv"), b"video"),
+            (&format!("{HASH}/notes.txt"), b"notes"),
+        ],
+    );
+
+    run(downloads.flattening_request(&archive)).await.unwrap();
+
+    assert_eq!(
+        files_below(&downloads.destination),
+        [
+            format!("Show/{HASH}/notes.txt"),
+            "Show/episode.mkv".to_owned()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn without_a_hash_folder_flattening_changes_nothing() {
+    let downloads = Downloads::new();
+    let archive = downloads.torrent.join("show.zip");
+    write_zip(&archive, &[("Inner/episode.mkv", b"video")]);
+
+    run(downloads.flattening_request(&archive)).await.unwrap();
+
+    assert_eq!(
+        files_below(&downloads.destination),
+        ["Show/Inner/episode.mkv"]
+    );
 }
 
 #[tokio::test]

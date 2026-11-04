@@ -35,6 +35,9 @@ pub struct UnpackRequest {
     pub destination: PathBuf,
     /// The torrent name, as used for the torrent folder below `destination`.
     pub torrent_name: String,
+    /// The torrent hash, for providers whose archives wrap the content in a `<hash>/<inner>/`
+    /// folder pair that is flattened after extraction; `None` otherwise.
+    pub flatten_hash_dir: Option<String>,
 }
 
 /// Unpacks a downloaded archive next to the torrent's other files, then deletes it.
@@ -53,6 +56,10 @@ pub struct UnpackRequest {
 ///    top-level `.r00` volume the temporary folder is kept, so its content is not lost.
 /// 4. Otherwise the archive is extracted and deleted. For a multi-volume set, its other
 ///    volumes are deleted as well.
+/// 5. With [`flatten_hash_dir`](UnpackRequest::flatten_hash_dir) set and a `<hash>` folder in
+///    the extraction folder, the content of its first sub-folder is moved up: into the
+///    extraction folder when that is the torrent folder (its path ends with the torrent name),
+///    otherwise into the `<hash>` folder. The emptied folders are removed.
 ///
 /// `on_progress` receives an increasing percentage of the whole procedure, ending with 100 on
 /// success. Deletes are retried a few times over several seconds before failing. The work runs
@@ -96,6 +103,7 @@ where
         archive,
         destination,
         torrent_name,
+        flatten_hash_dir,
     } = request;
     if !archive.is_file() {
         debug!(archive = %archive.display(), "archive to unpack is gone, nothing to do");
@@ -164,8 +172,63 @@ where
         )?;
         delete_archive(archive, inspection.volume)?;
     }
+    if let Some(hash) = flatten_hash_dir {
+        flatten(&extract_path, torrent_name, hash)?;
+    }
     progress.report(100);
     Ok(())
+}
+
+/// Moves the content of `<extract_path>/<hash>/<first sub-folder>/` up one or two levels, see
+/// step 5 of [`unpack`].
+fn flatten(extract_path: &Path, torrent_name: &str, hash: &str) -> Result<(), Error> {
+    let hash_dir = join_name(extract_path, hash)?;
+    if !hash_dir.is_dir() {
+        return Ok(());
+    }
+    let Some(inner) = sorted_children(&hash_dir)?
+        .into_iter()
+        .find(|(_, is_dir)| *is_dir)
+        .map(|(path, _)| path)
+    else {
+        debug!(folder = %hash_dir.display(), "hash folder has no sub-folder to flatten");
+        return Ok(());
+    };
+    let into_torrent_folder = extract_path.to_string_lossy().ends_with(torrent_name);
+    let target = if into_torrent_folder {
+        extract_path
+    } else {
+        &hash_dir
+    };
+    for (child, _) in sorted_children(&inner)? {
+        let Some(name) = child.file_name() else {
+            continue;
+        };
+        let moved = target.join(name);
+        if fs::symlink_metadata(&moved).is_ok() {
+            return Err(Error::io("move to", &moved)(io::Error::from(
+                io::ErrorKind::AlreadyExists,
+            )));
+        }
+        fs::rename(&child, &moved).map_err(Error::io("move", &child))?;
+    }
+    fs::remove_dir(&inner).map_err(Error::io("remove directory", &inner))?;
+    if into_torrent_folder && let Err(error) = fs::remove_dir(&hash_dir) {
+        warn!(folder = %hash_dir.display(), %error, "hash folder kept after flattening");
+    }
+    Ok(())
+}
+
+/// Children of `dir` sorted by path, each with whether it is a directory (links excluded).
+fn sorted_children(dir: &Path) -> Result<Vec<(PathBuf, bool)>, Error> {
+    let mut children = Vec::new();
+    for entry in fs::read_dir(dir).map_err(Error::io("list directory", dir))? {
+        let entry = entry.map_err(Error::io("list directory", dir))?;
+        let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+        children.push((entry.path(), is_dir));
+    }
+    children.sort();
+    Ok(children)
 }
 
 /// Top-level `.r00` files of `dir`, sorted.
