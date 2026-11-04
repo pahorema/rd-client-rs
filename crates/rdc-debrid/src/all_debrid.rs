@@ -1,7 +1,10 @@
 //! Client of the AllDebrid API (version 4.1).
 
+use std::time::Duration;
+
 use jiff::Timestamp;
 use rdc_model::{RemoteFile, Torrent};
+use reqwest::multipart::{Form, Part};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
 use serde::de::{DeserializeOwned, IgnoredAny};
@@ -13,6 +16,7 @@ use crate::error::DebridError;
 use crate::http::ProviderHttp;
 use crate::json;
 use crate::provider::{DebridUser, ProviderConfig, RemoteTorrent};
+use crate::text_rate_limit::classify_add_error;
 
 /// Root of the AllDebrid API.
 pub const DEFAULT_BASE_URL: &str = "https://api.alldebrid.com/v4.1/";
@@ -22,6 +26,13 @@ const AGENT: &str = "rd-client";
 
 /// Error code of an unknown magnet.
 const MAGNET_INVALID_ID: &str = "MAGNET_INVALID_ID";
+
+/// Extra listings searched for the id of an added magnet AllDebrid did not
+/// return, one per [`ID_LOOKUP_INTERVAL`].
+const ID_LOOKUP_RETRIES: u32 = 10;
+
+/// Pause between two listings searching an added magnet's id.
+const ID_LOOKUP_INTERVAL: Duration = Duration::from_secs(1);
 
 /// AllDebrid account access.
 ///
@@ -110,6 +121,83 @@ impl AllDebrid {
             .ok_or_else(|| {
                 DebridError::InvalidResponse("AllDebrid did not return a download link".to_owned())
             })
+    }
+
+    /// Adds a magnet link and returns the id of the new magnet.
+    ///
+    /// Errors mentioning `slow_down` or `rate limit exceeded` are reported as
+    /// [`DebridError::RateLimited`].
+    pub async fn add_magnet(&self, magnet: &str) -> Result<String, DebridError> {
+        let request = self
+            .request(Method::POST, "magnet/upload")?
+            .form(&[("magnets[]", magnet)]);
+        self.add(request, |upload| upload.magnets).await
+    }
+
+    /// Uploads a `.torrent` file and returns the id of the new magnet; rate
+    /// limits are detected like for [`add_magnet`](Self::add_magnet).
+    pub async fn add_torrent_file(&self, bytes: &[u8]) -> Result<String, DebridError> {
+        let part = Part::bytes(bytes.to_vec())
+            .file_name("1.torrent")
+            .mime_str("application/x-bittorrent")?;
+        let request = self
+            .request(Method::POST, "magnet/upload/file")?
+            .multipart(Form::new().part("files[]", part));
+        self.add(request, |upload| upload.files).await
+    }
+
+    async fn add(
+        &self,
+        request: RequestBuilder,
+        entries: fn(Upload) -> Option<Vec<Uploaded>>,
+    ) -> Result<String, DebridError> {
+        let id = async {
+            let upload: Upload = self.call(request).await?;
+            let entry = entries(upload)
+                .and_then(|entries| entries.into_iter().next())
+                .ok_or_else(|| {
+                    DebridError::InvalidResponse(
+                        "AllDebrid did not return the added magnet".to_owned(),
+                    )
+                })?;
+            if let Some(error) = entry.error.filter(ApiError::has_message) {
+                return Err(error.into_error());
+            }
+            match entry.id.filter(|id| *id != 0) {
+                Some(id) => Ok(id),
+                None => self.find_id(entry.hash.as_deref()).await,
+            }
+        }
+        .await
+        .map_err(classify_add_error)?;
+        tracing::debug!(id, "magnet added to AllDebrid");
+        Ok(id.to_string())
+    }
+
+    /// Searches the magnet list for the id of the magnet with `hash`.
+    async fn find_id(&self, hash: Option<&str>) -> Result<i64, DebridError> {
+        for attempt in 0..=ID_LOOKUP_RETRIES {
+            if attempt > 0 {
+                tokio::time::sleep(ID_LOOKUP_INTERVAL).await;
+            }
+            let list: MagnetList = self
+                .call(self.request(Method::GET, "magnet/status")?)
+                .await?;
+            let found = list.magnets.unwrap_or_default().into_iter().find(|magnet| {
+                hash.is_some_and(|hash| {
+                    magnet
+                        .hash
+                        .as_deref()
+                        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(hash))
+                })
+            });
+            if let Some(id) = found.and_then(|magnet| magnet.id) {
+                return Ok(id);
+            }
+        }
+        Err(DebridError::Provider(
+            "Unable to find the id of the added magnet".to_owned(),
+        ))
     }
 
     /// An authenticated request carrying the application name.
@@ -215,6 +303,29 @@ struct User {
 #[derive(Debug, Default, Deserialize)]
 struct Unlocked {
     link: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Upload {
+    #[serde(default, deserialize_with = "json::one_or_many")]
+    magnets: Option<Vec<Uploaded>>,
+    #[serde(default, deserialize_with = "json::one_or_many")]
+    files: Option<Vec<Uploaded>>,
+}
+
+/// One uploaded magnet or file; `error` is set when it was rejected.
+#[derive(Debug, Deserialize)]
+struct Uploaded {
+    #[serde(default, deserialize_with = "json::optional_i64")]
+    id: Option<i64>,
+    hash: Option<String>,
+    error: Option<ApiError>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct MagnetList {
+    #[serde(default, deserialize_with = "json::one_or_many")]
+    magnets: Option<Vec<Magnet>>,
 }
 
 /// The magnet state of the current live-mode session.

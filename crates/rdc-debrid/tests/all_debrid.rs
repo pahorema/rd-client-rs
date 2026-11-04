@@ -454,3 +454,86 @@ async fn magnets_without_status_are_not_listed() {
 
     assert_eq!(ids(&torrents), ["2"]);
 }
+
+#[tokio::test]
+async fn adding_a_magnet_returns_the_magnet_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v4.1/magnet/upload"))
+        .and(body_string_contains("magnets%5B%5D=magnet%3A%3Fxt"))
+        .respond_with(success(
+            json!({"magnets": [{"magnet": "magnet:?xt", "hash": "abc", "id": 123, "ready": true}]}),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let id = client(&server)
+        .add_magnet("magnet:?xt")
+        .await
+        .expect("added");
+
+    assert_eq!(id, "123");
+}
+
+#[tokio::test]
+async fn an_added_torrent_file_without_id_is_found_by_hash() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v4.1/magnet/upload/file"))
+        .and(body_string_contains("filename=\"1.torrent\""))
+        .respond_with(success(
+            json!({"files": [{"file": "1.torrent", "hash": "ABC"}]}),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v4.1/magnet/status"))
+        .respond_with(success(json!({"magnets": [
+            {"id": 1, "hash": "other", "status": "Ready"},
+            {"id": 2, "hash": "abc", "status": "In Queue"}
+        ]})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let id = client(&server)
+        .add_torrent_file(b"d4:infod4:name1:aee")
+        .await
+        .expect("added");
+
+    assert_eq!(id, "2");
+}
+
+#[tokio::test]
+async fn rejected_magnets_report_their_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v4.1/magnet/upload"))
+        .respond_with(success(json!({"magnets": [{"magnet": "x", "error":
+            {"code": "MAGNET_INVALID_URI", "message": "Magnet is not valid"}}]})))
+        .mount(&server)
+        .await;
+
+    let error = client(&server).add_magnet("x").await.expect_err("rejected");
+
+    assert_eq!(
+        error.to_string(),
+        "Magnet is not valid (MAGNET_INVALID_URI)"
+    );
+}
+
+#[tokio::test]
+async fn rate_limit_texts_on_add_are_two_minute_rate_limits() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v4.1/magnet/upload"))
+        .respond_with(failure("slow_down", "Too many requests"))
+        .mount(&server)
+        .await;
+
+    let error = client(&server).add_magnet("x").await.expect_err("limited");
+
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(120)));
+}
