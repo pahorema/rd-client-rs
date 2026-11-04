@@ -112,6 +112,41 @@ async fn blank_api_key_fails_without_sending_a_request() {
 }
 
 #[tokio::test]
+async fn unknown_resource_error_code_is_not_found() {
+    let server = MockServer::start().await;
+    let response = ResponseTemplate::new(404)
+        .set_body_json(json!({"error": "unknown_ressource", "error_code": 7}));
+
+    let error = user_error(&server, response).await;
+
+    assert!(error.is_not_found(), "{error:?}");
+    assert_eq!(error.to_string(), "Resource not found");
+}
+
+#[tokio::test]
+async fn known_error_codes_are_reported_with_their_message() {
+    let server = MockServer::start().await;
+    let response =
+        ResponseTemplate::new(401).set_body_json(json!({"error": "bad_token", "error_code": 8}));
+
+    let error = user_error(&server, response).await;
+
+    assert!(matches!(error, DebridError::Provider(_)), "{error:?}");
+    assert_eq!(error.to_string(), "Bad token");
+}
+
+#[tokio::test]
+async fn unknown_error_codes_keep_the_provider_text() {
+    let server = MockServer::start().await;
+    let response = ResponseTemplate::new(400)
+        .set_body_json(json!({"error": "something_new", "error_code": 99}));
+
+    let error = user_error(&server, response).await;
+
+    assert_eq!(error.to_string(), "something_new");
+}
+
+#[tokio::test]
 async fn error_bodies_without_error_field_are_reported_verbatim() {
     let server = MockServer::start().await;
     let response = ResponseTemplate::new(503).set_body_string("<html>maintenance</html>");

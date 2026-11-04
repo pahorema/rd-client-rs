@@ -13,6 +13,9 @@ use crate::provider::{DebridUser, ProviderConfig};
 /// API host used when no alternative hostname is configured.
 pub const DEFAULT_API_HOSTNAME: &str = "api.real-debrid.com";
 
+/// Error code Real-Debrid uses for an unknown torrent or link.
+const RESOURCE_NOT_FOUND: i64 = 7;
+
 /// Real-Debrid account access.
 #[derive(Debug)]
 pub struct RealDebrid {
@@ -97,13 +100,79 @@ struct User {
     expiration: Option<String>,
 }
 
-/// Maps an unsuccessful answer; the body is reported verbatim.
+#[derive(Debug, Deserialize)]
+struct ErrorBody {
+    error: Option<String>,
+    error_code: Option<i64>,
+}
+
+/// Maps an unsuccessful answer: a `{error, error_code}` body becomes the
+/// message of its code, anything else is reported verbatim.
 fn api_error(status: StatusCode, text: &str) -> DebridError {
-    if text.trim().is_empty() {
-        DebridError::Provider(format!("Real-Debrid answered with HTTP status {status}"))
-    } else {
-        DebridError::Provider(text.to_owned())
+    match serde_json::from_str::<ErrorBody>(text) {
+        Ok(ErrorBody {
+            error: Some(error),
+            error_code,
+        }) => {
+            let message = error_code
+                .and_then(error_message)
+                .map_or(error, str::to_owned);
+            if error_code == Some(RESOURCE_NOT_FOUND) {
+                DebridError::NotFound(message)
+            } else {
+                DebridError::Provider(message)
+            }
+        }
+        _ if text.trim().is_empty() => {
+            DebridError::Provider(format!("Real-Debrid answered with HTTP status {status}"))
+        }
+        _ => DebridError::Provider(text.to_owned()),
     }
+}
+
+/// User-facing text of a Real-Debrid error code.
+fn error_message(code: i64) -> Option<&'static str> {
+    let message = match code {
+        -1 => "Internal error",
+        1 => "Missing parameter",
+        2 => "Bad parameter value",
+        3 => "Unknown method",
+        4 => "Method not allowed",
+        5 => "Slow down",
+        6 => "Resource unreachable",
+        RESOURCE_NOT_FOUND => "Resource not found",
+        8 => "Bad token",
+        9 => "Permission denied",
+        10 => "Two-Factor authentication needed",
+        11 => "Two-Factor authentication pending",
+        12 => "Invalid login",
+        13 => "Invalid password",
+        14 => "Account locked",
+        15 => "Account not activated",
+        16 => "Unsupported hoster",
+        17 => "Hoster in maintenance",
+        18 => "Hoster limit reached",
+        19 => "Hoster temporarily unavailable",
+        20 => "Hoster not available for free users",
+        21 => "Too many active downloads",
+        22 => "IP Address not allowed",
+        23 => "Traffic exhausted",
+        24 => "File unavailable",
+        25 => "Service unavailable",
+        26 => "Upload too big",
+        27 => "Upload error",
+        28 => "File not allowed",
+        29 => "Torrent too big",
+        30 => "Torrent file invalid",
+        31 => "Action already done",
+        32 => "Image resolution error",
+        33 => "Torrent already active",
+        34 => "Too many requests",
+        35 => "Infringing file",
+        36 => "Fair Usage Limit",
+        _ => return None,
+    };
+    Some(message)
 }
 
 fn parse_timestamp(text: &str) -> Option<Timestamp> {
