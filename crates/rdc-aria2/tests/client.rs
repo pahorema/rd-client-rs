@@ -113,3 +113,15 @@ async fn requests_carry_the_rd_client_user_agent() {
 
     client(&server, "secret").version().await.unwrap();
 }
+
+#[test]
+fn debug_output_redacts_the_secret() {
+    let client = Client::builder("http://127.0.0.1:6800/jsonrpc")
+        .secret("hunter2")
+        .build()
+        .unwrap();
+
+    let debug = format!("{client:?}");
+
+    assert!(!debug.contains("hunter2"), "{debug}");
+}

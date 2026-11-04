@@ -1,5 +1,6 @@
 //! JSON-RPC transport and the typed aria2 calls.
 
+use std::fmt;
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -19,12 +20,22 @@ const RPC_SUFFIX: &str = "/jsonrpc";
 const REQUEST_ID: &str = "rd-client";
 
 /// Configures and builds a [`Client`].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[must_use]
 pub struct ClientBuilder {
     url: String,
     secret: Option<String>,
     timeout: Duration,
+}
+
+impl fmt::Debug for ClientBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClientBuilder")
+            .field("url", &self.url)
+            .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl ClientBuilder {
@@ -71,12 +82,21 @@ impl ClientBuilder {
 /// aria2 JSON-RPC client.
 ///
 /// Cheap to clone; clones share the underlying connection pool.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     url: String,
     /// `token:<secret>`, present only when a non-blank secret is configured.
     token: Option<String>,
+}
+
+impl fmt::Debug for Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Client")
+            .field("url", &self.url)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .finish_non_exhaustive()
+    }
 }
 
 /// Version information returned by `aria2.getVersion`.
