@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use rdc_debrid::{DebridError, Premiumize, RemoteTorrent};
-use rdc_model::{Provider, Torrent, TorrentStatus};
+use rdc_model::{DownloadInfo, Provider, Torrent, TorrentStatus};
 use wiremock::matchers::{body_string, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -419,4 +419,140 @@ async fn refresh_without_a_provider_id_does_nothing() {
             .expect("recorded")
             .is_empty()
     );
+}
+
+async fn mount_folder(server: &MockServer, id: &str, body: serde_json::Value) {
+    Mock::given(method("GET"))
+        .and(path("/folder/list"))
+        .and(query_param("id", id))
+        .and(query_param("includebreadcrumbs", "true"))
+        .and(query_param("apikey", API_KEY))
+        .respond_with(json(&body.to_string()))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+fn infos(list: &[DownloadInfo]) -> Vec<(Option<&str>, &str)> {
+    list.iter()
+        .map(|info| (info.file_name.as_deref(), info.restricted_link.as_str()))
+        .collect()
+}
+
+#[tokio::test]
+async fn download_infos_walk_the_transfer_folder() {
+    let (server, client) = client().await;
+    mount_transfers(
+        &server,
+        r#"{"status":"success","transfers":[{"id":"t1","name":"R","status":"finished","folder_id":"f1"}]}"#,
+    )
+    .await;
+    mount_folder(&server, "f1", serde_json::json!({"status": "success", "content": [
+        {"id": "a", "name": "movie.mkv", "size": 900, "type": "file", "link": "https://dl/movie.mkv"},
+        {"id": "b", "name": "Subs", "type": "folder"},
+        {"id": "c", "name": "no-link.nfo", "size": 1, "type": "file", "link": ""},
+        {"id": "d", "name": "odd", "type": "unknown"}
+    ]}))
+    .await;
+    mount_folder(
+        &server,
+        "b",
+        serde_json::json!({"status": "success", "content": [
+            {"id": "e", "name": "en.srt", "size": 5, "type": "file", "link": "https://dl/en.srt"}
+        ]}),
+    )
+    .await;
+
+    let found = client
+        .download_infos(&sent_torrent("t1"))
+        .await
+        .expect("infos");
+
+    let found = found.expect("ready");
+    assert_eq!(
+        infos(&found),
+        [
+            (Some("movie.mkv"), "https://dl/movie.mkv"),
+            (Some("en.srt"), "https://dl/en.srt")
+        ]
+    );
+}
+
+#[tokio::test]
+async fn download_infos_filter_files_by_size_and_folders_by_name() {
+    let (server, client) = client().await;
+    mount_transfers(
+        &server,
+        r#"{"status":"success","transfers":[{"id":"t1","name":"R","status":"finished","folder_id":"f1"}]}"#,
+    )
+    .await;
+    mount_folder(&server, "f1", serde_json::json!({"status": "success", "content": [
+        {"id": "a", "name": "movie.mkv", "size": 5_000_000, "type": "file", "link": "https://dl/movie.mkv"},
+        {"id": "s", "name": "sample.mkv", "size": 10, "type": "file", "link": "https://dl/sample.mkv"},
+        {"id": "x", "name": "Extras", "type": "folder"}
+    ]}))
+    .await;
+    let torrent = Torrent {
+        download_min_size: 1,
+        exclude_regex: Some("Extras".to_owned()),
+        ..sent_torrent("t1")
+    };
+
+    let found = client
+        .download_infos(&torrent)
+        .await
+        .expect("infos")
+        .expect("ready");
+
+    assert_eq!(infos(&found), [(Some("movie.mkv"), "https://dl/movie.mkv")]);
+}
+
+#[tokio::test]
+async fn download_infos_add_the_single_file_of_a_transfer() {
+    let (server, client) = client().await;
+    mount_transfers(
+        &server,
+        r#"{"status":"success","transfers":[{"id":"t1","name":"R","status":"finished","folder_id":"","file_id":"i1"}]}"#,
+    )
+    .await;
+    Mock::given(method("GET"))
+        .and(path("/item/details"))
+        .and(query_param("id", "i1"))
+        .respond_with(json(
+            r#"{"id":"i1","name":"tiny.txt","size":1,"type":"file","link":"https://dl/tiny.txt"}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let torrent = Torrent {
+        download_min_size: 1,
+        ..sent_torrent("t1")
+    };
+
+    let found = client
+        .download_infos(&torrent)
+        .await
+        .expect("infos")
+        .expect("ready");
+
+    assert_eq!(infos(&found), [(Some("tiny.txt"), "https://dl/tiny.txt")]);
+}
+
+#[tokio::test]
+async fn download_infos_wait_for_a_provider_id_and_need_the_transfer() {
+    let (server, client) = client().await;
+    mount_transfers(&server, r#"{"status":"success","transfers":[]}"#).await;
+
+    assert_eq!(
+        client
+            .download_infos(&Torrent::default())
+            .await
+            .expect("infos"),
+        None
+    );
+    let error = client
+        .download_infos(&sent_torrent("t1"))
+        .await
+        .expect_err("missing");
+    assert!(error.is_not_found(), "{error:?}");
 }

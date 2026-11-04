@@ -9,10 +9,11 @@
 //! discovered from the transfer's folder when downloads are created.
 
 use std::fmt;
+use std::pin::Pin;
 use std::time::Duration;
 
 use jiff::Timestamp;
-use rdc_model::{Provider, Torrent, TorrentStatus};
+use rdc_model::{DownloadInfo, FileFilter, Provider, Torrent, TorrentStatus};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
@@ -175,6 +176,85 @@ impl Premiumize {
         Ok(())
     }
 
+    /// Lists the files of the torrent's transfer that pass its file filter.
+    ///
+    /// Files come from the transfer folder, searched recursively; a
+    /// sub-folder is entered only when its name passes the filter's path
+    /// rules. A single-file transfer adds its file without filtering.
+    /// Returns `None` when the torrent has not been sent to Premiumize yet.
+    pub async fn download_infos(
+        &self,
+        torrent: &Torrent,
+    ) -> Result<Option<Vec<DownloadInfo>>, DebridError> {
+        let Some(rd_id) = torrent.rd_id.as_deref() else {
+            return Ok(None);
+        };
+        let transfer = self
+            .transfers()
+            .await?
+            .into_iter()
+            .find(|transfer| transfer.id == rd_id)
+            .ok_or_else(|| DebridError::NotFound(format!("Transfer {rd_id} not found")))?;
+        let filter = torrent.file_filter()?;
+        let mut infos = match non_blank(transfer.folder_id.as_deref()) {
+            Some(folder_id) => self.folder_infos(&filter, folder_id).await?,
+            None => Vec::new(),
+        };
+        if let Some(file_id) = non_blank(transfer.file_id.as_deref()) {
+            let item: Item = self
+                .call(self.request(Method::GET, "item/details", &[("id", file_id)])?)
+                .await?;
+            if non_blank(item.link.as_deref()).is_none() {
+                tracing::debug!(file_id, "Premiumize file has no link");
+            }
+            infos.push(DownloadInfo {
+                file_name: item.name,
+                restricted_link: item.link.unwrap_or_default(),
+            });
+        }
+        Ok(Some(infos))
+    }
+
+    fn folder_infos<'a>(&'a self, filter: &'a FileFilter, folder_id: &'a str) -> FolderInfos<'a> {
+        Box::pin(async move {
+            let folder: Folder = self
+                .call(self.request(
+                    Method::GET,
+                    "folder/list",
+                    &[("includebreadcrumbs", "true"), ("id", folder_id)],
+                )?)
+                .await?;
+            let mut infos = Vec::new();
+            for item in folder.content.unwrap_or_default() {
+                let name = item.name.as_deref().unwrap_or_default();
+                match item.kind.as_deref() {
+                    Some("file") => {
+                        let Some(link) = non_blank(item.link.as_deref()) else {
+                            tracing::debug!(folder_id, name, "Premiumize file has no link");
+                            continue;
+                        };
+                        if filter.is_downloadable(name, item.size.unwrap_or_default())? {
+                            infos.push(DownloadInfo {
+                                file_name: item.name.clone(),
+                                restricted_link: link.to_owned(),
+                            });
+                        }
+                    }
+                    // Folders have no size: only the path rules apply to them.
+                    Some("folder") => {
+                        if let Some(id) = non_blank(item.id.as_deref())
+                            && filter.is_downloadable(name, i64::MAX)?
+                        {
+                            infos.extend(self.folder_infos(filter, id).await?);
+                        }
+                    }
+                    kind => tracing::debug!(folder_id, name, ?kind, "skipping Premiumize item"),
+                }
+            }
+            Ok(infos)
+        })
+    }
+
     async fn transfer(&self, id: &str) -> Result<Transfer, DebridError> {
         self.transfers()
             .await?
@@ -254,6 +334,8 @@ struct Transfer {
     /// Completion as a fraction between 0 and 1.
     progress: Option<f64>,
     folder_id: Option<String>,
+    /// The single file of a transfer that produced no folder.
+    file_id: Option<String>,
     /// The magnet link or URL the transfer was created from.
     src: Option<String>,
 }
@@ -404,4 +486,28 @@ fn status_of(status: Option<&str>) -> TorrentStatus {
         Some("seeding" | "finished") => TorrentStatus::Finished,
         _ => TorrentStatus::Error,
     }
+}
+
+/// The download infos found below a folder.
+type FolderInfos<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<DownloadInfo>, DebridError>> + Send + 'a>>;
+
+#[derive(Debug, Deserialize)]
+struct Folder {
+    content: Option<Vec<Item>>,
+}
+
+/// A file or folder in the cloud storage.
+#[derive(Debug, Deserialize)]
+struct Item {
+    id: Option<String>,
+    name: Option<String>,
+    size: Option<i64>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    link: Option<String>,
+}
+
+fn non_blank(text: Option<&str>) -> Option<&str> {
+    text.filter(|text| !text.trim().is_empty())
 }
