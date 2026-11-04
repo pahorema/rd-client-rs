@@ -16,3 +16,12 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+
+  - package-ecosystem: bun
+    directory: /web
+    schedule:
+      interval: weekly
+    groups:
+      web:
+        patterns: ["*"]
+        update-types: [minor, patch]
