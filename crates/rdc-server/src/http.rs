@@ -1,15 +1,17 @@
-//! Router assembly, path handling, and plain-text API errors.
+//! Router assembly, path handling, API errors, and embedded web assets.
 
 use std::{any::Any, fmt, sync::Arc};
 
 use axum::{
     Router,
+    body::Body,
     extract::{DefaultBodyLimit, Request},
-    http::{StatusCode, Uri},
+    http::{StatusCode, Uri, header},
     middleware::{self, Next},
     response::{IntoResponse, Redirect, Response},
-    routing::MethodRouter,
+    routing::{MethodRouter, get},
 };
+use rust_embed::RustEmbed;
 use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::{config::normalize_base_path, logging::LogControl};
@@ -76,10 +78,12 @@ impl<S> AppBuilder<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    /// Start an application with no API endpoints.
+    /// Start an application with embedded assets and no API endpoints.
     pub fn new(base_path: &str, logs: LogControl) -> Self {
         Self {
-            router: Router::new().fallback(|| async { StatusCode::NOT_FOUND }),
+            router: Router::new()
+                .route("/add", get(magnet_redirect))
+                .fallback(static_file),
             patterns: Vec::new(),
             base_path: normalize_base_path(base_path),
             logs,
@@ -275,4 +279,102 @@ fn panic_response(payload: Box<dyn Any + Send + 'static>) -> Response {
         .or_else(|| payload.downcast_ref::<&str>().copied())
         .unwrap_or("Internal server error");
     ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, message).into_response()
+}
+
+#[derive(RustEmbed)]
+#[folder = "$CARGO_MANIFEST_DIR/../../web/build"]
+#[allow_missing = true]
+struct WebAssets;
+
+async fn magnet_redirect(uri: Uri) -> Redirect {
+    let query = uri
+        .query()
+        .map_or(String::new(), |query| format!("?{query}"));
+    Redirect::temporary(&format!("./#/add{query}"))
+}
+
+async fn static_file(request: Request) -> Response {
+    let path = request.uri().path();
+    if is_api(path) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if !matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    ) {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+    let asset_path = path.trim_start_matches('/');
+    let requested = if asset_path.is_empty() {
+        "index.html"
+    } else {
+        asset_path
+    };
+    let asset = WebAssets::get(requested)
+        .map(|asset| (requested, asset))
+        .or_else(|| {
+            if requested.contains('.') {
+                None
+            } else {
+                WebAssets::get("index.html").map(|asset| ("index.html", asset))
+            }
+        });
+    let mut response = if let Some((name, asset)) = asset {
+        asset_response(name, asset.data)
+    } else if requested == "index.html" {
+        ([(header::CACHE_CONTROL, "no-cache")], "rd-client is running. The web UI is missing; build the web UI to use the browser application.\n").into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    };
+    if request.method() == axum::http::Method::HEAD {
+        *response.body_mut() = Body::empty();
+    }
+    response
+}
+
+fn asset_response(name: &str, bytes: std::borrow::Cow<'static, [u8]>) -> Response {
+    let mime = mime_guess::from_path(name)
+        .first_or_octet_stream()
+        .to_string();
+    let cache = if name == "index.html" {
+        "no-cache"
+    } else if name.starts_with("_app/immutable/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    (
+        [
+            (header::CONTENT_TYPE, mime.as_str()),
+            (header::CACHE_CONTROL, cache),
+        ],
+        bytes,
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_assets_have_mime_types_and_appropriate_cache_policies() {
+        let index = asset_response("index.html", b"<html></html>".as_slice().into());
+        assert_eq!(index.headers()[header::CONTENT_TYPE], "text/html");
+        assert_eq!(index.headers()[header::CACHE_CONTROL], "no-cache");
+        let script = asset_response("_app/immutable/start.js", b"code".as_slice().into());
+        assert!(
+            script.headers()[header::CONTENT_TYPE]
+                .to_str()
+                .unwrap()
+                .contains("javascript")
+        );
+        assert_eq!(
+            script.headers()[header::CACHE_CONTROL],
+            "public, max-age=31536000, immutable"
+        );
+        let css = asset_response("theme.css", b"style".as_slice().into());
+        assert_eq!(css.headers()[header::CONTENT_TYPE], "text/css");
+        assert_eq!(css.headers()[header::CACHE_CONTROL], "no-cache");
+    }
 }

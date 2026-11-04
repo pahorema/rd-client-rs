@@ -154,6 +154,38 @@ async fn unknown_api_paths_are_empty_not_found_and_wrong_methods_are_405() {
 }
 
 #[tokio::test]
+async fn index_and_ui_missing_page_are_healthy_and_not_cached() {
+    let app = builder("/base").build(());
+    for path in ["/", "/index.html", "/base/", "/base/index.html"] {
+        let response = request(app.clone(), path).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-cache");
+        let body = text(response).await;
+        assert!(body.contains("UI is missing") || body.contains("<html"));
+    }
+    assert_eq!(
+        request(app, "/missing.js").await.status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn magnet_redirect_preserves_the_encoded_query_under_both_mounts() {
+    let app = builder("/base").build(());
+    for path in [
+        "/add?magnet=magnet%3A%3Fxt%3Durn%3Abtih%3AAbC%26dn%3Dx%2By",
+        "/base/add?magnet=magnet%3A%3Fxt%3Durn%3Abtih%3AAbC%26dn%3Dx%2By",
+    ] {
+        let response = request(app.clone(), path).await;
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            response.headers()[header::LOCATION],
+            "./#/add?magnet=magnet%3A%3Fxt%3Durn%3Abtih%3AAbC%26dn%3Dx%2By"
+        );
+    }
+}
+
+#[tokio::test]
 async fn handler_errors_and_panics_return_plain_text_500() {
     let app = builder("/base")
         .route(
