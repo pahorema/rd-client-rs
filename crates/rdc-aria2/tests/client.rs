@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use rdc_aria2::{Client, DownloadState, Error};
+use rdc_aria2::{AddUriOptions, Client, DownloadState, Error};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -483,4 +483,61 @@ async fn tell_all_reports_a_failed_call_in_the_batch() {
         matches!(&error, Error::Rpc { code: 1, message } if message == "Unauthorized"),
         "{error:?}"
     );
+}
+
+#[tokio::test]
+async fn add_uri_sends_uris_and_options_and_returns_the_gid() {
+    let server = MockServer::start().await;
+    expect_call(
+        &server,
+        "aria2.addUri",
+        json!(["token:secret", ["https://host/file.mkv"], {"dir": "/downloads/Some.Release", "out": "file.mkv"}]),
+        result(&json!("2089b05ecca3d829")),
+    )
+    .await;
+    let options = AddUriOptions {
+        dir: Some("/downloads/Some.Release".to_owned()),
+        out: Some("file.mkv".to_owned()),
+    };
+
+    let gid = client(&server, "secret")
+        .add_uri(&["https://host/file.mkv"], &options)
+        .await
+        .unwrap();
+
+    assert_eq!(gid, "2089b05ecca3d829");
+}
+
+#[tokio::test]
+async fn add_uri_without_options_sends_an_empty_object() {
+    let server = MockServer::start().await;
+    expect_call(
+        &server,
+        "aria2.addUri",
+        json!(["token:secret", ["https://host/file.mkv"], {}]),
+        result(&json!("gid")),
+    )
+    .await;
+
+    client(&server, "secret")
+        .add_uri(&["https://host/file.mkv"], &AddUriOptions::default())
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn add_uri_rejects_an_empty_uri_list_without_calling_aria2() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(result(&json!("gid")))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let error = client(&server, "secret")
+        .add_uri(&[], &AddUriOptions::default())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, Error::EmptyUriList), "{error:?}");
 }

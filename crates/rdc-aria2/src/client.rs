@@ -139,6 +139,17 @@ pub struct Version {
     pub enabled_features: Vec<String>,
 }
 
+/// Options of a new download (`aria2.addUri`); unset options are not sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct AddUriOptions {
+    /// Directory on the aria2 host the file is saved to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dir: Option<String>,
+    /// File name inside `dir`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub out: Option<String>,
+}
+
 #[derive(Serialize)]
 struct Request<'a> {
     jsonrpc: &'static str,
@@ -202,6 +213,22 @@ impl Client {
     /// Any [`Error`] of the RPC round trip.
     pub async fn version(&self) -> Result<Version, Error> {
         self.call("aria2.getVersion", Vec::new()).await
+    }
+
+    /// `aria2.addUri`: queues a new download of the resource reachable at every URI of
+    /// `uris` and returns its GID.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::EmptyUriList`] when `uris` is empty, or any [`Error`] of the round trip.
+    pub async fn add_uri(&self, uris: &[&str], options: &AddUriOptions) -> Result<String, Error> {
+        if uris.is_empty() {
+            return Err(Error::EmptyUriList);
+        }
+        let options =
+            serde_json::to_value(options).expect("download options always serialize to JSON");
+        self.call("aria2.addUri", vec![Value::from(uris), options])
+            .await
     }
 
     /// `aria2.tellStatus`: the status of the download `gid`.

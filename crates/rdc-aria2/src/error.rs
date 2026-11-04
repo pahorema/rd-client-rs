@@ -7,6 +7,9 @@ pub enum Error {
     /// The configured RPC URL does not point at the JSON-RPC endpoint.
     #[error("The URL must end with /jsonrpc")]
     InvalidUrl,
+    /// `aria2.addUri` was called without any URI.
+    #[error("the URI list cannot be empty")]
+    EmptyUriList,
     /// The HTTP client could not be constructed.
     #[error("failed to build the HTTP client: {0}")]
     ClientBuild(#[source] reqwest::Error),

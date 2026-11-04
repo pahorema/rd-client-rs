@@ -19,6 +19,6 @@ mod client;
 mod error;
 mod status;
 
-pub use client::{Client, ClientBuilder, DEFAULT_TIMEOUT, TELL_ALL_LIMIT, Version};
+pub use client::{AddUriOptions, Client, ClientBuilder, DEFAULT_TIMEOUT, TELL_ALL_LIMIT, Version};
 pub use error::Error;
 pub use status::{DownloadFile, DownloadState, DownloadStatus, FileUri};
