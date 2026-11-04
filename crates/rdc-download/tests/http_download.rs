@@ -2,7 +2,7 @@
 
 pub mod support;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,6 +43,16 @@ impl Run {
             .await
             .expect("download finishes in time")
     }
+
+    fn partial(&self) -> PathBuf {
+        partial_of(&self.target)
+    }
+}
+
+fn partial_of(target: &Path) -> PathBuf {
+    let mut name = target.as_os_str().to_owned();
+    name.push(".download");
+    PathBuf::from(name)
 }
 
 async fn download(url: &str, config: InternalConfig) -> (Run, Outcome) {
@@ -60,6 +70,7 @@ fn assert_downloaded(run: &Run, data: &[u8]) {
         written.len(),
         data.len()
     );
+    assert!(!run.partial().exists(), "partial file removed");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -92,14 +103,39 @@ async fn invalid_links_fail_to_start() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn http_errors_fail_with_the_status() {
+async fn http_errors_fail_with_the_status_and_remove_the_stale_partial() {
     let server = TestServer::start(|_| Reply::status(404)).await;
-    let (run, outcome) = download(&server.url("/missing"), config()).await;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let target = dir.path().join("file.bin");
+    std::fs::write(partial_of(&target), b"stale").expect("stale partial");
+    let (_tx, rx) = watch::channel(config());
+    let download = HttpDownload::new(server.url("/missing"), &target, rx);
+    download.start().await.expect("start");
+    let outcome = tokio::time::timeout(WAIT_LIMIT, download.completion().wait())
+        .await
+        .expect("finishes");
     assert_eq!(
         outcome,
         Err("Response status code does not indicate success: 404 (Not Found).".to_owned())
     );
-    assert!(!run.target.exists());
+    assert!(!partial_of(&target).exists());
+    assert!(!target.exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn existing_file_is_replaced_and_stale_partial_removed() {
+    let data = test_data(4096);
+    let server = TestServer::file(Arc::clone(&data), FileOptions::default()).await;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let target = dir.path().join("file.bin");
+    std::fs::write(&target, b"old content").expect("old file");
+    std::fs::write(partial_of(&target), vec![7; 100_000]).expect("stale partial");
+    let (_tx, rx) = watch::channel(config());
+    let download = HttpDownload::new(server.url("/file.bin"), &target, rx);
+    download.start().await.expect("start");
+    assert_eq!(download.completion().wait().await, Ok(()));
+    assert_eq!(std::fs::read(&target).expect("target"), *data);
+    assert!(!partial_of(&target).exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

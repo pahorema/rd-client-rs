@@ -1,4 +1,8 @@
 //! The internal HTTP engine.
+//!
+//! A download writes into `<file>.download` — removing a stale one first — and renames it to
+//! `<file>` on success, replacing an existing file. On failure or cancellation the partial file
+//! is removed.
 
 mod config;
 mod connection;
@@ -26,7 +30,7 @@ use crate::engine::{
 ///
 /// [`start`](DownloadEngine::start) returns a random UUID as remote id and runs the transfer
 /// in the background on the current Tokio runtime. Cancelling completes the download with
-/// [`CANCELLED_MESSAGE`].
+/// [`CANCELLED_MESSAGE`] after the partial file was removed.
 #[derive(Debug)]
 pub struct HttpDownload {
     shared: Arc<Shared>,
@@ -97,7 +101,7 @@ impl DownloadEngine for HttpDownload {
         self.shared.completion.subscribe()
     }
 
-    /// Stops the download and returns once it finished.
+    /// Stops the download and returns once its partial file was removed.
     async fn cancel(&self) {
         self.shared.cancel.cancel();
         if !self.shared.started.load(Ordering::SeqCst) {
@@ -116,7 +120,8 @@ impl DownloadEngine for HttpDownload {
 /// Runs the whole download and reports its outcome.
 async fn run(shared: Arc<Shared>, url: Url) {
     let context = Arc::new(Context::new(shared.config.clone(), shared.cancel.clone()));
-    let outcome: Outcome = match download(&context, &url, &shared.file_path).await {
+    let partial = transfer::partial_path(&shared.file_path);
+    let outcome: Outcome = match download(&context, &url, &shared.file_path, &partial).await {
         Ok(total) => {
             shared.progress.send_replace(Progress {
                 bytes_done: total,
@@ -127,6 +132,9 @@ async fn run(shared: Arc<Shared>, url: Url) {
             Ok(())
         }
         Err(error) => {
+            if let Err(cleanup) = transfer::remove_file_if_exists(&partial).await {
+                tracing::warn!("{cleanup}");
+            }
             let error = if shared.cancel.is_cancelled() {
                 TransferError::Cancelled
             } else {
@@ -139,11 +147,20 @@ async fn run(shared: Arc<Shared>, url: Url) {
     shared.completion.complete(outcome);
 }
 
-/// Fetches the file; returns its size.
-async fn download(context: &Arc<Context>, url: &Url, target: &Path) -> Result<u64, TransferError> {
-    let size = transfer::fetch_file(context, url, target).await?;
+/// Fetches the file into `partial` and moves it to `target`; returns its size.
+async fn download(
+    context: &Arc<Context>,
+    url: &Url,
+    target: &Path,
+    partial: &Path,
+) -> Result<u64, TransferError> {
+    transfer::remove_file_if_exists(partial).await?;
+    let size = transfer::fetch_file(context, url, partial).await?;
     if context.cancel.is_cancelled() {
         return Err(TransferError::Cancelled);
     }
+    tokio::fs::rename(partial, target)
+        .await
+        .map_err(|error| TransferError::io(target, error))?;
     Ok(size)
 }
