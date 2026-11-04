@@ -2,6 +2,10 @@
 	import logo from '#lib/assets/logo.svg';
 	import { auth, errorMessage, settings } from '#lib/api/index.js';
 	import ThemeToggle from '#lib/components/theme-toggle.svelte';
+	import type { Profile } from '#lib/api/types.js';
+	import PremiumStatus from '#lib/components/premium-status.svelte';
+	import SpeedLimit from '#lib/components/speed-limit.svelte';
+	import UpdateNotice from '#lib/components/update-notice.svelte';
 	import { buttonVariants } from '#lib/components/ui/button/index.js';
 	import * as DropdownMenu from '#lib/components/ui/dropdown-menu/index.js';
 	import { cn } from '#lib/utils.js';
@@ -34,6 +38,7 @@
 
 	let version = $state<string | null>(null);
 	let logoutError = $state<string | null>(null);
+	let profile = $state<Profile | null>(null);
 
 	function isActive(link: (typeof links)[number]) {
 		return link.routes.includes(page.route.id ?? '');
@@ -55,6 +60,10 @@
 			.version()
 			.then((result) => (version = result?.version ?? null))
 			.catch(() => (version = null));
+		settings
+			.profile()
+			.then((result) => (profile = result))
+			.catch(() => (profile = null));
 	});
 </script>
 
@@ -82,6 +91,8 @@
 		</div>
 
 		<div class="ml-auto flex items-center gap-1">
+			{#if profile}<PremiumStatus {profile} />{/if}
+			<SpeedLimit />
 			<ThemeToggle />
 
 			<DropdownMenu.Root>
@@ -135,3 +146,9 @@
 		</p>
 	{/if}
 </header>
+
+{#if profile && page.route.id !== '/(app)/profile'}
+	<div class="mx-auto w-full max-w-7xl px-4 pt-4 empty:hidden">
+		<UpdateNotice {profile} />
+	</div>
+{/if}
