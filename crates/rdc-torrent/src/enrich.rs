@@ -1,4 +1,6 @@
+use crate::bencode::{self, Node, Value};
 use std::{borrow::Cow, collections::HashSet};
+use thiserror::Error;
 
 /// Adds unique trackers and groups existing parameters in first-key order.
 /// Values use percent encoding (including display names); exact topics retain readable colons.
@@ -84,4 +86,75 @@ fn push_unique(items: &mut Vec<String>, seen: &mut HashSet<String>, value: Strin
     if seen.insert(value.to_lowercase()) {
         items.push(value);
     }
+}
+
+/// Invalid input for torrent tracker enrichment.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum EnrichTorrentError {
+    /// Empty torrent data cannot be decoded.
+    #[error("torrent bytes cannot be empty")]
+    Empty,
+    /// The payload is malformed bencode.
+    #[error("invalid torrent file format: {0}")]
+    Bencode(#[from] bencode::DecodeError),
+    /// The root is not a bencoded dictionary.
+    #[error("invalid torrent file format: expected a dictionary")]
+    NotDictionary,
+}
+
+/// Merges tier trackers, the primary announce, and new trackers, in that order.
+/// Changed output has one tracker per tier and canonical bencode encoding.
+/// No additions return byte-identical borrowed input, even with noncanonical encoding.
+pub fn enrich_torrent<'src>(
+    bytes: &'src [u8],
+    trackers: &[String],
+) -> Result<Cow<'src, [u8]>, EnrichTorrentError> {
+    if bytes.is_empty() {
+        return Err(EnrichTorrentError::Empty);
+    }
+    let mut root = bencode::decode(bytes)?;
+    let Value::Dictionary(entries) = &mut root.value else {
+        return Err(EnrichTorrentError::NotDictionary);
+    };
+    if trackers.is_empty() {
+        return Ok(Cow::Borrowed(bytes));
+    }
+    let mut all = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(tiers) = entries
+        .get(b"announce-list".as_slice())
+        .and_then(Node::list)
+    {
+        for tier in tiers.iter().filter_map(Node::list) {
+            for value in tier.iter().filter_map(Node::bytes) {
+                push_unique(
+                    &mut all,
+                    &mut seen,
+                    String::from_utf8_lossy(value).into_owned(),
+                );
+            }
+        }
+    }
+    if let Some(value) = entries.get(b"announce".as_slice()).and_then(Node::bytes) {
+        push_unique(
+            &mut all,
+            &mut seen,
+            String::from_utf8_lossy(value).into_owned(),
+        );
+    }
+    let previous = all.len();
+    for tracker in trackers {
+        push_unique(&mut all, &mut seen, tracker.clone());
+    }
+    if previous == all.len() {
+        return Ok(Cow::Borrowed(bytes));
+    }
+    let tiers = all
+        .iter()
+        .map(|s| Node::new(Value::List(vec![Node::new(Value::Bytes(s.as_bytes()))])))
+        .collect();
+    entries.insert(b"announce-list", Node::new(Value::List(tiers)));
+    entries.insert(b"announce", Node::new(Value::Bytes(all[0].as_bytes())));
+    Ok(Cow::Owned(bencode::encode(&root)))
 }

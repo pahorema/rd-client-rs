@@ -8,6 +8,6 @@ mod enrich;
 mod magnet;
 mod torrent;
 
-pub use enrich::enrich_magnet;
+pub use enrich::{EnrichTorrentError, enrich_magnet, enrich_torrent};
 pub use magnet::{MagnetLink, ParseMagnetError};
 pub use torrent::{ParseTorrentError, TorrentEntry, TorrentFile};
