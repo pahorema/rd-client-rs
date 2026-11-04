@@ -178,6 +178,18 @@ mod tests {
     }
 
     #[test]
+    fn null_resets_to_the_type_default() {
+        let mut settings = Settings::new();
+        settings.apply("General:LogLevel", None).unwrap();
+        settings.apply("General:UnpackLimit", None).unwrap();
+        settings.apply("General:Categories", Some("tv")).unwrap();
+        settings.apply("General:Categories", None).unwrap();
+        assert_eq!(settings.general.log_level, LogLevel::Verbose);
+        assert_eq!(settings.general.unpack_limit, 0);
+        assert_eq!(settings.general.categories, None);
+    }
+
+    #[test]
     fn invalid_text_keeps_the_current_value() {
         let mut settings = Settings::new();
         settings.apply("General:DownloadLimit", Some("7")).unwrap();
@@ -202,6 +214,21 @@ mod tests {
     }
 
     #[test]
+    fn unknown_keys_are_rejected() {
+        let mut settings = Settings::new();
+        for key in ["General", "General:Nope", "Nope:LogLevel", "LogLevel", ""] {
+            assert_eq!(
+                settings.apply(key, Some("1")),
+                Err(ApplySettingError::UnknownKey {
+                    key: key.to_owned()
+                })
+            );
+            assert_eq!(settings.value(key), None, "key {key:?}");
+        }
+        assert_eq!(settings, Settings::new());
+    }
+
+    #[test]
     fn values_are_typed() {
         let settings = Settings::new();
         assert_eq!(
@@ -219,6 +246,32 @@ mod tests {
         assert_eq!(
             settings.value("General:DisableUpdateNotifications"),
             Some(SettingValue::Boolean(false))
+        );
+    }
+
+    #[test]
+    fn stored_rows_round_trip() {
+        let mut settings = Settings::new();
+        settings
+            .apply("General:LogLevel", Some("Information"))
+            .unwrap();
+        settings.apply("General:BannedTrackers", Some("")).unwrap();
+        settings
+            .apply("General:DownloadLimit", Some("0x10"))
+            .unwrap();
+        let rows: Vec<(&str, Option<String>)> = settings.stored_rows().collect();
+        let mut reloaded = Settings::new();
+        for (key, text) in &rows {
+            reloaded.apply(key, text.as_deref()).unwrap();
+        }
+        assert_eq!(reloaded, settings);
+        assert_eq!(
+            settings
+                .value("General:DownloadLimit")
+                .unwrap()
+                .stored_text()
+                .as_deref(),
+            Some("16")
         );
     }
 
