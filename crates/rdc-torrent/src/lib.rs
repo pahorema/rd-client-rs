@@ -7,7 +7,9 @@ pub mod bencode;
 mod enrich;
 mod magnet;
 mod torrent;
+mod trackers;
 
 pub use enrich::{EnrichTorrentError, enrich_magnet, enrich_torrent};
 pub use magnet::{MagnetLink, ParseMagnetError};
 pub use torrent::{ParseTorrentError, TorrentEntry, TorrentFile};
+pub use trackers::parse_tracker_list;
