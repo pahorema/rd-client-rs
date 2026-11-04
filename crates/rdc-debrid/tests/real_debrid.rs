@@ -7,7 +7,7 @@ use rdc_debrid::{
     DebridError, ProviderConfig, ProviderHttp, RateLimitCoordinator, RealDebrid, RemoteTorrent,
     RetryPolicy,
 };
-use rdc_model::{Provider, Torrent, TorrentStatus};
+use rdc_model::{Provider, RemoteFile, Torrent, TorrentDownloadAction, TorrentStatus};
 use serde_json::json;
 use wiremock::matchers::{
     bearer_token, body_bytes, body_string, method, path, query_param, query_param_is_missing,
@@ -609,4 +609,120 @@ async fn other_refresh_errors_are_returned() {
 
     assert_eq!(error.to_string(), "Bad token");
     assert_eq!(torrent.rd_status_raw, None);
+}
+
+fn torrent_with_files(files: &[(i64, &str, i64)]) -> Torrent {
+    let files: Vec<RemoteFile> = files
+        .iter()
+        .map(|&(id, path, bytes)| RemoteFile {
+            id,
+            path: path.to_owned(),
+            bytes,
+            ..RemoteFile::default()
+        })
+        .collect();
+    let mut torrent = torrent_with_id("ID");
+    torrent.client_kind = Some(Provider::RealDebrid);
+    torrent.set_files(&files);
+    torrent
+}
+
+async fn mock_select(server: &MockServer, files: &str, expected_calls: u64) {
+    Mock::given(method("POST"))
+        .and(path("/rest/1.0/torrents/selectFiles/ID"))
+        .and(body_string(format!("files={}", files.replace(',', "%2C"))))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(expected_calls)
+        .mount(server)
+        .await;
+}
+
+const MIB: i64 = 1024 * 1024;
+
+#[tokio::test]
+async fn selecting_files_sends_the_ids_of_downloadable_files() {
+    let server = MockServer::start().await;
+    mock_select(&server, "1,3", 1).await;
+    let mut torrent = torrent_with_files(&[
+        (1, "/Show/e01.mkv", 700 * MIB),
+        (2, "/Show/sample.mkv", 5 * MIB),
+        (3, "/Show/e02.mkv", 700 * MIB),
+    ]);
+    torrent.download_min_size = 10;
+
+    let selected = client(&server)
+        .select_files(&torrent)
+        .await
+        .expect("selected");
+
+    assert_eq!(selected, Some(2));
+}
+
+#[tokio::test]
+async fn manual_selection_keeps_matching_suffixes_regardless_of_size() {
+    let server = MockServer::start().await;
+    mock_select(&server, "2", 1).await;
+    let mut torrent = torrent_with_files(&[(1, "/Show/e01.mkv", MIB), (2, "/Show/e02.mkv", MIB)]);
+    torrent.download_action = TorrentDownloadAction::DownloadManual;
+    torrent.download_manual_files = Some("e02.mkv".to_owned());
+    torrent.download_min_size = 100;
+
+    let selected = client(&server)
+        .select_files(&torrent)
+        .await
+        .expect("selected");
+
+    assert_eq!(selected, Some(1));
+}
+
+#[tokio::test]
+async fn selecting_when_every_file_is_excluded_sends_nothing() {
+    let server = MockServer::start().await;
+    let mut torrent = torrent_with_files(&[(1, "/Show/e01.nfo", MIB)]);
+    torrent.exclude_regex = Some(r"\.nfo$".to_owned());
+
+    let selected = client(&server)
+        .select_files(&torrent)
+        .await
+        .expect("selected");
+
+    assert_eq!(selected, Some(0));
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn selecting_with_an_invalid_filter_fails() {
+    let server = MockServer::start().await;
+    let mut torrent = torrent_with_files(&[(1, "/Show/e01.mkv", MIB)]);
+    torrent.include_regex = Some("(".to_owned());
+
+    let error = client(&server)
+        .select_files(&torrent)
+        .await
+        .expect_err("invalid filter");
+
+    assert!(matches!(error, DebridError::Filter(_)), "{error:?}");
+}
+
+#[tokio::test]
+async fn deleting_a_torrent_sends_a_delete_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/rest/1.0/torrents/delete/ID"))
+        .and(bearer_token("secret"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client(&server)
+        .delete(&torrent_with_id("ID"))
+        .await
+        .expect("deleted");
 }

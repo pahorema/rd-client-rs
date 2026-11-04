@@ -1,7 +1,7 @@
 //! Client of the Real-Debrid REST API.
 
 use jiff::{SignedDuration, Timestamp};
-use rdc_model::{Provider, RemoteFile, Torrent, TorrentStatus};
+use rdc_model::{Provider, RemoteFile, Torrent, TorrentDownloadAction, TorrentStatus};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -162,6 +162,51 @@ impl RealDebrid {
             },
         };
         apply(torrent, remote);
+        Ok(())
+    }
+
+    /// Selects the files Real-Debrid downloads.
+    ///
+    /// Manually selected torrents keep the files whose path ends with one of
+    /// the manual entries; the torrent's file filter then applies. Returns
+    /// `Some(0)` without contacting Real-Debrid when no file is left and
+    /// `None` while the torrent has no provider id.
+    pub async fn select_files(&self, torrent: &Torrent) -> Result<Option<usize>, DebridError> {
+        let Some(id) = torrent.rd_id.as_deref() else {
+            return Ok(None);
+        };
+        let files = torrent.files();
+        let manual = torrent.manual_files();
+        let manual_only = torrent.download_action == TorrentDownloadAction::DownloadManual;
+        let filter = torrent.file_filter()?;
+        let mut selected = Vec::new();
+        for file in &files {
+            if manual_only && !manual.iter().any(|suffix| file.path.ends_with(suffix)) {
+                continue;
+            }
+            if filter.is_downloadable(&file.path, file.bytes)? {
+                selected.push(file.id.to_string());
+            }
+        }
+        tracing::debug!(%id, selected = selected.len(), total = files.len(), "selecting Real-Debrid files");
+        if selected.is_empty() {
+            return Ok(Some(0));
+        }
+        let request = self
+            .request(Method::POST, &format!("torrents/selectFiles/{id}"))?
+            .form(&[("files", selected.join(","))]);
+        self.execute(request).await?;
+        Ok(Some(selected.len()))
+    }
+
+    /// Removes the torrent from the account; torrents without provider id
+    /// need no request.
+    pub async fn delete(&self, torrent: &Torrent) -> Result<(), DebridError> {
+        let Some(id) = torrent.rd_id.as_deref() else {
+            return Ok(());
+        };
+        self.execute(self.request(Method::DELETE, &format!("torrents/delete/{id}"))?)
+            .await?;
         Ok(())
     }
 
