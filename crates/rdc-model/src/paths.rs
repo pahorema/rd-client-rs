@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use url::Url;
 
-use crate::{Download, Torrent};
+use crate::{Download, DownloadInfo, Torrent};
 
 /// Whether the platform forbids `c` in a path (Unix: NUL; Windows: NUL,
 /// the other control characters and `|`).
@@ -250,6 +250,90 @@ pub fn expected_file_size(torrent: &Torrent, download: &Download) -> Option<i64>
         return None;
     }
     (file.bytes > 0).then_some(file.bytes)
+}
+
+/// Finds the refreshed provider link that belongs to `download` among the
+/// links the provider currently reports for its torrent.
+///
+/// File names are not unique inside a torrent, so a name only counts when
+/// it identifies exactly one link; an ambiguous name yields `None` rather
+/// than a sibling's link. In order:
+/// 1. a link equal to [`Download::path`] (the stored restricted link);
+/// 2. when [`Download::file_name`] is not blank, the infos with that file
+///    name (case-insensitive), if exactly one, else `None`;
+/// 3. the infos whose file name or own link's last segment equals the last
+///    segment of [`Download::path`] (URL-decoded for URLs; case-insensitive),
+///    if exactly one, else `None`;
+/// 4. the only info, when there is exactly one.
+///
+/// Blank names never match.
+pub fn match_download_info<'a>(
+    infos: &'a [DownloadInfo],
+    download: &Download,
+) -> Option<&'a DownloadInfo> {
+    if let Some(same_link) = infos
+        .iter()
+        .find(|info| info.restricted_link == download.path)
+    {
+        return Some(same_link);
+    }
+    if let Some(file_name) = non_blank(download.file_name.as_deref()) {
+        let mut by_file_name = infos
+            .iter()
+            .filter(|info| info_file_name_is(info, file_name))
+            .peekable();
+        if by_file_name.peek().is_some() {
+            return single(by_file_name);
+        }
+    }
+    if let Some(path_file_name) =
+        path_file_name(&download.path).filter(|name| !name.trim().is_empty())
+    {
+        let mut by_path_file_name = infos
+            .iter()
+            .filter(|info| {
+                info_file_name_is(info, &path_file_name)
+                    || path_file_name_is(&info.restricted_link, &path_file_name)
+            })
+            .peekable();
+        if by_path_file_name.peek().is_some() {
+            return single(by_path_file_name);
+        }
+    }
+    match infos {
+        [only] => Some(only),
+        _ => None,
+    }
+}
+
+/// The only item of `candidates`, or `None` when there are several.
+fn single<T>(mut candidates: impl Iterator<Item = T>) -> Option<T> {
+    let first = candidates.next()?;
+    candidates.next().is_none().then_some(first)
+}
+
+fn info_file_name_is(info: &DownloadInfo, name: &str) -> bool {
+    non_blank(info.file_name.as_deref()).is_some_and(|info_name| eq_ignore_case(info_name, name))
+}
+
+fn path_file_name_is(path: &str, name: &str) -> bool {
+    path_file_name(path).is_some_and(|path_name| eq_ignore_case(&path_name, name))
+}
+
+/// The last segment of a link (URL-decoded) or of a plain path; `None` for
+/// a blank input.
+fn path_file_name(path: &str) -> Option<String> {
+    if path.trim().is_empty() {
+        return None;
+    }
+    // A one-letter scheme is a Windows drive, not a URL.
+    if let Ok(url) = Url::parse(path)
+        && url.scheme().len() > 1
+    {
+        return Some(url_decode(last_segment(url.path())));
+    }
+    let name = path.rsplit(std::path::is_separator).next().unwrap_or(path);
+    Some(name.to_owned())
 }
 
 /// Case-insensitive comparison using simple Unicode upper-casing.
@@ -652,6 +736,155 @@ mod tests {
             let torrent = sized_torrent(&[("dir/file.txt", 42)]);
             let download = download(Some("https://fake.url"), None);
             assert_eq!(expected_file_size(&torrent, &download), None);
+        }
+    }
+
+    mod link_matcher {
+        use super::super::*;
+
+        fn info(file_name: Option<&str>, restricted_link: &str) -> DownloadInfo {
+            DownloadInfo {
+                file_name: file_name.map(str::to_owned),
+                restricted_link: restricted_link.to_owned(),
+            }
+        }
+
+        fn download(file_name: Option<&str>, path: &str) -> Download {
+            Download {
+                file_name: file_name.map(str::to_owned),
+                path: path.to_owned(),
+                ..Download::default()
+            }
+        }
+
+        fn matched<'a>(infos: &'a [DownloadInfo], download: &Download) -> Option<&'a str> {
+            match_download_info(infos, download).map(|info| info.restricted_link.as_str())
+        }
+
+        #[test]
+        fn matches_by_file_name() {
+            let download = download(
+                Some("episode.mkv"),
+                "https://cdn.example.com/old-token/episode.mkv",
+            );
+            let infos = [
+                info(Some("other.mkv"), "https://cdn.example.com/new/other.mkv"),
+                info(
+                    Some("episode.mkv"),
+                    "https://cdn.example.com/new/episode.mkv",
+                ),
+            ];
+            assert_eq!(
+                matched(&infos, &download),
+                Some("https://cdn.example.com/new/episode.mkv")
+            );
+        }
+
+        #[test]
+        fn matches_by_decoded_url_segment_without_file_name() {
+            let download = download(
+                None,
+                "https://cdn.example.com/old-token/Yakuza.Fianc%C3%A9.S01E05.mkv",
+            );
+            let infos = [info(
+                Some("Yakuza.Fiancé.S01E05.mkv"),
+                "https://cdn.example.com/new-token/Yakuza.Fianc%C3%A9.S01E05.mkv",
+            )];
+            assert_eq!(
+                matched(&infos, &download),
+                Some("https://cdn.example.com/new-token/Yakuza.Fianc%C3%A9.S01E05.mkv")
+            );
+        }
+
+        #[test]
+        fn single_file_torrent_returns_the_only_info() {
+            let download = download(None, "https://cdn.example.com/old-token/movie.mkv");
+            let infos = [info(
+                Some("movie.mkv"),
+                "https://cdn.example.com/new-token/movie.mkv",
+            )];
+            assert_eq!(
+                matched(&infos, &download),
+                Some("https://cdn.example.com/new-token/movie.mkv")
+            );
+        }
+
+        #[test]
+        fn several_files_without_match_return_none() {
+            let download = download(None, "https://cdn.example.com/old-token/unknown.mkv");
+            let infos = [
+                info(Some("a.mkv"), "https://cdn.example.com/new/a.mkv"),
+                info(Some("b.mkv"), "https://cdn.example.com/new/b.mkv"),
+            ];
+            assert_eq!(matched(&infos, &download), None);
+        }
+
+        #[test]
+        fn unchanged_own_link_wins_over_duplicate_file_names() {
+            let download = download(Some("eboot.bin"), "https://alldebrid.com/f/second");
+            let infos = [
+                info(Some("eboot.bin"), "https://alldebrid.com/f/first"),
+                info(Some("eboot.bin"), "https://alldebrid.com/f/second"),
+            ];
+            assert_eq!(
+                matched(&infos, &download),
+                Some("https://alldebrid.com/f/second")
+            );
+        }
+
+        #[test]
+        fn duplicate_file_names_with_refreshed_links_return_none() {
+            let download = download(Some("eboot.bin"), "https://alldebrid.com/f/old-second");
+            let infos = [
+                info(Some("eboot.bin"), "https://alldebrid.com/f/new-first"),
+                info(Some("eboot.bin"), "https://alldebrid.com/f/new-second"),
+            ];
+            assert_eq!(matched(&infos, &download), None);
+        }
+
+        #[test]
+        fn duplicate_url_segments_without_file_name_return_none() {
+            let download = download(None, "https://cdn.example.com/old-token/sub/eboot.bin");
+            let infos = [
+                info(None, "https://cdn.example.com/new-token/eboot.bin"),
+                info(None, "https://cdn.example.com/new-token/sub/eboot.bin"),
+            ];
+            assert_eq!(matched(&infos, &download), None);
+        }
+
+        #[test]
+        fn no_infos_return_none() {
+            assert_eq!(matched(&[], &download(None, "https://x/a.mkv")), None);
+        }
+
+        #[test]
+        fn file_names_compare_case_insensitively() {
+            let download = download(Some("ÉPISODE.MKV"), "https://x/old");
+            let infos = [
+                info(Some("épisode.mkv"), "https://x/new"),
+                info(Some("other.mkv"), "https://x/other"),
+            ];
+            assert_eq!(matched(&infos, &download), Some("https://x/new"));
+        }
+
+        #[test]
+        fn blank_names_never_match() {
+            let download = download(Some(" "), "https://cdn.example.com/dir/");
+            let infos = [
+                info(Some(" "), "https://cdn.example.com/new/a.mkv"),
+                info(None, "https://cdn.example.com/new/b.mkv"),
+            ];
+            assert_eq!(matched(&infos, &download), None);
+        }
+
+        #[test]
+        fn plain_paths_match_by_their_last_component() {
+            let download = download(None, "folder/movie.mkv");
+            let infos = [
+                info(Some("movie.mkv"), "highway://1/svc/2"),
+                info(Some("other.mkv"), "highway://1/svc/3"),
+            ];
+            assert_eq!(matched(&infos, &download), Some("highway://1/svc/2"));
         }
     }
 }
