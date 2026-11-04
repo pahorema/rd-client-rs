@@ -4,7 +4,7 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer};
 
-use crate::wire::number;
+use crate::wire::{lenient_text, number};
 
 /// State of a Download Station task.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -127,6 +127,147 @@ impl<'de> Deserialize<'de> for TaskStatus {
     }
 }
 
+/// A Download Station task.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct Task {
+    /// Task id.
+    #[serde(default)]
+    pub id: String,
+    /// Kind of task (`https`, `bt`, …).
+    #[serde(rename = "type", default)]
+    pub kind: Option<String>,
+    /// Owner of the task.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Title (usually the file name).
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Total size in bytes (0 while unknown).
+    #[serde(default, deserialize_with = "number")]
+    pub size: u64,
+    /// Current state.
+    #[serde(default)]
+    pub status: TaskStatus,
+    /// Extra state details, carrying the error of a failed task.
+    #[serde(default)]
+    pub status_extra: Option<StatusExtra>,
+    /// The `detail`, `file` and `transfer` information.
+    #[serde(default)]
+    pub additional: Option<TaskAdditional>,
+}
+
+impl Task {
+    /// The URI the task downloads from.
+    pub fn uri(&self) -> Option<&str> {
+        self.detail()?.uri.as_deref()
+    }
+
+    /// The error DSM reported for this task, if it is not blank.
+    pub fn error_detail(&self) -> Option<&str> {
+        self.status_extra
+            .as_ref()?
+            .error_detail
+            .as_deref()
+            .filter(|detail| !detail.trim().is_empty())
+    }
+
+    /// Downloaded bytes (0 when not reported).
+    pub fn size_downloaded(&self) -> u64 {
+        self.transfer()
+            .map_or(0, |transfer| transfer.size_downloaded)
+    }
+
+    /// Download speed in bytes per second (0 when not reported).
+    pub fn speed_download(&self) -> u64 {
+        self.transfer()
+            .map_or(0, |transfer| transfer.speed_download)
+    }
+
+    fn detail(&self) -> Option<&TaskDetail> {
+        self.additional.as_ref()?.detail.as_ref()
+    }
+
+    fn transfer(&self) -> Option<&TaskTransfer> {
+        self.additional.as_ref()?.transfer.as_ref()
+    }
+}
+
+/// `status_extra` of a task.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct StatusExtra {
+    /// Error of a failed task (for example `torrent_duplicate`).
+    #[serde(default, deserialize_with = "lenient_text")]
+    pub error_detail: Option<String>,
+}
+
+/// `additional` information of a task.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct TaskAdditional {
+    /// Source and destination details.
+    #[serde(default)]
+    pub detail: Option<TaskDetail>,
+    /// Files of the task.
+    #[serde(default)]
+    pub file: Vec<TaskFile>,
+    /// Transfer progress.
+    #[serde(default)]
+    pub transfer: Option<TaskTransfer>,
+}
+
+/// `additional.detail` of a task.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct TaskDetail {
+    /// URI the task downloads from.
+    #[serde(default)]
+    pub uri: Option<String>,
+    /// Destination folder, relative to the shared folders.
+    #[serde(default)]
+    pub destination: Option<String>,
+    /// Creation time (Unix seconds).
+    #[serde(default, deserialize_with = "number")]
+    pub create_time: u64,
+    /// Start time (Unix seconds, 0 when not started).
+    #[serde(default, deserialize_with = "number")]
+    pub started_time: u64,
+    /// Completion time (Unix seconds, 0 when not completed).
+    #[serde(default, deserialize_with = "number")]
+    pub completed_time: u64,
+}
+
+/// One file of a task (`additional.file`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct TaskFile {
+    /// File name.
+    #[serde(default)]
+    pub filename: Option<String>,
+    /// Size in bytes.
+    #[serde(default, deserialize_with = "number")]
+    pub size: u64,
+    /// Downloaded bytes.
+    #[serde(default, deserialize_with = "number")]
+    pub size_downloaded: u64,
+    /// Whether the file is selected for download.
+    #[serde(default)]
+    pub wanted: bool,
+}
+
+/// `additional.transfer` of a task.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct TaskTransfer {
+    /// Downloaded bytes.
+    #[serde(default, deserialize_with = "number")]
+    pub size_downloaded: u64,
+    /// Uploaded bytes.
+    #[serde(default, deserialize_with = "number")]
+    pub size_uploaded: u64,
+    /// Download speed in bytes per second.
+    #[serde(default, deserialize_with = "number")]
+    pub speed_download: u64,
+    /// Upload speed in bytes per second.
+    #[serde(default, deserialize_with = "number")]
+    pub speed_upload: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +294,29 @@ mod tests {
         let parsed: Vec<TaskStatus> = serde_json::from_str(r#"[8, "13"]"#).unwrap();
 
         assert_eq!(parsed, [TaskStatus::Seeding, TaskStatus::Downloaded]);
+    }
+
+    #[test]
+    fn non_string_error_detail_is_kept_as_text() {
+        let extra: StatusExtra = serde_json::from_str(r#"{"error_detail": {"code": 3}}"#).unwrap();
+
+        assert_eq!(extra.error_detail.as_deref(), Some(r#"{"code":3}"#));
+    }
+
+    #[test]
+    fn blank_error_detail_is_not_an_error() {
+        let task: Task =
+            serde_json::from_str(r#"{"id": "a", "status_extra": {"error_detail": " "}}"#).unwrap();
+
+        assert_eq!(task.error_detail(), None);
+    }
+
+    #[test]
+    fn missing_additional_information_reads_as_zero() {
+        let task: Task = serde_json::from_str(r#"{"id": "a", "size": 10, "status": 2}"#).unwrap();
+
+        assert_eq!(task.uri(), None);
+        assert_eq!(task.size_downloaded(), 0);
+        assert_eq!(task.speed_download(), 0);
     }
 }

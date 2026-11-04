@@ -4,6 +4,7 @@ use std::fmt;
 
 use serde::Deserializer;
 use serde::de::{self, Visitor};
+use serde_json::Value;
 
 /// An unsigned integer sent as a number, a numeric string or `null` (0).
 pub(crate) fn number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
@@ -39,4 +40,17 @@ pub(crate) fn number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, 
     }
 
     deserializer.deserialize_any(NumberVisitor)
+}
+
+/// Free text that DSM normally sends as a string but occasionally as another JSON value;
+/// non-string values are kept as their JSON text, `null` becomes `None`.
+pub(crate) fn lenient_text<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let value: Value = serde::Deserialize::deserialize(deserializer)?;
+    Ok(match value {
+        Value::Null => None,
+        Value::String(text) => Some(text),
+        other => Some(other.to_string()),
+    })
 }
