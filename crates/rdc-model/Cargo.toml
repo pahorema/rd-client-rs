@@ -16,6 +16,7 @@ serde_json.workspace = true
 serde_repr.workspace = true
 thiserror = { workspace = true, features = ["std"] }
 tracing.workspace = true
+url.workspace = true
 uuid = { workspace = true, features = ["std"] }
 
 [lints]

@@ -1017,6 +1017,7 @@ dependencies = [
  "serde_repr",
  "thiserror",
  "tracing",
+ "url",
  "uuid",
 ]
 
