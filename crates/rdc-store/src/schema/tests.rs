@@ -226,3 +226,88 @@ async fn setting_keys_are_grouped_and_booleans_spelled_out() {
     .map(|(key, value)| (key.to_owned(), value.map(str::to_owned)));
     assert_eq!(settings(&mut connection).await, expected);
 }
+
+#[tokio::test]
+async fn missing_hashes_and_paths_become_empty_and_provider_fields_nullable() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("rd-client.db");
+    let mut connection = connect(&path).await;
+    migrate_through(&mut connection, "20220513175547_Settings_Migrate").await;
+    execute(
+        &mut connection,
+        r#"INSERT INTO "Torrents" ("TorrentId", "Added", "DownloadAction", "DownloadMinSize",
+               "FinishedAction", "IsFile", "RdAdded", "RdProgress", "RdSize", "RdSplit", "RdStatus")
+           VALUES ('0A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10', '2022-05-14 01:05:31+00:00', 2, 5, 1, 0,
+               '2022-05-14 01:05:31+00:00', 100, 10, 2, 4);
+           INSERT INTO "Downloads" ("DownloadId", "TorrentId", "Added")
+           VALUES ('1A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10', '0A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10',
+               '2022-05-14 01:05:32+00:00');"#,
+    )
+    .await;
+
+    reopen(&path).await.expect("upgrade");
+
+    let torrent: (String, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        r#"SELECT "Hash", "DownloadAction", "DownloadMinSize", "HostDownloadAction",
+               "DownloadClient", "FinishedActionDelay", "Type" FROM "Torrents""#,
+    )
+    .fetch_one(&mut connection)
+    .await
+    .expect("torrent survives");
+    assert_eq!(torrent, (String::new(), 2, 5, 0, 0, 0, 0));
+    let download: (String, Option<String>) =
+        sqlx::query_as(r#"SELECT "Path", "FileName" FROM "Downloads""#)
+            .fetch_one(&mut connection)
+            .await
+            .expect("download survives");
+    assert_eq!(download, (String::new(), None));
+    execute(
+        &mut connection,
+        r#"UPDATE "Torrents" SET "RdAdded" = NULL, "RdProgress" = NULL, "RdSize" = NULL,
+               "RdSplit" = NULL, "RdStatus" = NULL"#,
+    )
+    .await;
+    let index: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'IX_Downloads_TorrentId'",
+    )
+    .fetch_optional(&mut connection)
+    .await
+    .expect("index lookup");
+    assert!(index.is_some(), "torrent index recreated");
+}
+
+#[tokio::test]
+async fn stored_enum_numbers_follow_the_renumbered_values() {
+    let cases = [
+        ("0", "0", "1"),
+        ("1", "0", "3"),
+        ("2", "0", "4"),
+        ("3", "2", "0"),
+        ("4", "3", "0"),
+        ("Bezzad", "Bezzad", "Error"),
+    ];
+    for (client, expected_client, log_level) in cases {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("rd-client.db");
+        let mut connection = connect(&path).await;
+        migrate_through(&mut connection, "20220513175547_Settings_Migrate").await;
+        sqlx::query(
+            r#"INSERT INTO "Settings" VALUES ('DownloadClient:Client', ?), ('General:LogLevel', ?)"#,
+        )
+        .bind(client)
+        .bind(log_level)
+        .execute(&mut connection)
+        .await
+        .expect("insert settings");
+
+        reopen(&path).await.expect("upgrade");
+
+        let expected_log_level = if log_level == "0" { "1" } else { log_level };
+        let expected = [
+            ("DownloadClient:Client", expected_client),
+            ("General:LogLevel", expected_log_level),
+        ]
+        .map(|(key, value)| (key.to_owned(), Some(value.to_owned())));
+        assert_eq!(settings(&mut connection).await, expected, "client {client}");
+    }
+}

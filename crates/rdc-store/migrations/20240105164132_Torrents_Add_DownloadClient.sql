@@ -1,0 +1,1 @@
+ALTER TABLE "Torrents" ADD "DownloadClient" INTEGER NOT NULL DEFAULT 0;

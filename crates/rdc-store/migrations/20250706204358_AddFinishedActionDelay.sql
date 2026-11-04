@@ -1,0 +1,1 @@
+ALTER TABLE "Torrents" ADD "FinishedActionDelay" INTEGER NOT NULL DEFAULT 0;

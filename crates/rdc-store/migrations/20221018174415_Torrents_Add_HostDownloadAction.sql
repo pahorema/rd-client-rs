@@ -1,0 +1,1 @@
+ALTER TABLE "Torrents" ADD "HostDownloadAction" INTEGER NOT NULL DEFAULT 0;
