@@ -3,12 +3,14 @@
 
 pub mod debrid_link;
 pub mod error;
+pub mod highway;
 pub mod http;
 pub mod provider;
 pub mod rate_limit;
 
 pub use debrid_link::DebridLink;
 pub use error::DebridError;
+pub use highway::{Highway, is_spool_id};
 pub use http::{ProviderHttp, RetryPolicy};
 pub use provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
 pub use rate_limit::RateLimitCoordinator;
