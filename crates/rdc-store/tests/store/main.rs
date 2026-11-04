@@ -2,4 +2,5 @@
 
 mod common;
 mod downloads;
+mod settings;
 mod torrents;

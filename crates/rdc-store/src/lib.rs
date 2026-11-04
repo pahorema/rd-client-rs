@@ -6,6 +6,7 @@ mod downloads;
 mod error;
 mod row;
 mod schema;
+mod settings;
 #[cfg(test)]
 mod test_support;
 mod torrents;
@@ -19,6 +20,7 @@ use sqlx::{
 
 pub use downloads::{AddResult, DownloadWithTorrent, Downloads};
 pub use error::{Result, StoreError};
+pub use settings::StoredSettings;
 pub use torrents::{NewTorrent, RetryOnError, Torrents};
 
 /// How long a connection waits for a lock held by another connection.
@@ -78,6 +80,11 @@ impl Store {
     /// Download operations.
     pub fn downloads(&self) -> Downloads<'_> {
         Downloads::new(&self.pool)
+    }
+
+    /// Settings operations.
+    pub fn settings(&self) -> StoredSettings<'_> {
+        StoredSettings::new(&self.pool)
     }
 
     /// Waits for running operations and closes every connection.
