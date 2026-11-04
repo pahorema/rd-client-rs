@@ -1016,6 +1016,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rdc-archive"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "rdc-aria2"
 version = "0.1.0"
 dependencies = [
