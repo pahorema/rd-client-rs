@@ -228,3 +228,147 @@ async fn too_many_requests_is_a_rate_limit() {
 
     assert_eq!(error.retry_after(), Some(Duration::from_secs(30)));
 }
+
+const TORRENT: &str = r#"{
+    "id": 12345, "hash": "abcdef", "name": "Some.Release", "size": 3000,
+    "created_at": "2024-05-20T14:12:52Z", "updated_at": "2024-05-21T10:00:00Z",
+    "download_state": "downloading", "seeds": 7, "progress": 0.426,
+    "download_speed": 1048576, "download_present": false,
+    "files": [
+        {"id": 0, "name": "Some.Release/Some.Release.mkv", "size": 2900},
+        {"id": 1, "name": "Some.Release/Subs/en.srt", "size": 100},
+        {"id": 2, "name": "loose.nfo", "size": 0}
+    ]
+}"#;
+
+const QUEUED: &str =
+    r#"{"id": 77, "hash": "fedcba", "name": "Waiting", "created_at": "2024-05-22T08:00:00Z"}"#;
+
+async fn mount_mylist(server: &MockServer, id: Option<&str>, body: String) {
+    let mut mock = Mock::given(method("GET"))
+        .and(path("/torrents/mylist"))
+        .and(query_param("bypass_cache", "true"))
+        .and(query_param("limit", "1000"));
+    if let Some(id) = id {
+        mock = mock.and(query_param("id", id));
+    }
+    mock.respond_with(json(&body)).mount(server).await;
+}
+
+async fn mount_queued(server: &MockServer, id: Option<&str>, body: String) {
+    let mut mock = Mock::given(method("GET"))
+        .and(path("/queued/getqueued"))
+        .and(query_param("type", "torrent"))
+        .and(query_param("bypass_cache", "true"))
+        .and(query_param("offset", "0"))
+        .and(query_param("limit", "1000"));
+    if let Some(id) = id {
+        mock = mock.and(query_param("id", id));
+    }
+    mock.respond_with(json(&body)).mount(server).await;
+}
+
+fn data(value: &str) -> String {
+    format!(r#"{{"success":true,"error":null,"detail":"ok","data":{value}}}"#)
+}
+
+fn ts(text: &str) -> Timestamp {
+    text.parse().expect("timestamp")
+}
+
+#[tokio::test]
+async fn listing_maps_torrents_and_queued_torrents() {
+    let (server, client) = client().await;
+    mount_mylist(&server, None, data(&format!("[{TORRENT}]"))).await;
+    mount_queued(&server, None, data(&format!("[{QUEUED}]"))).await;
+
+    let torrents = client.list_torrents().await.expect("list");
+
+    assert_eq!(torrents.len(), 2);
+    let torrent = &torrents[0];
+    assert_eq!(torrent.id, "12345");
+    assert_eq!(torrent.filename, "Some.Release");
+    assert_eq!(torrent.original_filename.as_deref(), Some("Some.Release"));
+    assert_eq!(torrent.hash, "abcdef");
+    assert_eq!((torrent.bytes, torrent.original_bytes), (3000, 3000));
+    assert_eq!(torrent.host.as_deref(), Some("False"));
+    assert_eq!(torrent.progress, 42);
+    assert_eq!(torrent.status.as_deref(), Some("downloading"));
+    assert_eq!(torrent.added, Some(ts("2024-05-20T14:12:52Z")));
+    assert_eq!(torrent.ended, Some(ts("2024-05-21T10:00:00Z")));
+    assert_eq!((torrent.speed, torrent.seeders), (Some(1_048_576), Some(7)));
+    let files = torrent.files.as_ref().expect("files");
+    let paths: Vec<(i64, &str, i64, bool)> = files
+        .iter()
+        .map(|file| (file.id, file.path.as_str(), file.bytes, file.selected))
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            (0, "Some.Release.mkv", 2900, true),
+            (1, "Subs/en.srt", 100, true),
+            (2, "", 0, true)
+        ]
+    );
+
+    let queued = &torrents[1];
+    assert_eq!(queued.id, "77");
+    assert_eq!(queued.hash, "fedcba");
+    assert_eq!(queued.status.as_deref(), Some("queued"));
+    assert_eq!(queued.progress, 0);
+    assert_eq!(queued.host.as_deref(), Some("False"));
+    assert_eq!(queued.files, Some(Vec::new()));
+    assert_eq!(queued.added, Some(ts("2024-05-22T08:00:00Z")));
+    assert_eq!(queued.ended, queued.added);
+}
+
+#[tokio::test]
+async fn listing_skips_missing_lists() {
+    let (server, client) = client().await;
+    mount_mylist(&server, None, data("null")).await;
+    mount_queued(&server, None, data("[]")).await;
+
+    assert_eq!(client.list_torrents().await.expect("list"), Vec::new());
+}
+
+#[tokio::test]
+async fn lookup_prefers_current_torrents() {
+    let (server, client) = client().await;
+    mount_mylist(&server, Some("12345"), data(TORRENT)).await;
+
+    let torrent = client
+        .torrent("12345")
+        .await
+        .expect("lookup")
+        .expect("found");
+
+    assert_eq!(torrent.status.as_deref(), Some("downloading"));
+    assert_eq!(server.received_requests().await.expect("recorded").len(), 1);
+}
+
+#[tokio::test]
+async fn lookup_falls_back_to_queued_torrents() {
+    for current in [
+        data("null"),
+        r#"{"success":false,"error":"ITEM_NOT_FOUND","detail":"Not found."}"#.to_owned(),
+    ] {
+        let (server, client) = client().await;
+        mount_mylist(&server, Some("77"), current).await;
+        mount_queued(&server, Some("77"), data(QUEUED)).await;
+
+        let torrent = client.torrent("77").await.expect("lookup").expect("found");
+
+        assert_eq!(torrent.status.as_deref(), Some("queued"));
+    }
+}
+
+#[tokio::test]
+async fn lookup_of_an_unknown_torrent_finds_nothing() {
+    let (server, client) = client().await;
+    mount_mylist(&server, Some("5"), data("null")).await;
+    mount_queued(&server, Some("5"), data("[]")).await;
+
+    assert_eq!(client.torrent("5").await.expect("lookup"), None);
+    let error = client.torrent("abcdef").await.expect_err("not a number");
+    assert_eq!(error.to_string(), "Invalid TorBox torrent id: abcdef");
+}

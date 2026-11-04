@@ -8,16 +8,23 @@ use std::fmt;
 use std::time::Duration;
 
 use jiff::Timestamp;
+use rdc_model::RemoteFile;
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 
 use crate::error::DebridError;
 use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp, RetryPolicy};
-use crate::provider::{DebridUser, ProviderConfig};
+use crate::provider::{DebridUser, ProviderConfig, RemoteTorrent};
 
 /// Address of the TorBox API.
 pub const DEFAULT_BASE_URL: &str = "https://api.torbox.app/v1/api/";
+
+/// Most torrents (and, separately, queued torrents) one listing returns.
+const LIST_LIMIT: &str = "1000";
+
+/// Download state of torrents TorBox has queued but not started yet.
+const QUEUED_STATE: &str = "queued";
 
 /// Error codes TorBox reports for failures that usually go away on retry.
 const TRANSIENT_ERRORS: [&str; 4] = [
@@ -125,6 +132,65 @@ impl TorBox {
         self.call(|| self.request(Method::GET, "user/me", &[("settings", settings)]))
             .await?
             .ok_or_else(|| DebridError::InvalidResponse("TorBox returned no user".to_owned()))
+    }
+
+    /// Lists the torrents of the account followed by its queued torrents
+    /// (at most 1000 of each; queued torrents have their own ids).
+    pub async fn list_torrents(&self) -> Result<Vec<RemoteTorrent>, DebridError> {
+        let current: Option<Vec<TorrentInfo>> = self
+            .call(|| {
+                self.request(
+                    Method::GET,
+                    "torrents/mylist",
+                    &[("bypass_cache", "true"), ("limit", LIST_LIMIT)],
+                )
+            })
+            .await?;
+        let queued: Option<Vec<QueuedTorrent>> = self.call(|| self.queued_request(None)).await?;
+        Ok(current
+            .into_iter()
+            .flatten()
+            .map(TorrentInfo::into_remote)
+            .chain(queued.into_iter().flatten().map(QueuedTorrent::into_remote))
+            .collect())
+    }
+
+    /// Looks the torrent `id` up among the current torrents, then among the
+    /// queued ones; `None` when neither has it.
+    pub async fn torrent(&self, id: &str) -> Result<Option<RemoteTorrent>, DebridError> {
+        let id = parse_id(id)?.to_string();
+        let current: Result<Option<OneOrMany<TorrentInfo>>, _> = self
+            .call(|| {
+                self.request(
+                    Method::GET,
+                    "torrents/mylist",
+                    &[("id", &id), ("bypass_cache", "true"), ("limit", LIST_LIMIT)],
+                )
+            })
+            .await;
+        match current {
+            Ok(found) => {
+                if let Some(torrent) = found.and_then(OneOrMany::into_first) {
+                    return Ok(Some(torrent.into_remote()));
+                }
+            }
+            Err(error) if error.is_not_found() => {}
+            Err(error) => return Err(error),
+        }
+        match self.call(|| self.queued_request(Some(&id))).await {
+            Ok(found) => Ok(found
+                .and_then(OneOrMany::into_first)
+                .map(QueuedTorrent::into_remote)),
+            Err(error) if error.is_not_found() => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn queued_request(&self, id: Option<&str>) -> Result<RequestBuilder, DebridError> {
+        let mut params = vec![("type", "torrent"), ("bypass_cache", "true")];
+        params.extend(id.map(|id| ("id", id)));
+        params.extend([("offset", "0"), ("limit", LIST_LIMIT)]);
+        self.request(Method::GET, "queued/getqueued", &params)
     }
 
     fn api_key(&self) -> Result<&str, DebridError> {
@@ -297,6 +363,131 @@ struct User {
     premium_expires_at: Option<Timestamp>,
 }
 
+/// A torrent of the account.
+#[derive(Debug, Deserialize)]
+struct TorrentInfo {
+    id: i64,
+    hash: Option<String>,
+    name: Option<String>,
+    size: Option<i64>,
+    #[serde(default, deserialize_with = "timestamp")]
+    created_at: Option<Timestamp>,
+    #[serde(default, deserialize_with = "timestamp")]
+    updated_at: Option<Timestamp>,
+    download_state: Option<String>,
+    seeds: Option<i64>,
+    /// Completion as a fraction between 0 and 1.
+    progress: Option<f64>,
+    download_speed: Option<i64>,
+    /// Whether the files are ready to download.
+    download_present: Option<bool>,
+    files: Option<Vec<TorrentFile>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TorrentFile {
+    id: i64,
+    /// Path starting with the torrent folder, e.g. `Release/file.mkv`.
+    name: Option<String>,
+    size: Option<i64>,
+}
+
+impl TorrentInfo {
+    /// Converts to the common form: the host is whether the download is
+    /// present (`"True"`/`"False"`) and file paths drop the torrent folder.
+    fn into_remote(self) -> RemoteTorrent {
+        let name = self.name.unwrap_or_default();
+        let size = self.size.unwrap_or_default();
+        let files = self
+            .files
+            .unwrap_or_default()
+            .into_iter()
+            .map(|file| RemoteFile {
+                id: file.id,
+                path: file
+                    .name
+                    .as_deref()
+                    .and_then(|name| name.split_once('/'))
+                    .map(|(_, path)| path.to_owned())
+                    .unwrap_or_default(),
+                bytes: file.size.unwrap_or_default(),
+                selected: true,
+                download_link: None,
+            })
+            .collect();
+        let present = if self.download_present.unwrap_or_default() {
+            "True"
+        } else {
+            "False"
+        };
+        RemoteTorrent {
+            id: self.id.to_string(),
+            original_filename: Some(name.clone()),
+            filename: name,
+            hash: self.hash.unwrap_or_default(),
+            bytes: size,
+            original_bytes: size,
+            host: Some(present.to_owned()),
+            progress: percent(self.progress.unwrap_or_default()),
+            status: self.download_state,
+            added: self.created_at,
+            files: Some(files),
+            links: Some(Vec::new()),
+            ended: self.updated_at,
+            speed: Some(self.download_speed.unwrap_or_default()),
+            seeders: Some(self.seeds.unwrap_or_default()),
+            ..RemoteTorrent::default()
+        }
+    }
+}
+
+/// A torrent TorBox accepted but has not started yet.
+#[derive(Debug, Deserialize)]
+struct QueuedTorrent {
+    id: i64,
+    hash: Option<String>,
+    name: Option<String>,
+    #[serde(default, deserialize_with = "timestamp")]
+    created_at: Option<Timestamp>,
+}
+
+impl QueuedTorrent {
+    fn into_remote(self) -> RemoteTorrent {
+        TorrentInfo {
+            id: self.id,
+            hash: self.hash,
+            name: self.name,
+            size: None,
+            created_at: self.created_at,
+            updated_at: self.created_at,
+            download_state: Some(QUEUED_STATE.to_owned()),
+            seeds: None,
+            progress: None,
+            download_speed: None,
+            download_present: None,
+            files: None,
+        }
+        .into_remote()
+    }
+}
+
+/// A `data` value TorBox sends either as one object or as a list.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum OneOrMany<T> {
+    One(T),
+    Many(Vec<T>),
+}
+
+impl<T> OneOrMany<T> {
+    fn into_first(self) -> Option<T> {
+        match self {
+            Self::One(item) => Some(item),
+            Self::Many(items) => items.into_iter().next(),
+        }
+    }
+}
+
 fn parse_response<T: DeserializeOwned>(
     status: StatusCode,
     body: &str,
@@ -373,4 +564,19 @@ fn excerpt(body: &str) -> &str {
     body.char_indices()
         .nth(BODY_EXCERPT_CHARS)
         .map_or(body, |(end, _)| &body[..end])
+}
+
+/// Reads a TorBox torrent id (a number).
+fn parse_id(id: &str) -> Result<i64, DebridError> {
+    id.trim()
+        .parse()
+        .map_err(|_| DebridError::Provider(format!("Invalid TorBox torrent id: {id}")))
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a fraction of 1 times 100 always fits; NaN and overflow saturate"
+)]
+fn percent(fraction: f64) -> i64 {
+    (fraction * 100.0) as i64
 }
