@@ -13,6 +13,9 @@ use crate::Error;
 /// Request timeout used when [`ClientBuilder::timeout`] is not called.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Base delay between transport retries; the n-th retry waits `n` times this value.
+const DEFAULT_RETRY_DELAY: Duration = Duration::from_secs(1);
+
 /// Path suffix every aria2 RPC URL must end with.
 const RPC_SUFFIX: &str = "/jsonrpc";
 
@@ -26,6 +29,8 @@ pub struct ClientBuilder {
     url: String,
     secret: Option<String>,
     timeout: Duration,
+    retry_count: u32,
+    retry_delay: Duration,
 }
 
 impl fmt::Debug for ClientBuilder {
@@ -34,6 +39,8 @@ impl fmt::Debug for ClientBuilder {
             .field("url", &self.url)
             .field("secret", &self.secret.as_ref().map(|_| "<redacted>"))
             .field("timeout", &self.timeout)
+            .field("retry_count", &self.retry_count)
+            .field("retry_delay", &self.retry_delay)
             .finish()
     }
 }
@@ -49,6 +56,19 @@ impl ClientBuilder {
     /// Timeout of each HTTP request.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// How many times a request is retried after a transport failure (connection refused,
+    /// timeout, truncated body). aria2 errors and HTTP error statuses are never retried.
+    pub fn retry_count(mut self, retry_count: u32) -> Self {
+        self.retry_count = retry_count;
+        self
+    }
+
+    /// Base delay between retries; the n-th retry waits `n` times this value.
+    pub fn retry_delay(mut self, retry_delay: Duration) -> Self {
+        self.retry_delay = retry_delay;
         self
     }
 
@@ -75,6 +95,8 @@ impl ClientBuilder {
             http,
             url: self.url,
             token,
+            retry_count: self.retry_count,
+            retry_delay: self.retry_delay,
         })
     }
 }
@@ -88,6 +110,8 @@ pub struct Client {
     url: String,
     /// `token:<secret>`, present only when a non-blank secret is configured.
     token: Option<String>,
+    retry_count: u32,
+    retry_delay: Duration,
 }
 
 impl fmt::Debug for Client {
@@ -95,6 +119,8 @@ impl fmt::Debug for Client {
         f.debug_struct("Client")
             .field("url", &self.url)
             .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("retry_count", &self.retry_count)
+            .field("retry_delay", &self.retry_delay)
             .finish_non_exhaustive()
     }
 }
@@ -152,6 +178,8 @@ impl Client {
             url: url.into(),
             secret: None,
             timeout: DEFAULT_TIMEOUT,
+            retry_count: 0,
+            retry_delay: DEFAULT_RETRY_DELAY,
         }
     }
 
@@ -194,7 +222,7 @@ impl Client {
             method,
             params,
         };
-        let (status, body) = self.send(&request).await.map_err(Error::Transport)?;
+        let (status, body) = self.send_with_retries(&request).await?;
         if !status.is_success() {
             if let Ok(ErrorResponse { error: Some(error) }) = serde_json::from_str(&body) {
                 return Err(error.into());
@@ -208,6 +236,29 @@ impl Client {
             return Err(Error::EmptyResponse);
         }
         Ok(body)
+    }
+
+    async fn send_with_retries(
+        &self,
+        request: &Request<'_>,
+    ) -> Result<(StatusCode, String), Error> {
+        let mut retry: u32 = 0;
+        loop {
+            match self.send(request).await {
+                Ok(response) => return Ok(response),
+                Err(error) if retry < self.retry_count => {
+                    retry += 1;
+                    tracing::debug!(
+                        method = request.method,
+                        retry,
+                        error = %error,
+                        "aria2 request failed, retrying"
+                    );
+                    tokio::time::sleep(self.retry_delay * retry).await;
+                }
+                Err(error) => return Err(Error::Transport(error)),
+            }
+        }
     }
 
     async fn send(&self, request: &Request<'_>) -> Result<(StatusCode, String), reqwest::Error> {

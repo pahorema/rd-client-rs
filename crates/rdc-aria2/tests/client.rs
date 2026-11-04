@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use rdc_aria2::{Client, Error};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method, path};
@@ -10,6 +12,7 @@ fn rpc_url(server: &MockServer) -> String {
 fn client(server: &MockServer, secret: &str) -> Client {
     Client::builder(rpc_url(server))
         .secret(secret)
+        .retry_delay(Duration::from_millis(1))
         .build()
         .expect("valid client configuration")
 }
@@ -115,6 +118,33 @@ async fn requests_carry_the_rd_client_user_agent() {
 }
 
 #[tokio::test]
+async fn rpc_error_with_error_status_is_typed_and_not_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "jsonrpc": "2.0", "id": "rd-client", "error": {"code": 1, "message": "Unauthorized"}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = Client::builder(rpc_url(&server))
+        .secret("wrong")
+        .retry_count(3)
+        .retry_delay(Duration::from_millis(1))
+        .build()
+        .unwrap();
+
+    let error = client.version().await.unwrap_err();
+
+    assert!(
+        matches!(&error, Error::Rpc { code: 1, message } if message == "Unauthorized"),
+        "{error:?}"
+    );
+    assert_eq!(error.rpc_code(), Some(1));
+    assert_eq!(error.to_string(), "aria2 error 1: Unauthorized");
+}
+
+#[tokio::test]
 async fn rpc_error_with_success_status_is_typed() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -188,6 +218,52 @@ async fn malformed_body_is_reported_with_the_raw_text() {
         matches!(&error, Error::Decode { body, .. } if body == "<html>"),
         "{error:?}"
     );
+}
+
+#[tokio::test]
+async fn transport_failure_is_retried_until_it_succeeds() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(result(&json!({"version": "slow"})).set_delay(Duration::from_secs(5)))
+        .up_to_n_times(2)
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(result(&json!({"version": "1.37.0"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = Client::builder(rpc_url(&server))
+        .timeout(Duration::from_millis(200))
+        .retry_count(2)
+        .retry_delay(Duration::from_millis(1))
+        .build()
+        .unwrap();
+
+    let version = client.version().await.unwrap();
+
+    assert_eq!(version.version, "1.37.0");
+}
+
+#[tokio::test]
+async fn transport_failure_after_all_retries_is_reported() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(result(&json!({"version": "slow"})).set_delay(Duration::from_secs(5)))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let client = Client::builder(rpc_url(&server))
+        .timeout(Duration::from_millis(200))
+        .retry_count(1)
+        .retry_delay(Duration::from_millis(1))
+        .build()
+        .unwrap();
+
+    let error = client.version().await.unwrap_err();
+
+    assert!(matches!(error, Error::Transport(_)), "{error:?}");
 }
 
 #[test]
