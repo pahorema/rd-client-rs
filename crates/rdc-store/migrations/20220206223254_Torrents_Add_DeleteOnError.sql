@@ -1,0 +1,1 @@
+ALTER TABLE "Torrents" ADD "DeleteOnError" INTEGER NOT NULL DEFAULT 0;

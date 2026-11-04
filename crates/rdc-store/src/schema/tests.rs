@@ -179,3 +179,50 @@ async fn rebuilt_tables_keep_their_rows() {
         .expect("download survives");
     assert_eq!(download, ("https://host/file".to_owned(), 0));
 }
+
+async fn settings(connection: &mut SqliteConnection) -> Vec<(String, Option<String>)> {
+    sqlx::query_as(r#"SELECT "SettingId", "Value" FROM "Settings" ORDER BY 1"#)
+        .fetch_all(connection)
+        .await
+        .expect("settings")
+}
+
+#[tokio::test]
+async fn setting_keys_are_grouped_and_booleans_spelled_out() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("rd-client.db");
+    let mut connection = connect(&path).await;
+    migrate_through(&mut connection, "20210110025102_Initial").await;
+    execute(
+        &mut connection,
+        r#"INSERT INTO "Settings" ("SettingId", "Value", "Type") VALUES
+               ('DownloadPath', '/downloads', 'String'),
+               ('RealDebridApiKey', 'KEY', 'String'),
+               ('ProviderAutoImport', '1', 'Boolean'),
+               ('ProviderAutoDelete', '0', 'Boolean'),
+               ('OnlyDownloadAvailableFiles', 'True', 'Boolean'),
+               ('ProviderAutoImportCategory', NULL, 'String'),
+               ('TempPath', '/tmp', 'String'),
+               ('Unrelated', 'x', NULL)"#,
+    )
+    .await;
+
+    reopen(&path).await.expect("upgrade");
+
+    assert_eq!(
+        columns(&mut connection, "Settings").await,
+        ["SettingId", "Value"]
+    );
+    let expected = [
+        ("DownloadClient:DownloadPath", Some("/downloads")),
+        ("DownloadClient:TempPath", Some("/tmp")),
+        ("Provider:ApiKey", Some("KEY")),
+        ("Provider:AutoDelete", Some("False")),
+        ("Provider:AutoImport", Some("True")),
+        ("Provider:Default:Category", None),
+        ("Provider:Default:OnlyDownloadAvailableFiles", Some("True")),
+        ("Unrelated", Some("x")),
+    ]
+    .map(|(key, value)| (key.to_owned(), value.map(str::to_owned)));
+    assert_eq!(settings(&mut connection).await, expected);
+}

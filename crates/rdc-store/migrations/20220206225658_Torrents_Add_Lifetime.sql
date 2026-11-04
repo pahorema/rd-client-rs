@@ -1,0 +1,1 @@
+ALTER TABLE "Torrents" ADD "Lifetime" INTEGER NOT NULL DEFAULT 0;

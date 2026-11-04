@@ -34,4 +34,12 @@ pub(crate) const MIGRATIONS: &[Migration] = migrations![
     "20210718231758_Torrents_Add_FilesSelected",
     "20211009221133_Downloads_Add_RemoteId",
     "20211011193848_Torrent_Add_RetryCount",
+    "20211024161405_Torrents_Add_Priority",
+    "20211029131846_Torrents_Add_Retry",
+    "20211029133429_Torrents_Error",
+    "20211029142739_Torrents_Add_RetryAttempts",
+    "20220206223254_Torrents_Add_DeleteOnError",
+    "20220206225658_Torrents_Add_Lifetime",
+    "20220513164723_Settings_Remove_Type",
+    "20220513175547_Settings_Migrate",
 ];
