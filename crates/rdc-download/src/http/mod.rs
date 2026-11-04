@@ -15,7 +15,8 @@
 //!
 //! Progress reports bytes written, the expected size (`0` while unknown) and the speed averaged
 //! over the last two seconds. An optional speed limit is shared by all connections of a
-//! download.
+//! download. Pausing stops reading; connections are closed and reopened at the right offset on
+//! resume when the server serves ranges, otherwise they are kept open.
 
 mod config;
 mod connection;
@@ -65,6 +66,7 @@ struct Shared {
     progress: watch::Sender<Progress>,
     completion: CompletionSender,
     cancel: CancellationToken,
+    paused: watch::Sender<bool>,
     started: AtomicBool,
 }
 
@@ -84,6 +86,7 @@ impl HttpDownload {
                 progress: watch::Sender::new(Progress::default()),
                 completion,
                 cancel: CancellationToken::new(),
+                paused: watch::Sender::new(false),
                 started: AtomicBool::new(false),
             }),
         }
@@ -145,14 +148,22 @@ impl DownloadEngine for HttpDownload {
         self.completion().wait().await.ok();
     }
 
-    async fn pause(&self) {}
+    async fn pause(&self) {
+        self.shared.paused.send_replace(true);
+    }
 
-    async fn resume(&self) {}
+    async fn resume(&self) {
+        self.shared.paused.send_replace(false);
+    }
 }
 
 /// Runs the whole download and reports its outcome.
 async fn run(shared: Arc<Shared>, url: Url) {
-    let context = Arc::new(Context::new(shared.config.clone(), shared.cancel.clone()));
+    let context = Arc::new(Context::new(
+        shared.config.clone(),
+        shared.cancel.clone(),
+        shared.paused.subscribe(),
+    ));
     let partial = transfer::partial_path(&shared.file_path);
     let download = download(
         &context,

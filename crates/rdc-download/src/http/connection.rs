@@ -39,16 +39,22 @@ impl ByteRange {
 pub(crate) struct Context {
     pub(crate) config: watch::Receiver<InternalConfig>,
     pub(crate) cancel: CancellationToken,
+    pub(crate) paused: watch::Receiver<bool>,
     pub(crate) throttle: Throttle,
     received: AtomicU64,
     client: Mutex<Option<Client>>,
 }
 
 impl Context {
-    pub(crate) fn new(config: watch::Receiver<InternalConfig>, cancel: CancellationToken) -> Self {
+    pub(crate) fn new(
+        config: watch::Receiver<InternalConfig>,
+        cancel: CancellationToken,
+        paused: watch::Receiver<bool>,
+    ) -> Self {
         Self {
             config,
             cancel,
+            paused,
             throttle: Throttle::new(),
             received: AtomicU64::new(0),
             client: Mutex::new(None),
@@ -90,6 +96,21 @@ impl Context {
         duration: Duration,
     ) -> Result<(), TransferError> {
         Self::cancellable(cancel, tokio::time::sleep(duration)).await
+    }
+
+    /// Waits until the download is not paused.
+    pub(crate) async fn wait_while_paused(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<(), TransferError> {
+        let mut paused = self.paused.clone();
+        // A closed channel means nobody can pause the download any more.
+        let _ = Self::cancellable(cancel, paused.wait_for(|paused| !*paused)).await?;
+        Ok(())
+    }
+
+    pub(crate) fn is_paused(&self) -> bool {
+        *self.paused.borrow()
     }
 
     /// Sends a GET for `url`, optionally limited to `range`, and returns a successful response.

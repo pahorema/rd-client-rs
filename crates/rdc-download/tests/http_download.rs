@@ -739,3 +739,50 @@ async fn failed_multi_connection_download_falls_back_to_one_connection() {
     // The failing chunk sent its first request and five retries before the fallback.
     assert!(server.transfer_requests().len() > 6);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pause_stops_reading_and_resume_reconnects_at_the_offset() {
+    let data = test_data(64 * 1024);
+    let server = TestServer::file(Arc::clone(&data), slow_options()).await;
+    let (_tx, rx) = watch::channel(single_chunk());
+    let run = Run::start(&server.url("/file.bin"), rx).await;
+    run.wait_for_bytes(4096).await;
+    run.download.pause().await;
+    run.download.pause().await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let paused_at = run.download.progress().borrow().bytes_done;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(run.download.progress().borrow().bytes_done, paused_at);
+    assert!(paused_at < 64 * 1024);
+    run.download.resume().await;
+    assert_eq!(run.finish().await, Ok(()));
+    assert_downloaded(&run, &data);
+    let resumed = server
+        .transfer_requests()
+        .iter()
+        .filter_map(support::Request::range)
+        .any(|(start, _)| start > 0);
+    assert!(resumed, "a request continued at the paused offset");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pause_keeps_the_connection_when_ranges_are_unsupported() {
+    let data = test_data(32 * 1024);
+    let options = FileOptions {
+        ranges: false,
+        ..slow_options()
+    };
+    let server = TestServer::file(Arc::clone(&data), options).await;
+    let (_tx, rx) = watch::channel(InternalConfig {
+        timeout_ms: 2000,
+        ..config()
+    });
+    let run = Run::start(&server.url("/file.bin"), rx).await;
+    run.wait_for_bytes(2048).await;
+    run.download.pause().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    run.download.resume().await;
+    assert_eq!(run.finish().await, Ok(()));
+    assert_downloaded(&run, &data);
+    assert_eq!(server.transfer_requests().len(), 1);
+}

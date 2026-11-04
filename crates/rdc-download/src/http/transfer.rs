@@ -178,6 +178,14 @@ async fn fetch_chunks(
     failure.map_or(Ok(()), Err)
 }
 
+/// How one request of a chunk ended.
+enum Fetched {
+    /// The range is complete or the stream ended.
+    Finished,
+    /// The download was paused; the connection was dropped and is reopened on resume.
+    Paused,
+}
+
 /// Progress of one chunk.
 #[derive(Debug, Clone, Copy)]
 struct Chunk {
@@ -213,7 +221,8 @@ impl ChunkWorker {
         let increment = base_timeout.max(MIN_TIMEOUT_INCREMENT);
         loop {
             let error = match self.fetch(&mut chunk).await {
-                Ok(()) => match chunk.remaining() {
+                Ok(Fetched::Paused) => continue,
+                Ok(Fetched::Finished) => match chunk.remaining() {
                     Some(remaining) if remaining > 0 => TransferError::Incomplete {
                         received: chunk.position,
                         expected: chunk.position + remaining,
@@ -244,7 +253,11 @@ impl ChunkWorker {
     }
 
     /// Sends one request for the rest of the chunk and writes what arrives.
-    async fn fetch(&self, chunk: &mut Chunk) -> Result<(), TransferError> {
+    async fn fetch(&self, chunk: &mut Chunk) -> Result<Fetched, TransferError> {
+        self.context.wait_while_paused(&self.cancel).await?;
+        if chunk.remaining() == Some(0) {
+            return Ok(Fetched::Finished);
+        }
         let offset = chunk.range.start + chunk.position;
         // A chunk names its range when it is one of several or continues a previous request
         // (open-ended when the size is unknown).
@@ -280,17 +293,24 @@ impl ChunkWorker {
         response: &mut Response,
         writer: &mut BufWriter<File>,
         chunk: &mut Chunk,
-    ) -> Result<(), TransferError> {
+    ) -> Result<Fetched, TransferError> {
         loop {
+            if self.context.is_paused() {
+                if self.remote.supports_ranges {
+                    return Ok(Fetched::Paused);
+                }
+                // Without ranges the connection is the only way to continue: keep it open.
+                self.context.wait_while_paused(&self.cancel).await?;
+            }
             let remaining = chunk.remaining();
             if remaining == Some(0) {
-                return Ok(());
+                return Ok(Fetched::Finished);
             }
             let read = tokio::time::timeout(chunk.timeout, response.chunk());
             let bytes = match Context::cancellable(&self.cancel, read).await? {
                 Err(_) => return Err(TransferError::ReadTimeout(chunk.timeout)),
                 Ok(Err(error)) => return Err(TransferError::Http(error)),
-                Ok(Ok(None)) => return Ok(()),
+                Ok(Ok(None)) => return Ok(Fetched::Finished),
                 Ok(Ok(Some(bytes))) => bytes,
             };
             let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
