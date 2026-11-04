@@ -4,8 +4,10 @@
 //! caching and fail-open handling of fetch failures belong to the calling engine.
 
 pub mod bencode;
+mod enrich;
 mod magnet;
 mod torrent;
 
+pub use enrich::enrich_magnet;
 pub use magnet::{MagnetLink, ParseMagnetError};
 pub use torrent::{ParseTorrentError, TorrentEntry, TorrentFile};
