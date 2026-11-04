@@ -1,2 +1,8 @@
 /target
 .DS_Store
+
+# Web UI
+/web/node_modules
+/web/.svelte-kit
+/web/build
+/web/vite.config.*.timestamp-*
