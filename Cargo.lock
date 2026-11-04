@@ -1148,6 +1148,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rdc-download"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "rdc-model"
 version = "0.1.0"
 dependencies = [

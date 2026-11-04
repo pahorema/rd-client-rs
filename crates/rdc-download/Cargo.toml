@@ -1,0 +1,20 @@
+[package]
+name = "rdc-download"
+description = "Download engines of rd-client: internal HTTP, symlink and remote downloaders"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+thiserror = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true
