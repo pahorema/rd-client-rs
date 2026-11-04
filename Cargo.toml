@@ -24,6 +24,7 @@ tracing = "0.1"
 url = "2"
 uuid = { version = "1", default-features = false }
 wiremock = "0.6"
+zip = { version = "9", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

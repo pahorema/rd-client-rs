@@ -10,6 +10,7 @@ publish.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+zip = { workspace = true, features = ["deflate-flate2-zlib-rs", "deflate64"] }
 
 [dev-dependencies]
 tempfile.workspace = true

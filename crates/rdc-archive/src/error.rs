@@ -9,6 +9,21 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// The file is neither a ZIP nor a RAR archive.
+    #[error("{} is not a ZIP or RAR archive", path.display())]
+    UnsupportedFormat {
+        /// Path of the file.
+        path: PathBuf,
+    },
+    /// The archive is damaged, truncated or uses an unsupported feature.
+    #[error("cannot read archive {}: {source}", path.display())]
+    Read {
+        /// Path of the archive (or of the volume that was opened).
+        path: PathBuf,
+        /// Underlying error reported by the archive reader.
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// An archive entry would be written outside the destination directory.
     #[error("archive entry {entry:?} escapes the destination directory")]
     UnsafeEntry {
@@ -35,6 +50,17 @@ impl Error {
             action,
             path: path.to_path_buf(),
             source,
+        }
+    }
+
+    /// Builds a closure mapping an archive reader error to [`Error::Read`] for `path`.
+    pub(crate) fn read<E>(path: &Path) -> impl FnOnce(E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        move |source| Self::Read {
+            path: path.to_path_buf(),
+            source: Box::new(source),
         }
     }
 }
