@@ -265,9 +265,9 @@ async fn updating_credentials_changes_name_and_password() {
 
     let renamed = users.update_credentials("Owner", "").await.expect("rename");
     assert_eq!(renamed.user_name.as_deref(), Some("Owner"));
-    assert_eq!(
+    assert_ne!(
         renamed.security_stamp, created.security_stamp,
-        "names keep sessions"
+        "names end sessions"
     );
     assert_eq!(login(&test, "admin", "secret1").await, LoginOutcome::Failed);
     assert!(matches!(
@@ -281,7 +281,7 @@ async fn updating_credentials_changes_name_and_password() {
         .expect("new password");
     assert_eq!(changed.user_name.as_deref(), Some("Owner"));
     assert_ne!(
-        changed.security_stamp, created.security_stamp,
+        changed.security_stamp, renamed.security_stamp,
         "passwords end sessions"
     );
     assert_eq!(users.first().await.expect("first"), Some(changed.clone()));
@@ -295,6 +295,11 @@ async fn updating_credentials_changes_name_and_password() {
         .update_credentials("", "")
         .await
         .expect("nothing to change");
+    assert_eq!(unchanged, changed);
+    let unchanged = users
+        .update_credentials("Owner", "")
+        .await
+        .expect("unchanged name");
     assert_eq!(unchanged, changed);
 }
 

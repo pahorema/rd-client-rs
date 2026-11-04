@@ -4,7 +4,7 @@
 //! looked up through their upper-cased form; passwords are stored as
 //! [`password`](crate::password) hashes. Every write rotates the row's
 //! concurrency stamp and only applies when that stamp is unchanged; changing
-//! the password also rotates the security stamp, which invalidates sessions.
+//! the name or password also rotates the security stamp, invalidating sessions.
 
 use jiff::Timestamp;
 use sqlx::{SqlitePool, sqlite::SqliteRow};
@@ -35,8 +35,8 @@ pub struct User {
     pub id: String,
     /// The name as typed when it was set.
     pub user_name: Option<String>,
-    /// Changes whenever the password changes; sessions issued with an older
-    /// stamp are no longer valid.
+    /// Changes whenever the name or password changes; sessions issued with an
+    /// older stamp are no longer valid.
     pub security_stamp: Option<String>,
     /// The account cannot log in before this instant (when lockout is enabled).
     pub lockout_end: Option<Timestamp>,
@@ -227,6 +227,8 @@ impl<'store> Users<'store> {
     /// Changes the name and password of the account; a blank name or
     /// password keeps the current one. Both are validated like in
     /// [`create`](Self::create) before anything is written.
+    /// Changing either credential rotates the security stamp; supplying an
+    /// unchanged name with a blank password leaves the account untouched.
     ///
     /// # Errors
     ///
@@ -239,7 +241,8 @@ impl<'store> Users<'store> {
         password: &str,
     ) -> Result<User, UserError> {
         let mut account = self.first_account().await?.ok_or(UserError::NoUser)?;
-        let new_name = !user_name.trim().is_empty();
+        let new_name =
+            !user_name.trim().is_empty() && account.user.user_name.as_deref() != Some(user_name);
         let new_password = !password.trim().is_empty();
         if new_name {
             validate_user_name(user_name)?;
@@ -260,14 +263,16 @@ impl<'store> Users<'store> {
             assignments.push(r#""UserName" = ?, "NormalizedUserName" = ?"#);
             values.extend([user_name.to_owned(), normalize(user_name)]);
         }
-        let stamp = new_security_stamp();
         if new_password {
-            assignments.push(r#""PasswordHash" = ?, "SecurityStamp" = ?"#);
-            values.extend([password::hash(password), stamp.clone()]);
+            assignments.push(r#""PasswordHash" = ?"#);
+            values.push(password::hash(password));
         }
         if assignments.is_empty() {
             return Ok(account.user);
         }
+        let stamp = new_security_stamp();
+        assignments.push(r#""SecurityStamp" = ?"#);
+        values.push(stamp.clone());
         if !self
             .write(&mut account, &assignments.join(", "), &values)
             .await?
@@ -279,9 +284,7 @@ impl<'store> Users<'store> {
         if new_name {
             account.user.user_name = Some(user_name.to_owned());
         }
-        if new_password {
-            account.user.security_stamp = Some(stamp);
-        }
+        account.user.security_stamp = Some(stamp);
         Ok(account.user)
     }
 
