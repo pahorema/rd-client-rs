@@ -9,7 +9,9 @@
 //!
 //! Each read waits at most the configured timeout. When the server serves ranges, a chunk that
 //! fails with a passing error resumes from where it stopped, up to five times, after a random
-//! exponential backoff of at most 10 s; its read timeout grows after each retry.
+//! exponential backoff of at most 10 s; its read timeout grows after each retry. A
+//! multi-connection download that fails before any byte arrived is retried once over a single
+//! connection.
 //!
 //! Progress reports bytes written, the expected size (`0` while unknown) and the speed averaged
 //! over the last two seconds. An optional speed limit is shared by all connections of a

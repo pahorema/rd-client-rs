@@ -69,6 +69,10 @@ impl Context {
         self.received.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    pub(crate) fn reset_received(&self) {
+        self.received.store(0, Ordering::Relaxed);
+    }
+
     /// Runs `future` unless `cancel` fires first.
     pub(crate) async fn cancellable<T>(
         cancel: &CancellationToken,

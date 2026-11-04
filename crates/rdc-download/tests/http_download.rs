@@ -709,3 +709,33 @@ async fn unknown_size_downloads_resume_with_an_open_range() {
     assert!(start > 0, "resumed at {start}");
     assert_eq!(end, None);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_multi_connection_download_falls_back_to_one_connection() {
+    let data = test_data(16 * 1024);
+    let server = {
+        let data = Arc::clone(&data);
+        TestServer::start(move |request| match request.range() {
+            Some((0, Some(0))) | None => file_reply(&data, request, &FileOptions::default()),
+            Some(_) => Reply::status(503),
+        })
+        .await
+    };
+    let fast = InternalConfig {
+        timeout_ms: 100,
+        chunk_count: 4,
+        parallel_connections: 4,
+        ..config()
+    };
+    let (run, outcome) = download(&server.url("/file.bin"), fast).await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+    let plain = server
+        .transfer_requests()
+        .iter()
+        .filter(|request| request.range().is_none())
+        .count();
+    assert_eq!(plain, 1);
+    // The failing chunk sent its first request and five retries before the fallback.
+    assert!(server.transfer_requests().len() > 6);
+}

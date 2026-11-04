@@ -45,6 +45,9 @@ pub(crate) async fn remove_file_if_exists(path: &Path) -> Result<(), TransferErr
 }
 
 /// Downloads `remote` into `partial` and returns the final size in bytes.
+///
+/// When a multi-connection attempt fails with a passing error before any byte arrived, the
+/// whole file is fetched once more over a single connection.
 pub(crate) async fn fetch_file(
     context: &Arc<Context>,
     remote: &RemoteFile,
@@ -52,6 +55,7 @@ pub(crate) async fn fetch_file(
 ) -> Result<u64, TransferError> {
     let chunk_count = context.config().effective_chunk_count();
     let chunks = plan_chunks(remote.size, remote.supports_ranges, chunk_count);
+    let multi_connection = chunks.len() > 1;
     prepare_file(partial, remote.size).await?;
     tracing::debug!(
         "Downloading {} ({:?} bytes, ranges: {}) in {} chunk(s)",
@@ -60,7 +64,24 @@ pub(crate) async fn fetch_file(
         remote.supports_ranges,
         chunks.len()
     );
-    fetch_chunks(context, remote, partial, chunks).await?;
+    match fetch_chunks(context, remote, partial, chunks, Connections::Configured).await {
+        Ok(()) => {}
+        Err(error)
+            if multi_connection
+                && error.is_transient()
+                && context.received() == 0
+                && !context.cancel.is_cancelled() =>
+        {
+            tracing::warn!(
+                "Multi-connection download failed ({error}), retrying over a single connection"
+            );
+            prepare_file(partial, remote.size).await?;
+            context.reset_received();
+            let single = plan_chunks(remote.size, remote.supports_ranges, 1);
+            fetch_chunks(context, remote, partial, single, Connections::Single).await?;
+        }
+        Err(error) => return Err(error),
+    }
     let received = context.received();
     if remote.size.is_none() {
         let file = OpenOptions::new()
@@ -88,12 +109,20 @@ async fn prepare_file(partial: &Path, size: Option<u64>) -> Result<(), TransferE
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Connections {
+    /// Up to the configured number of parallel connections, re-read live.
+    Configured,
+    Single,
+}
+
 /// Fetches `chunks` with bounded concurrency; the first failure stops the others.
 async fn fetch_chunks(
     context: &Arc<Context>,
     remote: &RemoteFile,
     partial: &Path,
     chunks: Vec<ChunkRange>,
+    connections: Connections,
 ) -> Result<(), TransferError> {
     let attempt = context.cancel.child_token();
     let ranged = chunks.len() > 1;
@@ -114,7 +143,10 @@ async fn fetch_chunks(
     let mut failure = None;
     loop {
         if failure.is_none() {
-            let limit = config.borrow().effective_parallel_connections();
+            let limit = match connections {
+                Connections::Configured => config.borrow().effective_parallel_connections(),
+                Connections::Single => 1,
+            };
             while running.len() < limit
                 && let Some(chunk) = pending.pop_front()
             {
