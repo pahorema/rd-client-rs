@@ -3,4 +3,5 @@
 mod client;
 mod common;
 mod config;
+mod folders;
 mod tasks;
