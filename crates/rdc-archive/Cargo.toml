@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 thiserror.workspace = true
 tokio-util.workspace = true
+unrar-ng.workspace = true
 zip = { workspace = true, features = ["deflate-flate2-zlib-rs", "deflate64"] }
 
 [dev-dependencies]

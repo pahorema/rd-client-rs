@@ -2,7 +2,7 @@
 
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
@@ -23,6 +23,27 @@ pub(crate) fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
         }
     }
     zip.finish().expect("zip fixture can be finished");
+}
+
+/// Directory holding the committed RAR fixtures (see `tests/fixtures/generate.sh`).
+pub(crate) fn fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
+/// Copies the fixture files `names` into `dir` and returns the path of the first copy.
+pub(crate) fn copy_fixtures(dir: &Path, names: &[&str]) -> PathBuf {
+    copy_fixtures_as(
+        dir,
+        &names.iter().map(|name| (*name, *name)).collect::<Vec<_>>(),
+    )
+}
+
+/// Copies each fixture `(source, copy)` to `dir/copy` and returns the path of the first copy.
+pub(crate) fn copy_fixtures_as(dir: &Path, names: &[(&str, &str)]) -> PathBuf {
+    for (source, copy) in names {
+        fs::copy(fixtures().join(source), dir.join(copy)).expect("fixture can be copied");
+    }
+    dir.join(names[0].1)
 }
 
 /// Every file below `dir`, as `/`-separated paths relative to `dir`, sorted.

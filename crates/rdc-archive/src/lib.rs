@@ -8,6 +8,7 @@ mod error;
 mod extract;
 mod path;
 mod progress;
+mod rar_format;
 mod volume;
 mod zip_format;
 
