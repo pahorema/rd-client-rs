@@ -1,21 +1,27 @@
-//! The internal HTTP engine.
+//! The internal multi-connection HTTP engine.
 //!
 //! A download first probes the link with a `Range: bytes=0-0` request (following redirects)
-//! to learn the file size and whether the server serves byte ranges. It then writes into `<file>.download` — removing a stale one first — and renames it to
+//! to learn the file size and whether the server serves byte ranges. It then writes into
+//! `<file>.download` — removing a stale one first — split into chunks fetched over up to
+//! [`InternalConfig::parallel_connections`] connections, and renames the partial file to
 //! `<file>` on success, replacing an existing file. On failure or cancellation the partial file
-//! is removed.
+//! is removed. Each read waits at most the configured timeout.
+//!
+//! Progress reports bytes written, the expected size (`0` while unknown) and the speed averaged
+//! over the last two seconds.
 
 mod config;
 mod connection;
 mod error;
 mod plan;
 mod probe;
+mod rate;
 mod transfer;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use reqwest::Url;
@@ -25,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 pub use self::config::InternalConfig;
 use self::connection::Context;
 use self::error::TransferError;
+use self::rate::SpeedMeter;
 use crate::engine::{
     CANCELLED_MESSAGE, Completion, CompletionSender, DownloadEngine, Outcome, Progress,
     STOPPED_UNEXPECTEDLY_MESSAGE, StartError, completion_channel,
@@ -161,6 +168,7 @@ async fn run(shared: Arc<Shared>, url: Url) {
             if let Err(cleanup) = transfer::remove_file_if_exists(&partial).await {
                 tracing::warn!("{cleanup}");
             }
+            shared.progress.send_modify(|progress| progress.speed = 0);
             let error = if shared.cancel.is_cancelled() {
                 TransferError::Cancelled
             } else {
@@ -184,19 +192,26 @@ async fn download(
 ) -> Result<u64, TransferError> {
     transfer::remove_file_if_exists(partial).await?;
     let remote = probe::probe(context, url).await?;
+    let total = remote.size.unwrap_or(0);
     progress.send_replace(Progress {
         bytes_done: 0,
-        bytes_total: remote.size.unwrap_or(0),
+        bytes_total: total,
         speed: 0,
     });
     let fetch = transfer::fetch_file(context, &remote, partial);
     tokio::pin!(fetch);
+    let mut meter = SpeedMeter::new();
     let mut ticker = tokio::time::interval(PROGRESS_INTERVAL);
     let size = loop {
         tokio::select! {
             result = &mut fetch => break result?,
             _ = ticker.tick() => {
-                progress.send_modify(|progress| progress.bytes_done = context.received());
+                let done = context.received();
+                progress.send_replace(Progress {
+                    bytes_done: done,
+                    bytes_total: total,
+                    speed: meter.record(Instant::now(), done),
+                });
             }
         }
     };

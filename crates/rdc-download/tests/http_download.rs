@@ -537,3 +537,22 @@ async fn zero_parallel_connections_use_a_single_connection() {
     assert_eq!(server.transfer_requests().len(), 4);
     assert_eq!(server.max_concurrent(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn progress_reports_the_current_speed() {
+    let data = test_data(256 * 1024);
+    let server = TestServer::file(Arc::clone(&data), slow_options()).await;
+    let (_tx, rx) = watch::channel(config());
+    let run = Run::start(&server.url("/file.bin"), rx).await;
+    let mut progress = run.download.progress();
+    let moving = tokio::time::timeout(
+        WAIT_LIMIT,
+        progress.wait_for(|progress| progress.speed > 0 && progress.bytes_total == 256 * 1024),
+    )
+    .await
+    .expect("speed reported in time")
+    .expect("progress channel open");
+    assert!(moving.bytes_done < 256 * 1024);
+    drop(moving);
+    run.download.cancel().await;
+}
