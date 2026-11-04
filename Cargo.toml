@@ -11,6 +11,7 @@ repository = "https://github.com/pahorema/rd-client-rs"
 publish = false
 
 [workspace.dependencies]
+fancy-regex = "0.20"
 jiff = { version = "0.2", default-features = false }
 reqwest = { version = "0.13", default-features = false }
 serde = { version = "1", default-features = false }

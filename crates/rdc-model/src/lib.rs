@@ -14,6 +14,6 @@ pub use enums::{
     TorrentDownloadAction, TorrentFinishedAction, TorrentHostDownloadAction, TorrentStatus,
     UnknownValueError,
 };
-pub use filter::FileFilter;
+pub use filter::{FileFilter, FilterError};
 pub use remote_file::RemoteFile;
 pub use torrent::Torrent;
