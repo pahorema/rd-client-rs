@@ -85,3 +85,28 @@ export function parseCategories(raw: unknown): string[] {
 			return true;
 		});
 }
+
+/**
+ * Magnet link from a `#/add?magnet=…` fragment. The router may decode the
+ * fragment, which turns the magnet's own `&` into separators, so the value runs
+ * to the end of the fragment and is decoded only while still percent-encoded.
+ */
+export function magnetFromHash(hash: string): string | null {
+	const match = /[?&]magnet=(.*)$/.exec(hash);
+
+	if (!match) {
+		return null;
+	}
+
+	let value = match[1];
+
+	try {
+		while (/^magnet%3a/i.test(value)) {
+			value = decodeURIComponent(value);
+		}
+	} catch {
+		return value;
+	}
+
+	return value || null;
+}

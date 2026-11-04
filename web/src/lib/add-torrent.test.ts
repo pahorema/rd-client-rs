@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { allowedFinishedAction, guiDefaults, parseCategories } from './add-torrent.js';
+import {
+	allowedFinishedAction,
+	guiDefaults,
+	magnetFromHash,
+	parseCategories
+} from './add-torrent.js';
 import {
 	DownloadClient,
 	TorrentDownloadAction,
@@ -91,5 +96,19 @@ describe('parseCategories', () => {
 	it('splits, trims and removes duplicates', () => {
 		expect(parseCategories(' tv, Movies,,movies , TV,anime')).toEqual(['tv', 'Movies', 'anime']);
 		expect(parseCategories(null)).toEqual([]);
+	});
+});
+
+describe('magnetFromHash', () => {
+	const magnet = 'magnet:?xt=urn:btih:abc&dn=My%20Show&tr=udp://t:80';
+
+	it('reads encoded and decoded fragments', () => {
+		expect(magnetFromHash(`#/add?magnet=${encodeURIComponent(magnet)}`)).toBe(magnet);
+		expect(magnetFromHash(`#/add?magnet=${magnet}`)).toBe(magnet);
+	});
+
+	it('returns null without a magnet', () => {
+		expect(magnetFromHash('#/add')).toBeNull();
+		expect(magnetFromHash('#/add?magnet=')).toBeNull();
 	});
 });

@@ -11,20 +11,25 @@
 	import CircleUserIcon from '@lucide/svelte/icons/circle-user';
 	import ListIcon from '@lucide/svelte/icons/list';
 	import MenuIcon from '@lucide/svelte/icons/menu';
+	import PlusIcon from '@lucide/svelte/icons/plus';
 	import { onMount } from 'svelte';
 
-	/** Primary navigation; `prefixes` are the paths that mark the link as current. */
+	/** Primary navigation; `routes` are the route ids that mark the link as current. */
 	const links = [
-		{ href: resolve(''), prefixes: ['/torrent/'], exact: '/', label: 'Torrents', icon: ListIcon }
+		{
+			href: resolve(''),
+			routes: ['/(app)', '/(app)/torrent/[id]'],
+			label: 'Torrents',
+			icon: ListIcon
+		},
+		{ href: resolve('add'), routes: ['/(app)/add'], label: 'Add torrent', icon: PlusIcon }
 	];
 
 	let version = $state<string | null>(null);
 	let logoutError = $state<string | null>(null);
 
 	function isActive(link: (typeof links)[number]) {
-		const path = page.url.pathname;
-
-		return path === link.exact || link.prefixes.some((prefix) => path.startsWith(prefix));
+		return link.routes.includes(page.route.id ?? '');
 	}
 
 	async function logout() {
