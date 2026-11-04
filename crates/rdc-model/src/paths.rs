@@ -1,9 +1,11 @@
 //! Where downloads land on disk and how provider names become safe file
 //! and directory names.
 
+use std::path::{Component, Path, PathBuf};
+
 use url::Url;
 
-use crate::Download;
+use crate::{Download, Torrent};
 
 /// Whether the platform forbids `c` in a path (Unix: NUL; Windows: NUL,
 /// the other control characters and `|`).
@@ -57,6 +59,35 @@ pub fn file_name(download: &Download) -> Option<String> {
     let link = non_blank(download.link.as_deref())?;
     let name = raw_file_name(download, link)?;
     Some(remove_invalid_file_name_chars(&name))
+}
+
+/// Path of the download relative to the download directory:
+/// `<torrent name>/<provider sub-directories>/<file>`.
+///
+/// The torrent name is [`Torrent::rd_name`] without the characters the
+/// platform forbids in paths; the sub-directories are those of the first
+/// provider file whose path ends with the file name, without a leading
+/// directory equal to the torrent name (compared case-insensitively). A
+/// blank file name matches no provider file. Only plain components are
+/// used, so `..`, `.` and absolute names are dropped. The file name is not
+/// sanitized (the raw [`Download::file_name`] or URL-decoded link segment
+/// is used). This is the path a download has below the root of a remote
+/// downloader or an rclone mount.
+///
+/// Returns `None` when the torrent has no name, the download has no
+/// unrestricted link or no file name can be derived.
+pub fn relative_download_path(torrent: &Torrent, download: &Download) -> Option<String> {
+    let rd_name = torrent.rd_name.as_deref()?;
+    let link = non_blank(download.link.as_deref())?;
+    let file_name = raw_file_name(download, link)?;
+    let directory = remove_invalid_path_chars(rd_name);
+    let mut path = PathBuf::new();
+    push_components(&mut path, &directory);
+    if let Some(sub_directory) = sub_directory(torrent, &file_name, &directory) {
+        push_components(&mut path, &sub_directory);
+    }
+    push_components(&mut path, &file_name);
+    Some(path.to_string_lossy().into_owned())
 }
 
 fn non_blank(text: Option<&str>) -> Option<&str> {
@@ -121,6 +152,52 @@ fn url_decode(text: &str) -> String {
         }
     }
     String::from_utf8_lossy(&decoded).into_owned()
+}
+
+/// Appends the plain components of `relative`, dropping roots, prefixes,
+/// `.` and `..`.
+fn push_components(path: &mut PathBuf, relative: &str) {
+    for component in Path::new(relative).components() {
+        if let Component::Normal(part) = component {
+            path.push(part);
+        }
+    }
+}
+
+/// The provider sub-directories of the first provider file whose path ends
+/// with `file_name`, without a leading directory equal to the torrent
+/// directory. A blank `file_name` matches nothing.
+fn sub_directory(torrent: &Torrent, file_name: &str, directory: &str) -> Option<String> {
+    if file_name.trim().is_empty() {
+        return None;
+    }
+    let files = torrent.files();
+    let file = files
+        .iter()
+        .find(|file| !file.path.trim().is_empty() && file.path.ends_with(file_name))?;
+    let parent = Path::new(&file.path).parent()?.to_str()?;
+    let trimmed = parent.trim_matches('/').trim_matches('\\');
+    let stripped = strip_torrent_name_prefix(trimmed, directory);
+    (!stripped.trim().is_empty()).then(|| stripped.to_owned())
+}
+
+/// Drops the first component of `sub_path` (split on `/` or `\`) when it
+/// names the torrent directory.
+fn strip_torrent_name_prefix<'a>(sub_path: &'a str, directory: &str) -> &'a str {
+    let (first, rest) = sub_path.split_once(['/', '\\']).unwrap_or((sub_path, ""));
+    let directory = directory.trim_end_matches(['/', '\\']);
+    if eq_ignore_case(&remove_invalid_path_chars(first), directory) {
+        rest
+    } else {
+        sub_path
+    }
+}
+
+/// Case-insensitive comparison using simple Unicode upper-casing.
+pub(crate) fn eq_ignore_case(left: &str, right: &str) -> bool {
+    left.chars()
+        .flat_map(char::to_uppercase)
+        .eq(right.chars().flat_map(char::to_uppercase))
 }
 
 #[cfg(test)]
@@ -221,7 +298,12 @@ mod tests {
     }
 
     mod download_paths {
+        use std::path::MAIN_SEPARATOR_STR;
+
         use super::super::*;
+        use crate::RemoteFile;
+
+        const TORRENT_NAME: &str = "Torrent Name";
 
         fn download(link: Option<&str>, file_name: Option<&str>) -> Download {
             Download {
@@ -229,6 +311,109 @@ mod tests {
                 file_name: file_name.map(str::to_owned),
                 ..Download::default()
             }
+        }
+
+        fn torrent(rd_name: Option<&str>, file_paths: &[&[&str]]) -> Torrent {
+            let mut torrent = Torrent {
+                rd_name: rd_name.map(str::to_owned),
+                ..Torrent::default()
+            };
+            if !file_paths.is_empty() {
+                let files: Vec<RemoteFile> = file_paths
+                    .iter()
+                    .map(|parts| RemoteFile {
+                        path: parts.join(MAIN_SEPARATOR_STR),
+                        ..RemoteFile::default()
+                    })
+                    .collect();
+                torrent.set_files(&files);
+            }
+            torrent
+        }
+
+        fn joined(parts: &[&str]) -> String {
+            parts
+                .iter()
+                .collect::<PathBuf>()
+                .to_string_lossy()
+                .into_owned()
+        }
+
+        fn file_download() -> Download {
+            download(Some("https://fake.url/file.txt"), Some("file.txt"))
+        }
+
+        #[test]
+        fn relative_returns_none_without_torrent_name() {
+            assert_eq!(
+                relative_download_path(&torrent(None, &[]), &file_download()),
+                None
+            );
+        }
+
+        #[test]
+        fn relative_returns_none_without_link() {
+            let download = download(None, Some("file.txt"));
+            assert_eq!(
+                relative_download_path(&torrent(Some(TORRENT_NAME), &[]), &download),
+                None
+            );
+        }
+
+        #[test]
+        fn relative_guesses_the_file_name_from_the_link() {
+            let download = download(Some("https://fake.url/filename-from-link.txt"), None);
+            assert_eq!(
+                relative_download_path(&torrent(Some(TORRENT_NAME), &[]), &download),
+                Some(joined(&[TORRENT_NAME, "filename-from-link.txt"]))
+            );
+        }
+
+        #[test]
+        fn relative_keeps_provider_sub_directories() {
+            let file = ["inside", "lots", "of", "subdirectories", "file.txt"];
+            let torrent = torrent(Some(TORRENT_NAME), &[&file]);
+            assert_eq!(
+                relative_download_path(&torrent, &file_download()),
+                Some(joined(&[
+                    TORRENT_NAME,
+                    "inside",
+                    "lots",
+                    "of",
+                    "subdirectories",
+                    "file.txt"
+                ]))
+            );
+        }
+
+        #[test]
+        fn relative_strips_the_torrent_name_prefix() {
+            let torrent = torrent(
+                Some(TORRENT_NAME),
+                &[&[TORRENT_NAME, "Saison 1", "file.txt"]],
+            );
+            assert_eq!(
+                relative_download_path(&torrent, &file_download()),
+                Some(joined(&[TORRENT_NAME, "Saison 1", "file.txt"]))
+            );
+        }
+
+        #[test]
+        fn torrent_name_prefix_is_compared_case_insensitively() {
+            let torrent = torrent(Some("Torrent Ä"), &[&["torrent ä", "Saison 1", "file.txt"]]);
+            assert_eq!(
+                relative_download_path(&torrent, &file_download()),
+                Some(joined(&["Torrent Ä", "Saison 1", "file.txt"]))
+            );
+        }
+
+        #[test]
+        fn provider_paths_with_a_leading_slash_keep_their_directories() {
+            let torrent = torrent(Some(TORRENT_NAME), &[&["", "Season 1", "file.txt"]]);
+            assert_eq!(
+                relative_download_path(&torrent, &file_download()),
+                Some(joined(&[TORRENT_NAME, "Season 1", "file.txt"]))
+            );
         }
 
         #[test]
