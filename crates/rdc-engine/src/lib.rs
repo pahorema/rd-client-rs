@@ -1,7 +1,17 @@
-//! The torrent lifecycle of rd-client: adding torrents to the debrid
-//! provider, selecting files, downloading and unpacking them on the host,
-//! completing, retrying and cleaning up, plus the background jobs that keep
-//! it running.
+//! Public torrent engine contracts and independent monitoring utilities.
+
+mod error;
+mod options;
+mod types;
+
+pub use error::EngineError;
+pub use options::{
+    DownloadFactory, DownloadRequest, EngineOptions, ProviderFactory, SettingsListener,
+};
+pub use types::{
+    DeleteOptions, DownloadStats, EngineEvent, Profile, RateLimitStatus, TorrentTemplate,
+    TorrentUpdate, WaitOutcome,
+};
 
 pub mod completion;
 pub mod copy_added;

@@ -1679,9 +1679,17 @@ dependencies = [
 name = "rdc-engine"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "data-encoding",
+ "fastrand",
  "fs4",
  "jiff",
+ "rdc-aria2",
+ "rdc-debrid",
+ "rdc-download",
  "rdc-model",
+ "rdc-store",
+ "rdc-synology",
  "rdc-torrent",
  "reqwest",
  "semver",
@@ -1695,6 +1703,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
  "wiremock",
 ]
 
