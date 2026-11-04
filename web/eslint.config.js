@@ -28,5 +28,10 @@ export default defineConfig(
 				parser: ts.parser
 			}
 		}
+	},
+	{
+		// Generated shadcn-svelte components forward arbitrary links.
+		files: ['src/lib/components/ui/**'],
+		rules: { 'svelte/no-navigation-without-resolve': 'off' }
 	}
 );
