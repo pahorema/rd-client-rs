@@ -86,6 +86,22 @@ impl Default for DownloadClientSettings {
     }
 }
 
+impl DownloadClientSettings {
+    /// The save path reported to media managers (Sonarr, Radarr): the
+    /// [`mapped_path`](Self::mapped_path) when it is not blank, otherwise
+    /// the [`download_path`](Self::download_path), with trailing `\` and
+    /// then trailing `/` removed and the platform separator appended.
+    pub fn default_save_path(&self) -> String {
+        let path = if self.mapped_path.trim().is_empty() {
+            &self.download_path
+        } else {
+            &self.mapped_path
+        };
+        let trimmed = path.trim_end_matches('\\').trim_end_matches('/');
+        format!("{trimmed}{}", std::path::MAIN_SEPARATOR)
+    }
+}
+
 section! {
     DownloadClientSettings {
         "Client" => client: DownloadClient {
@@ -200,5 +216,58 @@ section! {
             display_name: "Log level",
             description: "Only set when trying to debug a download client, can generate a lot of logs.",
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::MAIN_SEPARATOR;
+
+    use super::*;
+
+    fn save_path(mapped_path: &str, download_path: &str) -> String {
+        DownloadClientSettings {
+            mapped_path: mapped_path.to_owned(),
+            download_path: download_path.to_owned(),
+            ..DownloadClientSettings::default()
+        }
+        .default_save_path()
+    }
+
+    #[test]
+    fn default_save_path_prefers_the_mapped_path() {
+        assert_eq!(
+            save_path("C:\\Downloads", "/data/downloads"),
+            format!("C:\\Downloads{MAIN_SEPARATOR}")
+        );
+        assert_eq!(
+            DownloadClientSettings::default().default_save_path(),
+            format!("C:\\Downloads{MAIN_SEPARATOR}")
+        );
+    }
+
+    #[test]
+    fn default_save_path_falls_back_to_the_download_path() {
+        assert_eq!(
+            save_path(" ", "/data/downloads"),
+            format!("/data/downloads{MAIN_SEPARATOR}")
+        );
+        assert_eq!(save_path("", "/data/"), format!("/data{MAIN_SEPARATOR}"));
+    }
+
+    #[test]
+    fn default_save_path_trims_backslashes_then_slashes() {
+        assert_eq!(
+            save_path("D:\\media\\\\", ""),
+            format!("D:\\media{MAIN_SEPARATOR}")
+        );
+        assert_eq!(
+            save_path("/mnt/media\\/", ""),
+            format!("/mnt/media\\{MAIN_SEPARATOR}")
+        );
+        assert_eq!(
+            save_path("/mnt/media/\\", ""),
+            format!("/mnt/media{MAIN_SEPARATOR}")
+        );
     }
 }
