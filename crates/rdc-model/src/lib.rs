@@ -3,9 +3,11 @@
 //! files get downloaded.
 
 mod enums;
+mod remote_file;
 
 pub use enums::{
     AuthenticationType, DownloadClient, DownloadClientLogLevel, LogLevel, ParseEnumError, Provider,
     TorrentDownloadAction, TorrentFinishedAction, TorrentHostDownloadAction, TorrentStatus,
     UnknownValueError,
 };
+pub use remote_file::RemoteFile;
