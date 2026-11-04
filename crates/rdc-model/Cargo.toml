@@ -9,6 +9,12 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+serde.workspace = true
+serde_repr.workspace = true
+thiserror = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true
