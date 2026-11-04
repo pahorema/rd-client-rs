@@ -4,16 +4,20 @@ use std::fmt;
 use std::time::Duration;
 
 use jiff::{SignedDuration, Timestamp};
+use rdc_model::RemoteFile;
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use crate::error::DebridError;
 use crate::http::ProviderHttp;
-use crate::provider::{DebridUser, ProviderConfig};
+use crate::provider::{DebridUser, ProviderConfig, RemoteTorrent};
 
 /// Base URL of the public Debrid-Link API.
 pub const DEFAULT_BASE_URL: &str = "https://debrid-link.fr/api/v2/";
+
+/// Torrents requested per listing page (the API maximum).
+const PAGE_SIZE: &str = "50";
 
 /// Client for a Debrid-Link account.
 ///
@@ -79,6 +83,24 @@ impl DebridLink {
             expiration,
             premium: false,
         })
+    }
+
+    /// Lists every torrent of the seedbox, page by page until an empty page.
+    pub async fn list_torrents(&self) -> Result<Vec<RemoteTorrent>, DebridError> {
+        let mut torrents = Vec::new();
+        let mut page: u32 = 0;
+        loop {
+            let page_text = page.to_string();
+            let request = self
+                .request(Method::GET, "seedbox/list")?
+                .query(&[("page", page_text.as_str()), ("perPage", PAGE_SIZE)]);
+            let items: Vec<SeedboxTorrent> = self.send(request).await?.unwrap_or_default();
+            if items.is_empty() {
+                return Ok(torrents);
+            }
+            torrents.extend(items.into_iter().map(SeedboxTorrent::into_remote));
+            page += 1;
+        }
     }
 
     fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, DebridError> {
@@ -168,4 +190,75 @@ struct UserInfos {
     username: Option<String>,
     /// Remaining premium time in seconds.
     premium_left: i64,
+}
+
+/// A torrent of `seedbox/list`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct SeedboxTorrent {
+    id: Option<String>,
+    name: Option<String>,
+    hash_string: Option<String>,
+    server_id: Option<String>,
+    peers_connected: i64,
+    /// 0 stopped, 1 queued for verification, 2 verifying, 3 queued for
+    /// download, 4 downloading, 5 queued for seeding, 6 seeding, 100 stored.
+    status: i64,
+    total_size: i64,
+    files: Option<Vec<SeedboxFile>>,
+    /// Unix seconds.
+    created: i64,
+    download_percent: i64,
+    /// Bytes per second.
+    download_speed: i64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct SeedboxFile {
+    name: Option<String>,
+    size: i64,
+    download_url: Option<String>,
+}
+
+impl SeedboxTorrent {
+    fn into_remote(self) -> RemoteTorrent {
+        let name = self.name.unwrap_or_default();
+        let links = self.files.as_ref().map(|files| {
+            files
+                .iter()
+                .filter_map(|file| file.download_url.clone())
+                .collect()
+        });
+        let files = self
+            .files
+            .unwrap_or_default()
+            .into_iter()
+            .zip(0_i64..)
+            .map(|(file, id)| RemoteFile {
+                id,
+                path: file.name.unwrap_or_default(),
+                bytes: file.size,
+                selected: true,
+                download_link: file.download_url,
+            })
+            .collect();
+        RemoteTorrent {
+            id: self.id.unwrap_or_default(),
+            original_filename: Some(name.clone()),
+            filename: name,
+            hash: self.hash_string.unwrap_or_default(),
+            bytes: self.total_size,
+            host: Some(self.server_id.unwrap_or_default()),
+            progress: self.download_percent,
+            status: Some(self.status.to_string()),
+            status_code: self.status,
+            added: Timestamp::from_second(self.created).ok(),
+            files: Some(files),
+            links,
+            speed: Some(self.download_speed),
+            seeders: Some(self.peers_connected),
+            ..RemoteTorrent::default()
+        }
+    }
 }

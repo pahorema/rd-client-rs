@@ -8,7 +8,7 @@ use rdc_debrid::{
     DebridError, DebridLink, ProviderConfig, ProviderHttp, RateLimitCoordinator, RetryPolicy,
 };
 use serde_json::{Value, json};
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn config(api_key: &str) -> ProviderConfig {
@@ -143,5 +143,100 @@ async fn unreadable_success_body_is_an_invalid_response() {
     assert!(
         matches!(error, DebridError::InvalidResponse(_)),
         "{error:?}"
+    );
+}
+
+fn seedbox_torrent(id: &str) -> Value {
+    json!({
+        "id": id,
+        "name": "Some.Release",
+        "hashString": "3641ad15ad451518f558d5ce5b76be4a618911c1",
+        "serverId": "srv-7",
+        "peersConnected": 12,
+        "status": 4,
+        "totalSize": 8162,
+        "created": 1_700_000_000,
+        "downloadPercent": 42,
+        "downloadSpeed": 2048,
+        "uploadSpeed": 99,
+        "files": [
+            { "id": "a", "name": "Some.Release/a.mkv", "size": 8120, "downloadUrl": "https://dl.example/a.mkv" },
+            { "id": "b", "name": "Some.Release/b.nfo", "size": 42, "downloadUrl": "https://dl.example/b.nfo" }
+        ]
+    })
+}
+
+fn list_page(page: &str, items: &Value) -> Mock {
+    Mock::given(method("GET"))
+        .and(path("/seedbox/list"))
+        .and(query_param("page", page))
+        .and(query_param("perPage", "50"))
+        .respond_with(ok(items))
+}
+
+#[tokio::test]
+async fn listing_reads_pages_until_the_first_empty_one() {
+    let server = MockServer::start().await;
+    list_page("0", &json!([seedbox_torrent("t1"), seedbox_torrent("t2")]))
+        .expect(1)
+        .mount(&server)
+        .await;
+    list_page("1", &json!([seedbox_torrent("t3")]))
+        .expect(1)
+        .mount(&server)
+        .await;
+    list_page("2", &json!([])).expect(1).mount(&server).await;
+
+    let torrents = client(&server).list_torrents().await.expect("list");
+
+    let ids: Vec<&str> = torrents.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(ids, ["t1", "t2", "t3"]);
+}
+
+#[tokio::test]
+async fn listing_maps_torrent_fields_and_reports_the_download_speed() {
+    let server = MockServer::start().await;
+    list_page("0", &json!([seedbox_torrent("t1")]))
+        .mount(&server)
+        .await;
+    list_page("1", &json!([])).mount(&server).await;
+
+    let torrents = client(&server).list_torrents().await.expect("list");
+
+    let torrent = &torrents[0];
+    assert_eq!(torrent.filename, "Some.Release");
+    assert_eq!(torrent.original_filename.as_deref(), Some("Some.Release"));
+    assert_eq!(torrent.hash, "3641ad15ad451518f558d5ce5b76be4a618911c1");
+    assert_eq!(torrent.bytes, 8162);
+    assert_eq!(torrent.host.as_deref(), Some("srv-7"));
+    assert_eq!(torrent.progress, 42);
+    assert_eq!(torrent.status.as_deref(), Some("4"));
+    assert_eq!(
+        torrent.added,
+        Some(Timestamp::from_second(1_700_000_000).expect("valid"))
+    );
+    assert_eq!(torrent.ended, None);
+    assert_eq!(torrent.speed, Some(2048));
+    assert_eq!(torrent.seeders, Some(12));
+    assert_eq!(
+        torrent.links.as_deref(),
+        Some(
+            [
+                "https://dl.example/a.mkv".to_owned(),
+                "https://dl.example/b.nfo".to_owned()
+            ]
+            .as_slice()
+        )
+    );
+    let files = torrent.files.as_deref().expect("files");
+    assert_eq!(files.len(), 2);
+    assert_eq!(
+        (files[1].id, files[1].path.as_str(), files[1].bytes),
+        (1, "Some.Release/b.nfo", 42)
+    );
+    assert!(files.iter().all(|file| file.selected));
+    assert_eq!(
+        files[0].download_link.as_deref(),
+        Some("https://dl.example/a.mkv")
     );
 }
