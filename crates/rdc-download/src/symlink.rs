@@ -3,6 +3,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::watch;
@@ -12,8 +13,12 @@ use crate::engine::{
     completion_channel,
 };
 
+/// Search rounds before giving up.
+const MAX_ATTEMPTS: u64 = 10;
 /// Extensions the engine refuses: archives have to be downloaded and unpacked.
 const COMPRESSED_EXTENSIONS: [&str; 3] = [".zip", ".rar", ".tar"];
+/// Default wait unit between search rounds; round `n` waits `n` units.
+const DEFAULT_RETRY_STEP: Duration = Duration::from_secs(1);
 
 /// What to link and where.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,12 +50,15 @@ pub enum SymlinkError {
 
 /// Links the file of a mounted provider drive to the download path.
 ///
-/// [`start`](DownloadEngine::start) does the whole job: it searches the mount for the file,
-/// creates the link and returns the source path as remote id. Pausing does nothing; cancelling
-/// before the start completes the engine.
+/// [`start`](DownloadEngine::start) does the whole job: it searches the mount for the file
+/// (up to ten rounds, round `n` waiting `n` seconds first, about 45 s in total), creates the
+/// link and returns the source path as remote id. Progress reports the round as
+/// `{bytes_done: round, bytes_total: 10, speed: 1}`. Pausing does nothing; cancelling before
+/// the start completes the engine.
 #[derive(Debug)]
 pub struct SymlinkDownload {
     request: SymlinkRequest,
+    retry_step: Duration,
     progress: watch::Sender<Progress>,
     completion: CompletionSender,
     started: AtomicBool,
@@ -62,10 +70,18 @@ impl SymlinkDownload {
         let (completion, _) = completion_channel();
         Self {
             request,
+            retry_step: DEFAULT_RETRY_STEP,
             progress: watch::Sender::new(Progress::default()),
             completion,
             started: AtomicBool::new(false),
         }
+    }
+
+    /// Replaces the wait unit between search rounds (one second by default).
+    #[must_use]
+    pub fn with_retry_step(mut self, step: Duration) -> Self {
+        self.retry_step = step;
+        self
     }
 
     async fn link(&self) -> Result<PathBuf, SymlinkError> {
@@ -102,7 +118,7 @@ impl SymlinkDownload {
         self.progress.send_replace(Progress::default());
 
         let candidates = candidate_directories(&mount, &search_path, &file_name, &stem);
-        let found = find_file(&mount, &candidates, &file_name).await;
+        let found = self.search(&mount, &candidates, &file_name).await;
         let Some(source) = found else {
             log_mount_contents(&mount).await;
             return Err(SymlinkError::NotFound);
@@ -130,6 +146,33 @@ impl SymlinkDownload {
                 Err(SymlinkError::NotFound)
             }
         }
+    }
+
+    async fn search(
+        &self,
+        mount: &Path,
+        candidates: &[PathBuf],
+        file_name: &str,
+    ) -> Option<PathBuf> {
+        for attempt in 0..MAX_ATTEMPTS {
+            self.progress.send_replace(Progress {
+                bytes_done: attempt,
+                bytes_total: MAX_ATTEMPTS,
+                speed: 1,
+            });
+            tracing::debug!(
+                "Searching {} for {file_name} (attempt #{attempt})",
+                mount.display()
+            );
+            if let Some(file) = find_file(mount, candidates, file_name).await {
+                return Some(file);
+            }
+            let delay = self
+                .retry_step
+                .saturating_mul(u32::try_from(attempt).unwrap_or(u32::MAX));
+            tokio::time::sleep(delay).await;
+        }
+        None
     }
 }
 

@@ -3,8 +3,9 @@
 #![cfg(unix)]
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use rdc_download::{CANCELLED_MESSAGE, DownloadEngine, SymlinkDownload, SymlinkRequest};
+use rdc_download::{CANCELLED_MESSAGE, DownloadEngine, Progress, SymlinkDownload, SymlinkRequest};
 
 struct Layout {
     _root: tempfile::TempDir,
@@ -48,7 +49,7 @@ fn file_name(relative: &str) -> &str {
 }
 
 fn engine(request: SymlinkRequest) -> SymlinkDownload {
-    SymlinkDownload::new(request)
+    SymlinkDownload::new(request).with_retry_step(Duration::from_millis(1))
 }
 
 async fn link(request: SymlinkRequest) -> (Result<String, String>, PathBuf) {
@@ -148,4 +149,41 @@ async fn compressed_files_are_refused() {
             "file {name}"
         );
     }
+}
+
+#[tokio::test]
+async fn not_found_after_all_attempts_reports_progress_of_each() {
+    let layout = Layout::new();
+    let engine = engine(layout.request("Movie/Movie.mkv"));
+    let mut progress = engine.progress();
+    let error = engine.start().await.expect_err("not found");
+    assert_eq!(error.message(), "Could not find file from rclone mount!");
+    assert_eq!(
+        *progress.borrow_and_update(),
+        Progress {
+            bytes_done: 9,
+            bytes_total: 10,
+            speed: 1
+        }
+    );
+}
+
+#[tokio::test]
+async fn file_appearing_during_the_search_is_found() {
+    let layout = Layout::new();
+    let engine = SymlinkDownload::new(layout.request("Movie/Movie.mkv"))
+        .with_retry_step(Duration::from_millis(40));
+    let source = layout.mount.join("Movie/Movie.mkv");
+    let creator = {
+        let source = source.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            std::fs::create_dir_all(source.parent().expect("parent")).expect("dir");
+            std::fs::write(&source, b"late").expect("file");
+        })
+    };
+    let result = engine.start().await.expect("found");
+    creator.await.expect("creator");
+    assert_eq!(result, source.display().to_string());
+    assert!(engine.progress().borrow().bytes_done > 0);
 }
