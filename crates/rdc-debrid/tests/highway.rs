@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use rdc_debrid::{
-    DebridError, Highway, ProviderConfig, ProviderHttp, RateLimitCoordinator, RetryPolicy,
-    is_spool_id,
+    DebridError, Highway, ProviderConfig, ProviderHttp, RateLimitCoordinator, RemoteTorrent,
+    RetryPolicy, is_spool_id,
 };
-use rdc_model::Torrent;
+use rdc_model::{Provider, Torrent, TorrentStatus};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_string_contains, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -440,4 +440,273 @@ async fn deleting_a_torrent_without_provider_id_sends_nothing() {
         .expect("nothing to delete");
 
     assert_eq!(server.received_requests().await.expect("recorded").len(), 0);
+}
+
+fn listed(state: &str) -> RemoteTorrent {
+    RemoteTorrent {
+        id: "4213".to_owned(),
+        filename: "Some.Release".to_owned(),
+        status: Some(state.to_owned()),
+        message: Some("boom".to_owned()),
+        bytes: 8123,
+        progress: 50,
+        host: Some("TORRENT/Some.Release".to_owned()),
+        ..RemoteTorrent::default()
+    }
+}
+
+fn with_id(id: &str) -> Torrent {
+    Torrent {
+        rd_id: Some(id.to_owned()),
+        ..Torrent::default()
+    }
+}
+
+async fn refreshed(
+    server: &MockServer,
+    mut torrent: Torrent,
+    remote: Option<&RemoteTorrent>,
+) -> Torrent {
+    client(server)
+        .refresh(&mut torrent, remote)
+        .await
+        .expect("refreshed");
+    torrent
+}
+
+async fn mount_transfer(server: &MockServer, id: &str, response: ResponseTemplate) {
+    Mock::given(method("GET"))
+        .and(path(ENDPOINT))
+        .and(query_param("id", id))
+        .respond_with(response)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn refresh_maps_transfer_states() {
+    let server = MockServer::start().await;
+    for (state, expected) in [
+        ("queued", TorrentStatus::Processing),
+        ("downloading", TorrentStatus::Downloading),
+        ("completed", TorrentStatus::Finished),
+        ("error", TorrentStatus::Error),
+    ] {
+        let torrent = refreshed(&server, with_id("4213"), Some(&listed(state))).await;
+
+        assert_eq!(torrent.rd_status, Some(expected), "state {state}");
+        assert_eq!(torrent.rd_status_raw.as_deref(), Some(state));
+        let error = (state == "error").then_some("boom");
+        assert_eq!(torrent.error.as_deref(), error, "state {state}");
+    }
+    assert_eq!(server.received_requests().await.expect("recorded").len(), 0);
+}
+
+#[tokio::test]
+async fn refresh_keeps_the_previous_status_for_unknown_states() {
+    let server = MockServer::start().await;
+    for (previous, expected) in [
+        (None, TorrentStatus::Processing),
+        (Some(TorrentStatus::Queued), TorrentStatus::Processing),
+        (Some(TorrentStatus::Downloading), TorrentStatus::Downloading),
+    ] {
+        let torrent = Torrent {
+            rd_status: previous,
+            ..with_id("4213")
+        };
+
+        let torrent = refreshed(&server, torrent, Some(&listed("paused"))).await;
+
+        assert_eq!(torrent.rd_status, Some(expected), "previous {previous:?}");
+    }
+}
+
+#[tokio::test]
+async fn refresh_stores_the_content_path_in_the_host() {
+    let server = MockServer::start().await;
+
+    let torrent = refreshed(&server, with_id("4213"), Some(&listed("downloading"))).await;
+
+    assert_eq!(torrent.rd_host.as_deref(), Some("TORRENT/Some.Release"));
+    assert_eq!(torrent.client_kind, Some(Provider::Highway));
+    assert_eq!(torrent.rd_name.as_deref(), Some("Some.Release"));
+    assert_eq!(torrent.rd_size, Some(8123));
+    assert_eq!(torrent.rd_progress, Some(50));
+}
+
+#[tokio::test]
+async fn refresh_keeps_the_first_added_and_ended_times() {
+    let server = MockServer::start().await;
+    let earlier = Timestamp::from_second(1_700_000_000).expect("valid");
+    let torrent = Torrent {
+        rd_added: Some(earlier),
+        ..with_id("4213")
+    };
+    let completed = RemoteTorrent {
+        ended: Some(Timestamp::now()),
+        ..listed("completed")
+    };
+
+    let torrent = refreshed(&server, torrent, Some(&completed)).await;
+    let ended = torrent.rd_ended.expect("completed transfers end");
+    let again = refreshed(
+        &server,
+        torrent,
+        Some(&RemoteTorrent {
+            ended: Some(Timestamp::now()),
+            ..listed("completed")
+        }),
+    )
+    .await;
+
+    assert_eq!(again.rd_added, Some(earlier));
+    assert_eq!(again.rd_ended, Some(ended));
+}
+
+#[tokio::test]
+async fn refresh_looks_the_transfer_up_without_a_listing_entry() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(ENDPOINT))
+        .and(query_param("id", "4213"))
+        .and(query_param("service", "torrent"))
+        .respond_with(json_response(200, &transfer("4213", "downloading")))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let torrent = refreshed(&server, with_id("4213"), None).await;
+
+    assert_eq!(torrent.rd_status, Some(TorrentStatus::Downloading));
+    assert_eq!(torrent.rd_speed, Some(100));
+    assert_eq!(torrent.rd_seeders, Some(9));
+    assert!(torrent.rd_added.is_some());
+    assert_eq!(torrent.files().len(), 2);
+}
+
+#[tokio::test]
+async fn refresh_looks_spool_references_up_without_a_service() {
+    let server = MockServer::start().await;
+    mount_transfer(
+        &server,
+        SPOOL_ID,
+        json_response(200, &transfer(SPOOL_ID, "queued")),
+    )
+    .await;
+
+    let torrent = refreshed(&server, with_id(SPOOL_ID), None).await;
+
+    assert_eq!(torrent.rd_status, Some(TorrentStatus::Processing));
+    let requests = server.received_requests().await.expect("recorded");
+    assert_eq!(
+        requests[0].url.query(),
+        Some(format!("id={SPOOL_ID}").as_str())
+    );
+}
+
+#[tokio::test]
+async fn refresh_marks_the_torrent_deleted_when_the_transfer_is_gone() {
+    let server = MockServer::start().await;
+    mount_transfer(&server, "4213", ResponseTemplate::new(404)).await;
+    let torrent = Torrent {
+        rd_status: Some(TorrentStatus::Downloading),
+        ..with_id("4213")
+    };
+
+    let torrent = refreshed(&server, torrent, None).await;
+
+    assert_eq!(torrent.rd_status_raw.as_deref(), Some("deleted"));
+    assert_eq!(torrent.rd_status, Some(TorrentStatus::Downloading));
+}
+
+#[tokio::test]
+async fn unrestrict_resolves_the_zip_reference_to_a_fresh_signed_url() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(ENDPOINT))
+        .and(query_param("id", "4213"))
+        .and(query_param("service", "torrent"))
+        .respond_with(json_response(200, &transfer("4213", "completed")))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let link = client(&server)
+        .unrestrict("highway://4213/torrent/zip")
+        .await
+        .expect("resolved");
+
+    assert_eq!(
+        link,
+        "https://nl.dwld.link/dav/TORRENT/Some.Release/?download=zip"
+    );
+}
+
+#[tokio::test]
+async fn unrestrict_leaves_per_file_references_and_real_urls_unchanged() {
+    let server = MockServer::start().await;
+    let real = "https://nl.dwld.link/dav/TORRENT/Some.Release/a.mkv?zip_user_id=1&zip_expires=1&zip_signature=abc";
+
+    for link in ["highway://4213/torrent/2", real] {
+        let resolved = client(&server).unrestrict(link).await.expect("unchanged");
+
+        assert_eq!(resolved, link);
+    }
+    assert_eq!(server.received_requests().await.expect("recorded").len(), 0);
+}
+
+#[tokio::test]
+async fn unrestrict_fails_without_a_zip_download_url() {
+    let server = MockServer::start().await;
+    mount_transfer(
+        &server,
+        "4213",
+        json_response(200, &json!({ "id": "4213", "download_url": null })),
+    )
+    .await;
+
+    let error = client(&server)
+        .unrestrict("highway://4213/torrent/zip")
+        .await
+        .expect_err("no url");
+
+    assert!(
+        error.to_string().contains("did not return a download URL"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn unrestrict_reports_a_transfer_that_is_gone() {
+    let server = MockServer::start().await;
+    mount_transfer(&server, "4213", ResponseTemplate::new(404)).await;
+
+    let error = client(&server)
+        .unrestrict("highway://4213/torrent/zip")
+        .await
+        .expect_err("gone");
+
+    assert!(error.is_not_found(), "{error:?}");
+    assert!(error.to_string().contains("was not found"), "{error}");
+    assert!(
+        error.to_string().contains("remove it here and re-add it"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn unrestrict_rejects_empty_and_malformed_links() {
+    let server = MockServer::start().await;
+
+    let empty = client(&server).unrestrict(" ").await.expect_err("empty");
+    let malformed = client(&server)
+        .unrestrict("highway://4213/zip")
+        .await
+        .expect_err("malformed");
+
+    assert!(matches!(empty, DebridError::Provider(_)), "{empty:?}");
+    assert_eq!(
+        malformed.to_string(),
+        "Invalid HIGHWAY link format: highway://4213/zip"
+    );
 }

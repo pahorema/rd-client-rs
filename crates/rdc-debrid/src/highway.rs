@@ -7,7 +7,7 @@ use std::fmt;
 use std::time::Duration;
 
 use jiff::Timestamp;
-use rdc_model::{RemoteFile, Torrent};
+use rdc_model::{Provider, RemoteFile, Torrent, TorrentStatus};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
@@ -25,6 +25,13 @@ const SERVICE: &str = "torrent";
 
 /// Account name reported when the server has no statistics.
 const FALLBACK_USERNAME: &str = "HIGHWAY";
+
+/// Scheme of the links rd-client hands out for transfers without signed
+/// per-file URLs; resolved by [`Highway::unrestrict`].
+const LINK_SCHEME: &str = "highway://";
+
+/// `rd_status_raw` of a transfer the provider no longer knows.
+const DELETED: &str = "deleted";
 
 /// Whether `id` is a spool reference: the 32-hex id of a queued transfer
 /// that has no numeric transfer id yet.
@@ -146,6 +153,94 @@ impl Highway {
         Ok(())
     }
 
+    /// Copies the transfer state into the torrent's `rd_*` fields.
+    ///
+    /// Uses `remote` when given and otherwise looks the transfer up; a
+    /// transfer the server no longer knows gets `rd_status_raw = "deleted"`.
+    /// A failed transfer stores its detail in [`Torrent::error`].
+    pub async fn refresh(
+        &self,
+        torrent: &mut Torrent,
+        remote: Option<&RemoteTorrent>,
+    ) -> Result<(), DebridError> {
+        let Some(id) = non_blank(torrent.rd_id.as_deref()) else {
+            return Ok(());
+        };
+        let fetched;
+        let remote = match remote {
+            Some(remote) => remote,
+            None => match self.transfer(id, service_for(id)).await {
+                Ok(Some(transfer)) => {
+                    fetched = transfer.into_remote();
+                    &fetched
+                }
+                Ok(None) => {
+                    torrent.rd_status_raw = Some(DELETED.to_owned());
+                    return Ok(());
+                }
+                Err(error) => {
+                    tracing::error!("failed to update HIGHWAY transfer {id}: {error}");
+                    return Err(error);
+                }
+            },
+        };
+        apply(torrent, remote);
+        Ok(())
+    }
+
+    /// Resolves a `highway://<id>/<service>/zip` link to the signed zip URL of
+    /// the transfer; every other link (real URLs, per-file references) is
+    /// returned unchanged.
+    pub async fn unrestrict(&self, link: &str) -> Result<String, DebridError> {
+        if link.trim().is_empty() {
+            return Err(DebridError::Provider(
+                "The download link is empty".to_owned(),
+            ));
+        }
+        let Some(reference) = link.strip_prefix(LINK_SCHEME) else {
+            return Ok(link.to_owned());
+        };
+        let parts: Vec<&str> = reference.split('/').collect();
+        let &[id, service, file_ref] = parts.as_slice() else {
+            return Err(DebridError::Provider(format!(
+                "Invalid HIGHWAY link format: {link}"
+            )));
+        };
+        if file_ref != "zip" {
+            return Ok(link.to_owned());
+        }
+        let transfer = self
+            .transfer(id, non_blank(Some(service)))
+            .await?
+            .ok_or_else(|| {
+                DebridError::NotFound(format!(
+                    "HIGHWAY transfer {id} was not found. It was likely deleted or unlinked on \
+                     HIGHWAY since this torrent was added here - remove it here and re-add it."
+                ))
+            })?;
+        non_blank(transfer.download_url.as_deref())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                DebridError::Provider(format!(
+                    "HIGHWAY did not return a download URL for transfer {id}. Signed URLs may be \
+                     disabled on the server; use the Symlink download client with an rclone \
+                     WebDAV mount instead."
+                ))
+            })
+    }
+
+    async fn transfer(
+        &self,
+        id: &str,
+        service: Option<&str>,
+    ) -> Result<Option<Transfer>, DebridError> {
+        self.call(Method::GET, &id_query(id, service))
+            .await?
+            .as_deref()
+            .map(decode)
+            .transpose()
+    }
+
     /// Sends a request built by [`request`](Self::request) and returns its
     /// body; `None` for 404 and empty bodies.
     async fn call(
@@ -211,6 +306,44 @@ fn id_query<'a>(id: &'a str, service: Option<&'a str>) -> Vec<(&'static str, &'a
 
 fn non_blank(value: Option<&str>) -> Option<&str> {
     value.filter(|value| !value.trim().is_empty())
+}
+
+fn apply(torrent: &mut Torrent, remote: &RemoteTorrent) {
+    if !remote.filename.trim().is_empty() {
+        torrent.rd_name = Some(remote.filename.clone());
+    }
+    if remote.bytes > 0 {
+        torrent.rd_size = Some(remote.bytes);
+    }
+    if let Some(files) = &remote.files {
+        torrent.set_files(files);
+    }
+    torrent.client_kind = Some(Provider::Highway);
+    torrent.rd_host.clone_from(&remote.host);
+    torrent.rd_progress = Some(remote.progress);
+    torrent.rd_added.get_or_insert_with(Timestamp::now);
+    torrent.rd_speed = remote.speed;
+    torrent.rd_seeders = remote.seeders;
+    torrent.rd_status_raw.clone_from(&remote.status);
+    if torrent.rd_ended.is_none() {
+        torrent.rd_ended = remote.ended;
+    }
+    let state = remote.status.as_deref();
+    torrent.rd_status = Some(match state {
+        Some("queued") => TorrentStatus::Processing,
+        Some("downloading") => TorrentStatus::Downloading,
+        Some("completed") => TorrentStatus::Finished,
+        Some("error") => TorrentStatus::Error,
+        _ => match torrent.rd_status {
+            None | Some(TorrentStatus::Queued) => TorrentStatus::Processing,
+            Some(previous) => previous,
+        },
+    });
+    if state == Some("error")
+        && let Some(detail) = non_blank(remote.message.as_deref())
+    {
+        torrent.error = Some(detail.to_owned());
+    }
 }
 
 /// Treats an add failure whose text asks to slow down as a two-minute rate limit.
@@ -325,6 +458,8 @@ struct Transfer {
     seeder: i64,
     /// Location in the shared file tree, e.g. `TORRENT/<name>`.
     content_path: Option<String>,
+    /// Signed link to the whole transfer as a zip.
+    download_url: Option<String>,
     files: Option<Vec<TransferFile>>,
 }
 
