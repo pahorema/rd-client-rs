@@ -4,12 +4,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use reqwest::StatusCode;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
-use crate::Error;
 use crate::api::{Api, ApiDescription, Apis};
+use crate::{ApiError, Error};
 
 /// Request timeout used by [`Client::connect`].
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(100);
@@ -35,7 +36,25 @@ struct Inner {
 /// Response envelope of every DSM Web API call.
 #[derive(Deserialize)]
 struct Envelope {
+    #[serde(default)]
+    success: bool,
     data: Option<Value>,
+    error: Option<ErrorBody>,
+}
+
+#[derive(Default, Deserialize)]
+struct ErrorBody {
+    #[serde(default)]
+    code: i64,
+    #[serde(default)]
+    errors: Vec<ErrorDetailBody>,
+}
+
+#[derive(Deserialize)]
+struct ErrorDetailBody {
+    #[serde(default)]
+    code: i64,
+    path: Option<String>,
 }
 
 impl Client {
@@ -90,7 +109,7 @@ async fn get<T: DeserializeOwned>(
     let version = api.version.to_string();
     let query = request_params(api, method, &version, params, sid);
     let response = http.get(endpoint(base, api)).query(&query).send().await;
-    finish(response).await
+    finish(response, api, method).await
 }
 
 /// Common parameters in the order DSM documents them, then `params`, then the session.
@@ -117,16 +136,30 @@ fn endpoint(base: &str, api: &Api) -> String {
     format!("{base}/{}", api.path.trim_start_matches('/'))
 }
 
-/// Unwraps the envelope and decodes `data` into `T`.
+/// Checks the HTTP status, unwraps the envelope and decodes `data` into `T`.
 async fn finish<T: DeserializeOwned>(
     response: Result<reqwest::Response, reqwest::Error>,
+    api: &Api,
+    method: &'static str,
 ) -> Result<T, Error> {
     let response = response.map_err(Error::Transport)?;
+    let status = response.status();
+    if status != StatusCode::OK {
+        return Err(Error::UnexpectedStatus(status.as_u16()));
+    }
     let body = response.text().await.map_err(Error::Transport)?;
     let envelope: Envelope = match serde_json::from_str(&body) {
         Ok(envelope) => envelope,
         Err(source) => return Err(Error::Decode { source, body }),
     };
+    if !envelope.success {
+        let error = envelope.error.unwrap_or_default();
+        let api_error = error.errors.into_iter().fold(
+            ApiError::new(api.name, method, api.version, error.code),
+            |api_error, detail| api_error.with_detail(detail.code, detail.path),
+        );
+        return Err(api_error.into());
+    }
     // Calls without a result answer with no `data`; treat that as an empty object.
     let data = envelope.data.unwrap_or_else(|| Value::Object(Map::new()));
     serde_json::from_value(data).map_err(|source| Error::Decode { source, body })
