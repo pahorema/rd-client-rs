@@ -482,6 +482,37 @@ fn asset_response(name: &str, bytes: std::borrow::Cow<'static, [u8]>) -> Respons
         .into_response()
 }
 
+/// Serve on every IPv4 interface until Ctrl-C or a termination signal arrives.
+///
+/// # Errors
+/// Returns bind or server I/O errors.
+pub async fn serve(port: u16, app: Router) -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    let interrupt = tokio::signal::ctrl_c();
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => {
+                tracing::error!(%error, "Cannot register termination signal");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! { result = interrupt => { if let Err(error) = result { tracing::error!(%error, "Cannot register interrupt signal"); } }, () = terminate => {} }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

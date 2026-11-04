@@ -6,7 +6,9 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
+use clap::Parser;
 use rdc_server::{
+    config::{Config, healthcheck},
     http::{ApiError, AppBuilder, RequestBasePath},
     logging,
 };
@@ -236,4 +238,47 @@ async fn routers_can_merge_and_receive_arbitrary_shared_state() {
         text(request(app, "/API/STATE/AbC").await).await,
         "shared/AbC"
     );
+}
+
+#[tokio::test]
+async fn healthcheck_probes_a_running_server_and_rejects_connection_failures() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let app = builder("/health").build(());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let config = Config::parse_from([
+        "rd-client",
+        "--port",
+        &port.to_string(),
+        "--base-path",
+        "/health",
+    ]);
+    healthcheck(&config).await.unwrap();
+    let result = tokio::process::Command::new(env!("CARGO_BIN_EXE_rd-client"))
+        .args([
+            "healthcheck",
+            "--port",
+            &port.to_string(),
+            "--base-path",
+            "/health",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    task.abort();
+    let _ = task.await;
+    assert!(healthcheck(&config).await.is_err());
+    let result = tokio::process::Command::new(env!("CARGO_BIN_EXE_rd-client"))
+        .args(["healthcheck", "--port", &port.to_string()])
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(result.status.code(), Some(1));
 }

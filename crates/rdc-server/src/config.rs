@@ -40,6 +40,8 @@ pub struct Config {
 pub enum Command {
     /// Run the HTTP server (the default operation).
     Serve,
+    /// Check the local HTTP server; exit successfully only for a healthy response.
+    Healthcheck,
 }
 
 impl Config {
@@ -105,4 +107,24 @@ fn default_database() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("data")
         .join("rd-client.db")
+}
+
+/// Probe the configured loopback server without requiring an external HTTP utility.
+///
+/// # Errors
+/// Returns a network error, timeout, or non-success HTTP status.
+pub async fn healthcheck(config: &Config) -> anyhow::Result<()> {
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .user_agent(concat!("rd-client/", env!("CARGO_PKG_VERSION")))
+        .no_proxy()
+        .build()?
+        .get(format!(
+            "http://127.0.0.1:{}{}/",
+            config.port, config.base_path
+        ))
+        .send()
+        .await?;
+    response.error_for_status()?;
+    Ok(())
 }
