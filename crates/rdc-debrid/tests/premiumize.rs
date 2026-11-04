@@ -2,6 +2,8 @@
 
 mod common;
 
+use std::time::Duration;
+
 use jiff::Timestamp;
 use rdc_debrid::{DebridError, Premiumize};
 use wiremock::matchers::{method, path, query_param};
@@ -104,6 +106,55 @@ async fn error_status_becomes_a_provider_error_with_its_message() {
 
     assert!(matches!(error, DebridError::Provider(_)), "{error:?}");
     assert_eq!(error.to_string(), "Not logged in.");
+}
+
+#[tokio::test]
+async fn rate_limit_messages_become_rate_limited_for_two_minutes() {
+    for message in [
+        "rate limit exceeded",
+        "You've made too many API requests too quickly.",
+        "Your fair-use points, booster points, or active-job count is exhausted.",
+        "This account's usage limit for this service has been reached.",
+        "The target service is unreachable right now. Retry after a delay.",
+    ] {
+        let (server, client) = client().await;
+        let body = serde_json::json!({"status": "error", "message": message}).to_string();
+        mount_account(&server, &body).await;
+
+        let error = client.user().await.expect_err("rate limited");
+
+        assert_eq!(
+            error.retry_after(),
+            Some(Duration::from_secs(120)),
+            "{message}"
+        );
+        assert_eq!(error.to_string(), message);
+    }
+}
+
+#[tokio::test]
+async fn rate_limit_codes_become_rate_limited() {
+    for code in [
+        "slow_down",
+        "rate_limit_reached",
+        "account_limit_reached",
+        "service_limit_reached",
+        "service_down",
+        "semi_permanent_error",
+    ] {
+        let (server, client) = client().await;
+        let body = serde_json::json!({"status": "error", "code": code, "message": "retry later"})
+            .to_string();
+        mount_account(&server, &body).await;
+
+        let error = client.user().await.expect_err("rate limited");
+
+        assert_eq!(
+            error.retry_after(),
+            Some(Duration::from_secs(120)),
+            "{code}"
+        );
+    }
 }
 
 #[tokio::test]

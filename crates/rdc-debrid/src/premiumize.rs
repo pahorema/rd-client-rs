@@ -13,11 +13,29 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use crate::error::DebridError;
-use crate::http::ProviderHttp;
+use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp};
 use crate::provider::{DebridUser, ProviderConfig};
 
 /// Address of the Premiumize API.
 pub const DEFAULT_BASE_URL: &str = "https://www.premiumize.me/api/";
+
+/// Fragments of Premiumize error messages and codes that mean "slow down".
+const RATE_LIMIT_MARKERS: [&str; 14] = [
+    "slow_down",
+    "rate limit exceeded",
+    "rate_limit_reached",
+    "account_limit_reached",
+    "service_limit_reached",
+    "service_down",
+    "semi_permanent_error",
+    "too many api requests",
+    "fair-use points",
+    "booster points",
+    "active-job count",
+    "usage limit for this service",
+    "target service is unreachable",
+    "retry after a delay",
+];
 
 /// Longest part of an unexpected response body quoted in error messages.
 const BODY_EXCERPT_CHARS: usize = 300;
@@ -119,6 +137,7 @@ impl Premiumize {
 struct Envelope {
     status: Option<String>,
     message: Option<String>,
+    code: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,9 +183,27 @@ fn parse_response<T: DeserializeOwned>(status: StatusCode, body: &str) -> Result
     if envelope.status.as_deref() != Some("success")
         && let Some(message) = envelope.message
     {
-        return Err(DebridError::Provider(message));
+        return Err(provider_error(message, envelope.code.as_deref()));
     }
     serde_json::from_str(body).map_err(|error| unreadable(body, &error))
+}
+
+fn provider_error(message: String, code: Option<&str>) -> DebridError {
+    if is_rate_limit(&message) || code.is_some_and(is_rate_limit) {
+        DebridError::RateLimited {
+            message,
+            retry_after: DEFAULT_RATE_LIMIT_COOLDOWN,
+        }
+    } else {
+        DebridError::Provider(message)
+    }
+}
+
+fn is_rate_limit(text: &str) -> bool {
+    let text = text.to_lowercase();
+    RATE_LIMIT_MARKERS
+        .iter()
+        .any(|marker| text.contains(marker))
 }
 
 fn unreadable(body: &str, error: &serde_json::Error) -> DebridError {
