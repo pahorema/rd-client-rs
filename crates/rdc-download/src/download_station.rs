@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rdc_synology::{Credentials, Error, Session, SessionProvider, Task};
+use rdc_synology::{Credentials, Error, Session, SessionProvider, Task, TaskStatus};
 use tokio::sync::watch;
 
-use crate::engine::{CANCELLED_MESSAGE, Completion, DownloadEngine, Progress, StartError};
-use crate::remote::{Signals, Timing, remote_parent, remote_path};
+use crate::engine::{CANCELLED_MESSAGE, Completion, DownloadEngine, Outcome, Progress, StartError};
+use crate::remote::{Polled, Signals, Timing, remote_parent, remote_path, spawn_polling};
 
 /// Attempts to find or create the task before the start fails.
 const START_ATTEMPTS: u32 = 5;
@@ -63,6 +63,11 @@ pub struct DownloadStationRequest {
 /// link up among the tasks or creates its destination folder and a task for it (up to five
 /// attempts). It returns the task id. Calls failing because the session expired sign in again
 /// and are retried once.
+///
+/// The engine then reads the task every second: a task error or a captcha request deletes the
+/// task and fails; a finished task (or one with every byte downloaded) succeeds as soon as the
+/// local file exists (looked for ten times, about 45 s); a task that no longer exists fails.
+/// Pausing and resuming pause and resume the task; cancelling deletes it.
 #[derive(Debug)]
 pub struct DownloadStationDownload {
     shared: Arc<Shared>,
@@ -104,8 +109,15 @@ impl DownloadStationDownload {
         }
     }
 
-    /// Replaces the wait unit of the start attempts (one second by default): attempt `n`
-    /// waits `n` units.
+    /// Replaces the wait between two looks at the task (one second by default).
+    #[must_use]
+    pub fn with_poll_interval(mut self, interval: Duration) -> Self {
+        self.shared_mut().timing.poll_interval = interval;
+        self
+    }
+
+    /// Replaces the wait unit of the retry loops (one second by default): attempt `n` of the
+    /// start and check `n` for the local file wait `n` units.
     #[must_use]
     pub fn with_retry_step(mut self, step: Duration) -> Self {
         self.shared_mut().timing.retry_step = step;
@@ -361,11 +373,84 @@ impl Shared {
     }
 }
 
+/// Whether Download Station is done downloading the task; finished torrents settle into
+/// seeding states.
+fn is_complete(task: &Task) -> bool {
+    matches!(
+        task.status,
+        TaskStatus::Finished
+            | TaskStatus::Downloaded
+            | TaskStatus::Seeding
+            | TaskStatus::PreSeeding
+    ) || (task.size > 0 && task.size_downloaded() >= task.size)
+}
+
+#[async_trait]
+impl Polled for Shared {
+    fn signals(&self) -> &Signals {
+        &self.signals
+    }
+
+    async fn poll(&self) -> Option<Outcome> {
+        let gid = self.gid()?;
+        let task = match self
+            .with_session(|session| {
+                let gid = gid.clone();
+                async move { session.task(&gid).await }
+            })
+            .await
+        {
+            Ok(task) => task,
+            Err(Error::TaskNotFound(_) | Error::Api(_)) => {
+                return Some(Err("Task not found".to_owned()));
+            }
+            Err(error) => {
+                tracing::warn!("Unable to read Download Station task {gid}: {error}");
+                return None;
+            }
+        };
+        if task.error_detail().is_some() || task.status == TaskStatus::CaptchaNeeded {
+            let detail = task
+                .error_detail()
+                .map_or_else(|| task.status.to_string(), str::to_owned);
+            self.delete().await;
+            return Some(Err(format!("DownloadStation error: {detail}")));
+        }
+        if !is_complete(&task) {
+            self.signals.report(Progress {
+                bytes_done: task.size_downloaded(),
+                bytes_total: task.size,
+                speed: task.speed_download(),
+            });
+            return None;
+        }
+        let file_path = &self.request.file_path;
+        let found = self
+            .signals
+            .wait_for_file(file_path, self.timing.retry_step)
+            .await?;
+        Some(if found {
+            Ok(())
+        } else {
+            Err(format!(
+                "DownloadStation reported the download finished, but no file was found at {} \
+                 (DownloadStation saved to {}). Check that the Download path, the \
+                 DownloadStation Download Path, and the container bind mount all point at the \
+                 same folder.",
+                file_path.display(),
+                self.remote_path.get().map_or("", String::as_str)
+            ))
+        })
+    }
+}
+
 #[async_trait]
 impl DownloadEngine for DownloadStationDownload {
     async fn start(&self) -> Result<String, StartError> {
         self.shared.signals.begin()?;
-        self.shared.start().await
+        let gid = self.shared.start().await?;
+        spawn_polling(Arc::clone(&self.shared), self.shared.timing.poll_interval);
+        Ok(gid)
     }
 
     fn progress(&self) -> watch::Receiver<Progress> {

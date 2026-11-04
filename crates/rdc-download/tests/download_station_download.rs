@@ -7,7 +7,7 @@ use std::time::Duration;
 use dsm::{FOLDER_CREATE, FakeDsm, GID, Reply, TASK_CREATE, TASK_GET, TASK_LIST, URL, task, tasks};
 use rdc_download::{
     CANCELLED_MESSAGE, DownloadEngine, DownloadStationConfig, DownloadStationDownload,
-    DownloadStationRequest,
+    DownloadStationRequest, Outcome, Progress,
 };
 use rdc_synology::SessionProvider;
 use serde_json::json;
@@ -40,6 +40,7 @@ fn engine_with(
     config: DownloadStationConfig,
 ) -> DownloadStationDownload {
     DownloadStationDownload::new(request, config, SessionProvider::new())
+        .with_poll_interval(Duration::from_millis(10))
         .with_retry_step(Duration::from_millis(1))
 }
 
@@ -323,4 +324,111 @@ async fn pause_and_resume_reach_download_station() {
     engine.resume().await;
     assert_eq!(fake.count("DownloadStation/task.cgi pause").await, 1);
     assert_eq!(fake.count("DownloadStation/task.cgi resume").await, 1);
+}
+
+async fn finish(engine: &DownloadStationDownload) -> Outcome {
+    tokio::time::timeout(Duration::from_secs(10), engine.completion().wait())
+        .await
+        .expect("download finishes in time")
+}
+
+/// Starts an engine adopting [`GID`], then lets the task report `status`.
+async fn followed(fake: &FakeDsm, status: i64, error_detail: &str) -> DownloadStationDownload {
+    let engine = engine(fake, request(fake, Some(GID)));
+    engine.start().await.expect("start");
+    fake.get.always(tasks(&[task(status, error_detail)]));
+    engine
+}
+
+#[tokio::test]
+async fn a_finished_task_succeeds_once_the_local_file_exists() {
+    for status in [5, 13, 8] {
+        let fake = FakeDsm::start().await;
+        std::fs::write(&fake.local, b"content").expect("file");
+        let engine = followed(&fake, status, "").await;
+        assert_eq!(finish(&engine).await, Ok(()), "status {status}");
+        assert_eq!(std::fs::read(&fake.local).expect("untouched"), b"content");
+    }
+}
+
+#[tokio::test]
+async fn a_fully_downloaded_task_counts_as_finished() {
+    let fake = FakeDsm::start().await;
+    std::fs::write(&fake.local, b"content").expect("file");
+    let engine = engine(&fake, request(&fake, Some(GID)));
+    engine.start().await.expect("start");
+    let mut done = task(2, "");
+    done["additional"]["transfer"]["size_downloaded"] = json!(1000);
+    fake.get.always(tasks(&[done]));
+    assert_eq!(finish(&engine).await, Ok(()));
+}
+
+#[tokio::test]
+async fn a_finished_task_without_local_file_fails() {
+    let fake = FakeDsm::start().await;
+    let engine = followed(&fake, 5, "").await;
+    assert_eq!(
+        finish(&engine).await,
+        Err(format!(
+            "DownloadStation reported the download finished, but no file was found at {} \
+             (DownloadStation saved to /Media/Downloads/Torrents/MyTorrent/file.mkv). Check that \
+             the Download path, the DownloadStation Download Path, and the container bind mount \
+             all point at the same folder.",
+            fake.local.display()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn a_task_error_deletes_the_task_and_fails() {
+    let fake = FakeDsm::start().await;
+    let engine = followed(&fake, 2, "torrent_duplicate").await;
+    assert_eq!(
+        finish(&engine).await,
+        Err("DownloadStation error: torrent_duplicate".to_owned())
+    );
+    assert_eq!(fake.count("DownloadStation/task.cgi delete").await, 1);
+}
+
+#[tokio::test]
+async fn a_captcha_request_fails() {
+    let fake = FakeDsm::start().await;
+    let engine = followed(&fake, 15, "").await;
+    assert_eq!(
+        finish(&engine).await,
+        Err("DownloadStation error: CaptchaNeeded".to_owned())
+    );
+}
+
+#[tokio::test]
+async fn a_vanished_task_fails() {
+    let fake = FakeDsm::start().await;
+    let engine = followed(&fake, 2, "").await;
+    fake.get.always(Reply::Fail(544));
+    assert_eq!(finish(&engine).await, Err("Task not found".to_owned()));
+}
+
+#[tokio::test]
+async fn progress_follows_the_task() {
+    let fake = FakeDsm::start().await;
+    let engine = followed(&fake, 2, "").await;
+    let mut progress = engine.progress();
+    let seen = tokio::time::timeout(
+        Duration::from_secs(10),
+        progress.wait_for(|progress| progress.bytes_total > 0),
+    )
+    .await
+    .expect("progress in time")
+    .expect("channel open");
+    assert_eq!(
+        *seen,
+        Progress {
+            bytes_done: 250,
+            bytes_total: 1000,
+            speed: 50
+        }
+    );
+    drop(seen);
+    assert!(!engine.completion().is_finished());
+    engine.cancel().await;
 }
