@@ -9,7 +9,7 @@ use jiff::Timestamp;
 use rdc_debrid::{
     DebridError, ProviderHttp, RateLimitCoordinator, RemoteTorrent, RetryPolicy, TorBox,
 };
-use rdc_model::{Provider, RemoteFile, Torrent, TorrentStatus};
+use rdc_model::{DownloadClient, DownloadInfo, Provider, RemoteFile, Torrent, TorrentStatus};
 use wiremock::matchers::{body_json_string, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -756,5 +756,223 @@ async fn refresh_without_a_provider_id_does_nothing() {
             .await
             .expect("recorded")
             .is_empty()
+    );
+}
+
+fn with_files(files: &[(i64, &str, i64)]) -> Torrent {
+    let mut torrent = Torrent {
+        rd_name: Some("TestTorrent".to_owned()),
+        ..sent_torrent(None)
+    };
+    let files: Vec<RemoteFile> = files
+        .iter()
+        .map(|&(id, path, bytes)| RemoteFile {
+            id,
+            path: path.to_owned(),
+            bytes,
+            selected: true,
+            download_link: None,
+        })
+        .collect();
+    torrent.set_files(&files);
+    torrent
+}
+
+fn zipping_client() -> TorBox {
+    let mut config = common::config();
+    config.prefer_zipped_downloads = true;
+    TorBox::new(&config, common::http())
+}
+
+fn links(infos: &[DownloadInfo]) -> Vec<(Option<&str>, &str)> {
+    infos
+        .iter()
+        .map(|info| (info.file_name.as_deref(), info.restricted_link.as_str()))
+        .collect()
+}
+
+#[tokio::test]
+async fn download_infos_link_every_file_without_zip_preference() {
+    let (_server, client) = client().await;
+    let torrent = with_files(&[(1, "a.mkv", 10), (2, "Subs/b.srt", 1)]);
+
+    let infos = client
+        .download_infos(&torrent)
+        .expect("infos")
+        .expect("ready");
+
+    assert_eq!(
+        links(&infos),
+        [
+            (Some("a.mkv"), "https://torbox.app/fakedl/12345/1"),
+            (Some("b.srt"), "https://torbox.app/fakedl/12345/2"),
+        ]
+    );
+}
+
+#[test]
+fn download_infos_use_one_zip_when_every_file_is_wanted() {
+    let mut torrent = with_files(&[(1, "a.mkv", 10), (2, "b.srt", 1)]);
+    torrent.download_client = DownloadClient::Aria2c;
+
+    let infos = zipping_client()
+        .download_infos(&torrent)
+        .expect("infos")
+        .expect("ready");
+
+    assert_eq!(
+        links(&infos),
+        [(
+            Some("TestTorrent.zip"),
+            "https://torbox.app/fakedl/12345/zip"
+        )]
+    );
+}
+
+#[test]
+fn download_infos_link_files_when_some_are_filtered_or_symlinked() {
+    let mut filtered = with_files(&[(1, "a.mkv", 10), (2, "b.srt", 1)]);
+    filtered.exclude_regex = Some(r"\.srt$".to_owned());
+    let mut symlinked = with_files(&[(1, "a.mkv", 10)]);
+    symlinked.download_client = DownloadClient::Symlink;
+
+    let filtered = zipping_client()
+        .download_infos(&filtered)
+        .expect("infos")
+        .expect("ready");
+    let symlinked = zipping_client()
+        .download_infos(&symlinked)
+        .expect("infos")
+        .expect("ready");
+
+    assert_eq!(
+        links(&filtered),
+        [(Some("a.mkv"), "https://torbox.app/fakedl/12345/1")]
+    );
+    assert_eq!(
+        links(&symlinked),
+        [(Some("a.mkv"), "https://torbox.app/fakedl/12345/1")]
+    );
+}
+
+#[tokio::test]
+async fn download_infos_wait_for_a_provider_id_and_report_all_excluded() {
+    let (_server, client) = client().await;
+    let mut excluded = with_files(&[(1, "a.mkv", 10)]);
+    excluded.include_regex = Some("nothing".to_owned());
+
+    assert_eq!(
+        client.download_infos(&Torrent::default()).expect("infos"),
+        None
+    );
+    assert_eq!(
+        client.download_infos(&excluded).expect("infos"),
+        Some(Vec::new())
+    );
+}
+
+async fn mount_requestdl(server: &MockServer, file_id: &str, zip: &str) {
+    Mock::given(method("GET"))
+        .and(path("/torrents/requestdl"))
+        .and(header("authorization", "Bearer test-api-key"))
+        .and(query_param("token", "test-api-key"))
+        .and(query_param("torrent_id", "12345"))
+        .and(query_param("file_id", file_id))
+        .and(query_param("zip_link", zip))
+        .and(query_param("redirect", "false"))
+        .and(query_param("append_name", "false"))
+        .respond_with(json(&data(r#""https://cdn.torbox.app/file""#)))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn unrestrict_requests_single_files_and_zips() {
+    let (server, client) = client().await;
+    mount_requestdl(&server, "6789", "false").await;
+    mount_requestdl(&server, "0", "true").await;
+
+    let file = client
+        .unrestrict_link("https://torbox.app/fakedl/12345/6789")
+        .await;
+    let zip = client
+        .unrestrict_link("https://torbox.app/fakedl/12345/zip")
+        .await;
+
+    assert_eq!(file.expect("file link"), "https://cdn.torbox.app/file");
+    assert_eq!(zip.expect("zip link"), "https://cdn.torbox.app/file");
+}
+
+#[tokio::test]
+async fn unrestrict_accepts_any_link_with_ids_in_the_last_segments() {
+    let (server, client) = client().await;
+    Mock::given(path("/torrents/requestdl"))
+        .and(query_param("torrent_id", "123"))
+        .and(query_param("file_id", "456"))
+        .and(query_param("zip_link", "false"))
+        .respond_with(json(&data(r#""https://cdn/x""#)))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    assert_eq!(
+        client
+            .unrestrict_link("https://torbox.app/d/123/456")
+            .await
+            .expect("link"),
+        "https://cdn/x"
+    );
+}
+
+#[tokio::test]
+async fn unrestrict_rejects_malformed_links() {
+    let (server, client) = client().await;
+    for (link, message) in [
+        ("", "Link cannot be null or empty"),
+        (
+            "https://torbox.app/fakedl/12345",
+            "Invalid link format: https://torbox.app/fakedl/12345",
+        ),
+        (
+            "https://torbox.app/fakedl/abc/1",
+            "Invalid torrent ID in link segment 4: abc",
+        ),
+        (
+            "https://torbox.app/fakedl/1/x9",
+            "Invalid file ID in link segment 5: x9",
+        ),
+    ] {
+        let error = client.unrestrict_link(link).await.expect_err("malformed");
+
+        assert_eq!(error.to_string(), message);
+    }
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn unrestrict_without_a_link_fails() {
+    let (server, client) = client().await;
+    Mock::given(path("/torrents/requestdl"))
+        .respond_with(json(&data("null")))
+        .mount(&server)
+        .await;
+
+    let error = client
+        .unrestrict_link("https://torbox.app/fakedl/1/2")
+        .await
+        .expect_err("no link");
+
+    assert!(
+        error
+            .to_string()
+            .starts_with("Unrestrict returned an invalid download"),
+        "{error}"
     );
 }

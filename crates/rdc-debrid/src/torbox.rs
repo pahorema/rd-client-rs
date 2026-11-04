@@ -8,7 +8,7 @@ use std::fmt;
 use std::time::Duration;
 
 use jiff::Timestamp;
-use rdc_model::{Provider, RemoteFile, Torrent, TorrentStatus};
+use rdc_model::{DownloadClient, DownloadInfo, Provider, RemoteFile, Torrent, TorrentStatus};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::de::{DeserializeOwned, IgnoredAny};
@@ -29,6 +29,13 @@ const QUEUED_STATE: &str = "queued";
 
 /// Seeding setting used when the account settings do not say.
 const DEFAULT_SEED_SETTING: i64 = 3;
+
+/// Prefix of the placeholder links handed out as restricted links; they only
+/// name what to download and are never fetched themselves.
+const SENTINEL_LINK_BASE: &str = "https://torbox.app/fakedl/";
+
+/// Last segment of a placeholder link that stands for the whole torrent.
+const ZIP_SEGMENT: &str = "zip";
 
 /// Error codes TorBox reports for failures that usually go away on retry.
 const TRANSIENT_ERRORS: [&str; 4] = [
@@ -298,6 +305,84 @@ impl TorBox {
         };
         apply(torrent, remote);
         Ok(())
+    }
+
+    /// Lists the files to download as placeholder links.
+    ///
+    /// When every file passes the filter, zipped downloads are preferred and
+    /// the download client is not the symlink downloader, the whole torrent
+    /// is one zip named after it; otherwise every downloadable file gets
+    /// its own link. Returns `None` when the torrent has no TorBox id yet.
+    pub fn download_infos(
+        &self,
+        torrent: &Torrent,
+    ) -> Result<Option<Vec<DownloadInfo>>, DebridError> {
+        let Some(rd_id) = torrent.rd_id.as_deref() else {
+            return Ok(None);
+        };
+        let id = parse_id(rd_id)?;
+        let files = torrent.files();
+        let filter = torrent.file_filter()?;
+        let mut downloadable = Vec::with_capacity(files.len());
+        for file in &files {
+            if filter.is_downloadable(&file.path, file.bytes)? {
+                downloadable.push(file);
+            }
+        }
+        if downloadable.len() == files.len()
+            && torrent.download_client != DownloadClient::Symlink
+            && self.prefer_zipped_downloads
+        {
+            tracing::debug!(id, "downloading the TorBox torrent as a zip");
+            return Ok(Some(vec![DownloadInfo {
+                file_name: Some(format!(
+                    "{}.zip",
+                    torrent.rd_name.as_deref().unwrap_or_default()
+                )),
+                restricted_link: format!("{SENTINEL_LINK_BASE}{id}/{ZIP_SEGMENT}"),
+            }]));
+        }
+        Ok(Some(
+            downloadable
+                .into_iter()
+                .map(|file| DownloadInfo {
+                    file_name: Some(base_name(&file.path).to_owned()),
+                    restricted_link: format!("{SENTINEL_LINK_BASE}{id}/{}", file.id),
+                })
+                .collect(),
+        ))
+    }
+
+    /// Requests the download URL behind a placeholder link of
+    /// [`download_infos`](Self::download_infos).
+    pub async fn unrestrict_link(&self, link: &str) -> Result<String, DebridError> {
+        let (torrent_id, file_id) = parse_sentinel_link(link)?;
+        let torrent_id = torrent_id.to_string();
+        let (file_id, zip) = match file_id {
+            Some(file_id) => (file_id.to_string(), "false"),
+            None => ("0".to_owned(), "true"),
+        };
+        let url: Option<String> = self
+            .call(|| {
+                self.request(
+                    Method::GET,
+                    "torrents/requestdl",
+                    &[
+                        ("token", self.api_key()?),
+                        ("torrent_id", &torrent_id),
+                        ("file_id", &file_id),
+                        ("zip_link", zip),
+                        ("redirect", "false"),
+                        ("append_name", "false"),
+                    ],
+                )
+            })
+            .await?;
+        url.filter(|url| !url.trim().is_empty()).ok_or_else(|| {
+            DebridError::InvalidResponse(
+                "Unrestrict returned an invalid download: no link".to_owned(),
+            )
+        })
     }
 
     fn queued_request(&self, id: Option<&str>) -> Result<RequestBuilder, DebridError> {
@@ -786,4 +871,37 @@ fn unmapped_status(remote: &RemoteTorrent, torrent: &Torrent) -> TorrentStatus {
         None | Some(TorrentStatus::Queued) => TorrentStatus::Processing,
         Some(previous) => previous,
     }
+}
+
+/// Reads a placeholder link `https://<host>/<kind>/<torrent id>/<file id or zip>`
+/// into the torrent id and the file id (`None` for the whole torrent).
+fn parse_sentinel_link(link: &str) -> Result<(i64, Option<i64>), DebridError> {
+    if link.trim().is_empty() {
+        return Err(DebridError::Provider(
+            "Link cannot be null or empty".to_owned(),
+        ));
+    }
+    let segments: Vec<&str> = link.split('/').collect();
+    let [_, _, _, _, torrent_id, file_id] = segments.as_slice() else {
+        return Err(DebridError::Provider(format!(
+            "Invalid link format: {link}"
+        )));
+    };
+    let torrent_id = torrent_id.parse().map_err(|_| {
+        DebridError::Provider(format!(
+            "Invalid torrent ID in link segment 4: {torrent_id}"
+        ))
+    })?;
+    if *file_id == ZIP_SEGMENT {
+        return Ok((torrent_id, None));
+    }
+    let file_id = file_id.parse().map_err(|_| {
+        DebridError::Provider(format!("Invalid file ID in link segment 5: {file_id}"))
+    })?;
+    Ok((torrent_id, Some(file_id)))
+}
+
+/// The last component of a provider path.
+fn base_name(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
