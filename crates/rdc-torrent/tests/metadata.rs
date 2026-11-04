@@ -90,3 +90,100 @@ fn parses_multiple_files_and_checked_total_size() {
         assert!(TorrentFile::parse(bytes).is_err());
     }
 }
+
+#[test]
+fn parses_v2_tree_and_hybrid_hashes() {
+    use sha2::Sha256;
+    for hybrid in [false, true] {
+        let mut info = dict(vec![
+            (b"name", string(b"collection")),
+            (b"meta version", int(2)),
+            (b"piece length", int(16384)),
+            (
+                b"file tree",
+                dict(vec![
+                    (
+                        b"folder",
+                        dict(vec![(
+                            b"film.mkv",
+                            dict(vec![(
+                                b"",
+                                dict(vec![
+                                    (b"length", int(2048)),
+                                    (b"pieces root", string(b"01234567890123456789012345678901")),
+                                ]),
+                            )]),
+                        )]),
+                    ),
+                    (
+                        b"empty.txt",
+                        dict(vec![(b"", dict(vec![(b"length", int(0))]))]),
+                    ),
+                ]),
+            ),
+        ]);
+        if hybrid {
+            let Value::Dictionary(entries) = &mut info.value else {
+                unreachable!()
+            };
+            entries.insert(b"pieces", string(b"01234567890123456789"));
+            entries.insert(
+                b"files",
+                list(vec![dict(vec![
+                    (b"path", list(vec![string(b"folder"), string(b"film.mkv")])),
+                    (b"length", int(2048)),
+                ])]),
+            );
+        }
+        let bytes = torrent(info);
+        let root = bencode::decode(&bytes).unwrap();
+        let raw = &bytes[root.get(b"info").unwrap().span.clone()];
+        let parsed = TorrentFile::parse(&bytes).unwrap();
+        assert_eq!(parsed.files.len(), 2);
+        assert_eq!(parsed.files[1].path, ["folder", "film.mkv"]);
+        assert_eq!(parsed.total_size, 2048);
+        assert_eq!(parsed.info_hash_v2, Some(Sha256::digest(raw).into()));
+        assert_eq!(parsed.info_hash_v1.is_some(), hybrid);
+        let expected = if hybrid {
+            data_encoding::HEXLOWER.encode(&Sha1::digest(raw))
+        } else {
+            data_encoding::HEXLOWER.encode(&Sha256::digest(raw))
+        };
+        assert_eq!(parsed.info_hash_hex(), expected);
+    }
+}
+
+#[test]
+fn rejects_malformed_v2_trees_and_total_overflow() {
+    for tree in [
+        int(2),
+        dict(vec![]),
+        dict(vec![(b"", dict(vec![(b"length", int(1))]))]),
+        dict(vec![(
+            b"x",
+            dict(vec![(b"", dict(vec![(b"length", int(-1))]))]),
+        )]),
+    ] {
+        assert!(
+            TorrentFile::parse(&torrent(dict(vec![
+                (b"name", string(b"x")),
+                (b"meta version", int(2)),
+                (b"file tree", tree)
+            ])))
+            .is_err()
+        );
+    }
+    let file = || {
+        dict(vec![
+            (b"path", list(vec![string(b"x")])),
+            (b"length", int(i64::MAX)),
+        ])
+    };
+    assert_eq!(
+        TorrentFile::parse(&torrent(dict(vec![
+            (b"name", string(b"x")),
+            (b"files", list(vec![file(), file(), file()]))
+        ]))),
+        Err(ParseTorrentError::SizeOverflow)
+    );
+}

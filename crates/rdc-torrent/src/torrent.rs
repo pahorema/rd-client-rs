@@ -1,5 +1,6 @@
 use crate::bencode::{self, Node, Value};
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use thiserror::Error;
 
 /// One payload file; path components are relative to the torrent's root name.
@@ -60,8 +61,19 @@ impl TorrentFile {
             .ok_or(ParseTorrentError::Missing("info"))?;
         dictionary(info, "info")?;
         let name = text(required(info, b"name", "name")?, "name")?;
+        let v2 = match info.get(b"meta version").map(|n| &n.value) {
+            None => false,
+            Some(Value::Integer(2)) => true,
+            Some(_) => return Err(ParseTorrentError::Invalid("meta version")),
+        };
         let mut files = Vec::new();
-        if let Some(list) = info.get(b"files") {
+        if v2 {
+            read_tree(
+                required(info, b"file tree", "file tree")?,
+                &mut Vec::new(),
+                &mut files,
+            )?;
+        } else if let Some(list) = info.get(b"files") {
             for file in list.list().ok_or(ParseTorrentError::Invalid("files"))? {
                 dictionary(file, "files entry")?;
                 let parts = required(file, b"path", "path")?
@@ -105,8 +117,9 @@ impl TorrentFile {
         }
         Ok(Self {
             name,
-            info_hash_v1: Some(Sha1::digest(&bytes[info.span.clone()]).into()),
-            info_hash_v2: None,
+            info_hash_v1: (!v2 || info.get(b"pieces").is_some())
+                .then(|| Sha1::digest(&bytes[info.span.clone()]).into()),
+            info_hash_v2: v2.then(|| Sha256::digest(&bytes[info.span.clone()]).into()),
             announce,
             announce_list,
             source: optional_text(info, b"source", "source")?,
@@ -159,4 +172,36 @@ fn length(node: &Node<'_>) -> Result<u64, ParseTorrentError> {
         Value::Integer(n) => u64::try_from(n).map_err(|_| ParseTorrentError::Invalid("length")),
         _ => Err(ParseTorrentError::Invalid("length")),
     }
+}
+
+fn read_tree(
+    node: &Node<'_>,
+    path: &mut Vec<String>,
+    files: &mut Vec<TorrentEntry>,
+) -> Result<(), ParseTorrentError> {
+    let Value::Dictionary(entries) = &node.value else {
+        return Err(ParseTorrentError::Invalid("file tree"));
+    };
+    if entries.is_empty() {
+        return Err(ParseTorrentError::Invalid("empty file tree"));
+    }
+    for (key, value) in entries {
+        if key.is_empty() {
+            if path.is_empty() || entries.len() != 1 {
+                return Err(ParseTorrentError::Invalid("file tree leaf"));
+            }
+            dictionary(value, "file tree leaf")?;
+            files.push(TorrentEntry {
+                path: path.clone(),
+                length: length(value)?,
+            });
+        } else {
+            let component = std::str::from_utf8(key)
+                .map_err(|_| ParseTorrentError::Invalid("file tree path"))?;
+            path.push(component.to_owned());
+            read_tree(value, path, files)?;
+            path.pop();
+        }
+    }
+    Ok(())
 }
