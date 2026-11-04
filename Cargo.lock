@@ -1124,9 +1124,13 @@ dependencies = [
 name = "rdc-debrid"
 version = "0.1.0"
 dependencies = [
+ "fastrand",
  "jiff",
  "reqwest",
  "thiserror",
+ "tokio",
+ "tracing",
+ "wiremock",
 ]
 
 [[package]]

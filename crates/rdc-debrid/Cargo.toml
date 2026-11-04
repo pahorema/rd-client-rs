@@ -9,9 +9,16 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+fastrand.workspace = true
 jiff = { workspace = true, features = ["std"] }
 reqwest = { workspace = true, features = ["charset", "form", "json", "multipart", "query", "rustls"] }
 thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock.workspace = true
 
 [lints]
 workspace = true
