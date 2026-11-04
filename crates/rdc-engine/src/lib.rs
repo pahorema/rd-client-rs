@@ -3,4 +3,5 @@
 //! completing, retrying and cleaning up, plus the background jobs that keep
 //! it running.
 
+pub mod copy_added;
 pub mod tracker_list;
