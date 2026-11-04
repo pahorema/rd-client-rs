@@ -12,6 +12,11 @@ pub(crate) fn json_array<'a>(items: impl IntoIterator<Item = &'a str>) -> String
     serde_json::to_string(&items).expect("a list of strings always serializes to JSON")
 }
 
+/// A JSON string literal (`"value"`), the form DSM expects for some text parameters.
+pub(crate) fn json_string(value: &str) -> String {
+    serde_json::to_string(value).expect("a string always serializes to JSON")
+}
+
 /// An unsigned integer sent as a number, a numeric string or `null` (0).
 pub(crate) fn number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
     struct NumberVisitor;
@@ -73,5 +78,11 @@ mod tests {
             r#"["https://h/a?b=\"c\""]"#
         );
         assert_eq!(json_array([]), "[]");
+    }
+
+    #[test]
+    fn json_string_quotes_the_value() {
+        assert_eq!(json_string("url"), r#""url""#);
+        assert_eq!(json_string("Media/Downloads"), r#""Media/Downloads""#);
     }
 }

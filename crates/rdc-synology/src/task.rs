@@ -2,9 +2,10 @@
 
 use std::fmt;
 
+use serde::de::IgnoredAny;
 use serde::{Deserialize, Deserializer};
 
-use crate::wire::{json_array, lenient_text, number};
+use crate::wire::{json_array, json_string, lenient_text, number};
 use crate::{Error, Session};
 
 /// Extra task information requested with every list and get call.
@@ -279,7 +280,99 @@ struct TaskList {
     task: Vec<Task>,
 }
 
+/// Response of `create`.
+#[derive(Deserialize)]
+struct Created {
+    #[serde(default)]
+    task_id: Option<Vec<String>>,
+}
+
 impl Session {
+    /// Creates a task downloading `url`, saved to `destination` (a folder relative to the
+    /// shared folders, for example `Media/Downloads`) or to the account's default
+    /// destination. Returns the ids of the created tasks, which DSM may leave empty.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Api`] when DSM refuses the task (for example code 403 when the destination
+    /// does not exist), or any other [`Error`] of the round trip.
+    pub async fn create_task(
+        &self,
+        url: &str,
+        destination: Option<&str>,
+    ) -> Result<Vec<String>, Error> {
+        let urls = json_array([url]);
+        let kind = json_string("url");
+        let destination = destination.map(json_string);
+        let mut params = vec![
+            ("url", urls.as_str()),
+            ("type", kind.as_str()),
+            ("create_list", "true"),
+        ];
+        if let Some(destination) = &destination {
+            params.push(("destination", destination));
+        }
+        let created: Created = self.call(|apis| &apis.task, "create", &params).await?;
+        Ok(created.task_id.unwrap_or_default())
+    }
+
+    /// Deletes the task `id`, leaving unfinished data where it is.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Error`] of the round trip.
+    pub async fn delete_task(&self, id: &str) -> Result<(), Error> {
+        self.delete(id, "false").await
+    }
+
+    /// Deletes the task `id` and moves its unfinished data to the destination.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Error`] of the round trip.
+    pub async fn delete_task_force_complete(&self, id: &str) -> Result<(), Error> {
+        self.delete(id, "true").await
+    }
+
+    /// Pauses the task `id`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Error`] of the round trip.
+    pub async fn pause_task(&self, id: &str) -> Result<(), Error> {
+        self.act_on(id, "pause").await
+    }
+
+    /// Resumes the paused task `id`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Error`] of the round trip.
+    pub async fn resume_task(&self, id: &str) -> Result<(), Error> {
+        self.act_on(id, "resume").await
+    }
+
+    async fn delete(&self, id: &str, force_complete: &str) -> Result<(), Error> {
+        let ids = json_array([id]);
+        let _: IgnoredAny = self
+            .call(
+                |apis| &apis.task,
+                "delete",
+                &[("id", &ids), ("force_complete", force_complete)],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Runs a task method whose answer carries nothing this client uses.
+    async fn act_on(&self, id: &str, method: &'static str) -> Result<(), Error> {
+        let ids = json_array([id]);
+        let _: IgnoredAny = self
+            .call(|apis| &apis.task, method, &[("id", &ids)])
+            .await?;
+        Ok(())
+    }
+
     /// Every task of this account, with detail, file and transfer information.
     ///
     /// # Errors

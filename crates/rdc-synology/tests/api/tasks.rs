@@ -1,9 +1,9 @@
 use rdc_synology::{Error, TaskStatus};
 use serde_json::{Value, json};
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer};
 
-use crate::common::{SID, failure, logged_in, ok};
+use crate::common::{SID, failure, logged_in, ok, ok_without_data};
 
 fn task_json(id: &str, uri: &str) -> Value {
     json!({
@@ -174,4 +174,118 @@ async fn expired_session_is_reported_as_session_error() {
 
     assert!(error.is_session_error(), "{error:?}");
     assert!(error.to_string().contains("SID not found"), "{error}");
+}
+
+#[tokio::test]
+async fn create_task_sends_url_type_list_flag_and_destination() {
+    let server = MockServer::start().await;
+    let session = logged_in(&server).await;
+    task_call("create")
+        .and(query_param("url", r#"["https://host/a.mkv?token=x&y=1"]"#))
+        .and(query_param("type", r#""url""#))
+        .and(query_param("create_list", "true"))
+        .and(query_param(
+            "destination",
+            r#""Media/Downloads/Some.Release""#,
+        ))
+        .respond_with(ok(&json!({"list_id": [], "task_id": ["dbid_7"]})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let ids = session
+        .create_task(
+            "https://host/a.mkv?token=x&y=1",
+            Some("Media/Downloads/Some.Release"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(ids, ["dbid_7"]);
+}
+
+#[tokio::test]
+async fn create_task_without_destination_omits_it() {
+    let server = MockServer::start().await;
+    let session = logged_in(&server).await;
+    task_call("create")
+        .and(query_param_is_missing("destination"))
+        .respond_with(ok(&json!({"task_id": null})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let ids = session
+        .create_task("https://host/a.mkv", None)
+        .await
+        .unwrap();
+
+    assert_eq!(ids.len(), 0);
+}
+
+#[tokio::test]
+async fn create_task_into_a_missing_destination_is_reported() {
+    let server = MockServer::start().await;
+    let session = logged_in(&server).await;
+    task_call("create")
+        .respond_with(failure(403))
+        .mount(&server)
+        .await;
+
+    let error = session
+        .create_task("https://host/a.mkv", Some("missing"))
+        .await
+        .unwrap_err();
+
+    let Error::Api(api) = &error else {
+        panic!("{error:?}")
+    };
+    assert_eq!(api.description, "Destination does not exist");
+}
+
+#[tokio::test]
+async fn delete_task_keeps_unfinished_data() {
+    let server = MockServer::start().await;
+    let session = logged_in(&server).await;
+    task_call("delete")
+        .and(query_param("id", r#"["dbid_1"]"#))
+        .and(query_param("force_complete", "false"))
+        .respond_with(ok(&json!([{"error": 0, "id": "dbid_1"}])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    session.delete_task("dbid_1").await.unwrap();
+}
+
+#[tokio::test]
+async fn delete_task_force_complete_sets_the_flag() {
+    let server = MockServer::start().await;
+    let session = logged_in(&server).await;
+    task_call("delete")
+        .and(query_param("id", r#"["dbid_1"]"#))
+        .and(query_param("force_complete", "true"))
+        .respond_with(ok(&json!({"failed_task": []})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    session.delete_task_force_complete("dbid_1").await.unwrap();
+}
+
+#[tokio::test]
+async fn pause_and_resume_send_the_task_id() {
+    let server = MockServer::start().await;
+    let session = logged_in(&server).await;
+    for task_method in ["pause", "resume"] {
+        task_call(task_method)
+            .and(query_param("id", r#"["dbid_1"]"#))
+            .respond_with(ok_without_data())
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    session.pause_task("dbid_1").await.unwrap();
+    session.resume_task("dbid_1").await.unwrap();
 }
