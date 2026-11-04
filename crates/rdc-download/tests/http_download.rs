@@ -836,3 +836,29 @@ async fn connections_can_be_bound_to_a_local_address() {
     assert_eq!(outcome, Ok(()));
     assert_downloaded(&run, &data);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_download_starts_only_once() {
+    let data = test_data(1024);
+    let server = TestServer::file(Arc::clone(&data), FileOptions::default()).await;
+    let (_tx, rx) = watch::channel(config());
+    let run = Run::start(&server.url("/file.bin"), rx).await;
+    let error = run.download.start().await.expect_err("second start");
+    assert_eq!(error.message(), "The download was already started");
+    assert_eq!(run.finish().await, Ok(()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn engines_work_as_trait_objects() {
+    let data = test_data(2048);
+    let server = TestServer::file(Arc::clone(&data), FileOptions::default()).await;
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (_tx, rx) = watch::channel(config());
+    let engine: Box<dyn DownloadEngine> = Box::new(HttpDownload::new(
+        server.url("/file.bin"),
+        dir.path().join("f"),
+        rx,
+    ));
+    engine.start().await.expect("start");
+    assert_eq!(engine.completion().wait().await, Ok(()));
+}
