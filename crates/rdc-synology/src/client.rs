@@ -10,22 +10,21 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
 use crate::api::{Api, ApiDescription, Apis};
-use crate::{ApiError, Error};
+use crate::{ApiError, Error, Session};
 
 /// Request timeout used by [`Client::connect`].
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(100);
 
 /// Connection to one DSM, with the API locations it reported.
 ///
-/// Cheap to clone; clones share the connection pool.
+/// Cheap to clone; clones share the connection pool. Log in with [`Client::login`] to call
+/// the Download Station and File Station APIs.
 #[derive(Debug, Clone)]
-#[expect(dead_code, reason = "read by the authenticated calls")]
 pub struct Client {
     inner: Arc<Inner>,
 }
 
 #[derive(Debug)]
-#[expect(dead_code, reason = "read by the authenticated calls")]
 struct Inner {
     http: reqwest::Client,
     /// `<dsm url>/webapi`, without a trailing slash.
@@ -48,6 +47,11 @@ struct ErrorBody {
     code: i64,
     #[serde(default)]
     errors: Vec<ErrorDetailBody>,
+}
+
+#[derive(Deserialize)]
+struct LoginData {
+    sid: String,
 }
 
 #[derive(Deserialize)]
@@ -95,6 +99,50 @@ impl Client {
         Ok(Self {
             inner: Arc::new(Inner { http, base, apis }),
         })
+    }
+
+    /// Logs in with `SYNO.API.Auth` and returns the session. The credentials travel in a
+    /// `POST` body, never in the URL.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Api`] when DSM
+    /// refuses the login (for example code 400 for wrong credentials or 403 when 2-step
+    /// verification is required), or any other [`Error`] of the round trip.
+    pub async fn login(&self, account: &str, password: &str) -> Result<Session, Error> {
+        let api = &self.inner.apis.auth;
+        let params = [
+            ("account", account),
+            ("passwd", password),
+            ("format", "sid"),
+        ];
+        let version = api.version.to_string();
+        let form = request_params(api, "login", &version, &params, None);
+        let response = self
+            .inner
+            .http
+            .post(endpoint(&self.inner.base, api))
+            .form(&form)
+            .send()
+            .await;
+        let login: LoginData = finish(response, api, "login").await?;
+        tracing::debug!(account, "logged in to Synology");
+        Ok(Session::new(self.clone(), login.sid))
+    }
+
+    pub(crate) fn apis(&self) -> &Apis {
+        &self.inner.apis
+    }
+
+    /// Calls `api`/`method` with `GET`, the common parameters, `params` and the session id.
+    pub(crate) async fn get<T: DeserializeOwned>(
+        &self,
+        api: &Api,
+        method: &'static str,
+        params: &[(&str, &str)],
+        sid: Option<&str>,
+    ) -> Result<T, Error> {
+        get(&self.inner.http, &self.inner.base, api, method, params, sid).await
     }
 }
 

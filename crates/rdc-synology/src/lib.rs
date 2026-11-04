@@ -3,11 +3,22 @@
 //! It covers API discovery, login and logout, Download Station tasks and server
 //! configuration, and File Station folder creation. It only speaks the protocol and knows
 //! nothing about torrents.
+//!
+//! ```no_run
+//! # async fn run() -> Result<(), rdc_synology::Error> {
+//! let client = rdc_synology::Client::connect("http://nas:5000").await?;
+//! let session = client.login("downloader", "secret").await?;
+//! session.logout().await?;
+//! # Ok(())
+//! # }
+//! ```
 
 mod api;
 mod client;
 mod codes;
 mod error;
+mod session;
 
 pub use client::{Client, DEFAULT_TIMEOUT};
 pub use error::{ApiError, Error, ErrorDetail, SESSION_ERROR_CODES};
+pub use session::Session;
