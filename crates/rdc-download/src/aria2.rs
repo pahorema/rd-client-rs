@@ -29,6 +29,7 @@ pub struct Aria2Config {
     /// RPC secret; blank means aria2 runs without one.
     pub secret: Option<String>,
     /// Root folder on the aria2 host; blank means aria2 sees the same paths as rd-client.
+    /// In that case the native local directory is preserved, including Windows separators.
     pub download_path: Option<String>,
 }
 
@@ -150,11 +151,21 @@ impl Shared {
             .map_err(|error| fail(error.to_string()))?;
         self.client.get_or_init(|| follow);
         let file_path = &self.request.file_path;
-        let Some(dir) = remote_parent(&self.remote_path) else {
+        let dir = if self
+            .config
+            .download_path
+            .as_deref()
+            .is_some_and(|root| !root.trim().is_empty())
+        {
+            remote_parent(&self.remote_path).map(std::borrow::Cow::Borrowed)
+        } else {
+            file_path.parent().map(|parent| parent.to_string_lossy())
+        };
+        let Some(dir) = dir else {
             return Err(fail(format!("Invalid file path {}", file_path.display())));
         };
         let options = AddUriOptions {
-            dir: Some(dir.to_owned()),
+            dir: Some(dir.into_owned()),
             out: file_path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned()),
