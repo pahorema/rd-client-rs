@@ -4,6 +4,7 @@
 //! configuration, and File Station folder creation. It only speaks the protocol and knows
 //! nothing about torrents.
 
+mod api;
 mod codes;
 mod error;
 
