@@ -216,6 +216,26 @@ numeric_enum! {
     }
 }
 
+numeric_enum! {
+    /// Debrid service a torrent is managed on.
+    Provider {
+        /// Real-Debrid.
+        RealDebrid = 0 => "RealDebrid",
+        /// The alldebrid.com service.
+        AllDebrid = 1 => "AllDebrid",
+        /// Premiumize.
+        Premiumize = 2 => "Premiumize",
+        /// The torbox.app service.
+        TorBox = 3 => "TorBox",
+        /// Debrid-Link.
+        DebridLink = 4 => "DebridLink",
+        /// HIGHWAY.
+        Highway = 5 => "HIGHWAY",
+    }
+    // Legacy stored name.
+    legacy { "HIGHWAY" => Highway }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,15 +244,18 @@ mod tests {
     fn values_are_stable() {
         let values: Vec<i32> = TorrentStatus::ALL.iter().map(|s| s.as_i32()).collect();
         assert_eq!(values, [0, 1, 2, 3, 4, 5, 99]);
+        let values: Vec<i32> = Provider::ALL.iter().map(|p| p.as_i32()).collect();
+        assert_eq!(values, [0, 1, 2, 3, 4, 5]);
     }
 
     #[test]
     fn converts_from_integers() {
         assert_eq!(TorrentStatus::try_from(99), Ok(TorrentStatus::Error));
+        assert_eq!(Provider::try_from(3), Ok(Provider::TorBox));
         let error = TorrentStatus::try_from(6).unwrap_err();
         assert_eq!(error.type_name(), "TorrentStatus");
         assert_eq!(error.value(), 6);
-        assert!(TorrentStatus::try_from(-1).is_err());
+        assert!(Provider::try_from(-1).is_err());
     }
 
     #[test]
@@ -244,46 +267,58 @@ mod tests {
             "WaitingForFileSelection".parse(),
             Ok(TorrentStatus::WaitingForFileSelection)
         );
+        assert_eq!("DebridLink".parse(), Ok(Provider::DebridLink));
+        assert_eq!("Highway".parse(), Ok(Provider::Highway));
+    }
+
+    #[test]
+    fn parses_legacy_names() {
+        assert_eq!("HIGHWAY".parse(), Ok(Provider::Highway));
     }
 
     #[test]
     fn rejects_unknown_text() {
-        let error = "finished".parse::<TorrentStatus>().unwrap_err();
-        assert_eq!(error.type_name(), "TorrentStatus");
-        assert_eq!(error.input(), "finished");
-        assert!("6".parse::<TorrentStatus>().is_err());
-        assert!("".parse::<TorrentStatus>().is_err());
-        assert!("1.5".parse::<TorrentStatus>().is_err());
+        let error = "realdebrid".parse::<Provider>().unwrap_err();
+        assert_eq!(error.type_name(), "Provider");
+        assert_eq!(error.input(), "realdebrid");
+        assert!("6".parse::<Provider>().is_err());
+        assert!("".parse::<Provider>().is_err());
+        assert!("1.5".parse::<Provider>().is_err());
     }
 
     #[test]
     fn displays_canonical_name() {
+        assert_eq!(Provider::Highway.to_string(), "Highway");
         assert_eq!(TorrentStatus::Queued.to_string(), "Queued");
     }
 
     #[test]
     fn labels_match_the_ui() {
+        assert_eq!(Provider::Highway.label(), "HIGHWAY");
+        assert_eq!(Provider::RealDebrid.label(), "RealDebrid");
         assert_eq!(TorrentStatus::Error.label(), "Error");
-        assert_eq!(TorrentStatus::OPTIONS[6], (99, "Error"));
+        assert_eq!(Provider::OPTIONS[5], (5, "HIGHWAY"));
     }
 
     #[test]
     fn serializes_as_integers() {
         assert_eq!(serde_json::to_string(&TorrentStatus::Error).unwrap(), "99");
         assert_eq!(
-            serde_json::from_str::<TorrentStatus>("4").unwrap(),
-            TorrentStatus::Finished
+            serde_json::from_str::<Provider>("4").unwrap(),
+            Provider::DebridLink
         );
-        assert!(serde_json::from_str::<TorrentStatus>("\"Error\"").is_err());
+        assert!(serde_json::from_str::<Provider>("\"TorBox\"").is_err());
     }
 
     #[test]
     fn first_variant_is_default() {
         assert_eq!(TorrentStatus::default(), TorrentStatus::Queued);
+        assert_eq!(Provider::default(), Provider::RealDebrid);
     }
 
     #[test]
     fn converts_into_integers() {
         assert_eq!(i32::from(TorrentStatus::Error), 99);
+        assert_eq!(i64::from(Provider::Highway), 5);
     }
 }

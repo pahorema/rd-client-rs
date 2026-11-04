@@ -4,4 +4,4 @@
 
 mod enums;
 
-pub use enums::{ParseEnumError, TorrentStatus, UnknownValueError};
+pub use enums::{ParseEnumError, Provider, TorrentStatus, UnknownValueError};
