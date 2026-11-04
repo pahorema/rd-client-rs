@@ -5,9 +5,11 @@
 //! paths, configuration structs), so the crate does not depend on the domain model.
 //! [`verify_file_size`] checks a finished file against the size the provider announced.
 
+mod bind;
 mod engine;
 mod verify;
 
+pub use self::bind::{is_local_unicast_address, resolve_bind_address};
 pub use self::engine::{
     CANCELLED_MESSAGE, Completion, CompletionSender, DownloadEngine, Outcome, Progress,
     STOPPED_UNEXPECTEDLY_MESSAGE, StartError, completion_channel,
