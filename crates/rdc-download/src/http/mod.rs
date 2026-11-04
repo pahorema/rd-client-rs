@@ -23,8 +23,8 @@ pub use self::config::InternalConfig;
 use self::connection::Context;
 use self::error::TransferError;
 use crate::engine::{
-    CANCELLED_MESSAGE, Completion, CompletionSender, DownloadEngine, Outcome, Progress, StartError,
-    completion_channel,
+    CANCELLED_MESSAGE, Completion, CompletionSender, DownloadEngine, Outcome, Progress,
+    STOPPED_UNEXPECTEDLY_MESSAGE, StartError, completion_channel,
 };
 
 /// How often progress is published while a download runs.
@@ -93,7 +93,19 @@ impl DownloadEngine for HttpDownload {
                 return Err(self.fail_start(format!("Invalid download link {}", self.shared.url)));
             }
         };
-        tokio::spawn(run(Arc::clone(&self.shared), url));
+        let task = tokio::spawn(run(Arc::clone(&self.shared), url));
+        let shared = Arc::clone(&self.shared);
+        tokio::spawn(async move {
+            if let Err(error) = task.await {
+                tracing::error!(
+                    "The download of {} stopped unexpectedly: {error}",
+                    shared.url
+                );
+                shared
+                    .completion
+                    .complete(Err(STOPPED_UNEXPECTEDLY_MESSAGE.to_owned()));
+            }
+        });
         Ok(uuid::Uuid::new_v4().to_string())
     }
 
