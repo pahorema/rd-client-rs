@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Build (linux-${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      # The image build already produces a static binary; reuse its stage and layer cache.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: binary
+          platforms: ${{ matrix.platform }}
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          outputs: type=local,dest=dist
+      - run: tar -C dist -czf "rd-client-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}.tar.gz" rd-client
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rd-client-linux-${{ matrix.arch }}
+          path: rd-client-*.tar.gz
+
+  native:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-aarch64
+            runner: macos-latest
+          - name: windows-x86_64
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - working-directory: web
+        run: bun install --frozen-lockfile && bun run build
+      - run: rustup toolchain install
+      - run: cargo build --release --locked -p rdc-server
+      - if: runner.os != 'Windows'
+        run: tar -C target/release -czf "rd-client-${GITHUB_REF_NAME}-${{ matrix.name }}.tar.gz" rd-client
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path target/release/rd-client.exe -DestinationPath "rd-client-$env:GITHUB_REF_NAME-${{ matrix.name }}.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rd-client-${{ matrix.name }}
+          path: rd-client-*.*
+
+  publish:
+    name: Publish release
+    needs: [linux, native]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: rd-client-*
+          merge-multiple: true
+          path: dist
+      - working-directory: dist
+        run: sha256sum rd-client-* > SHA256SUMS
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" dist/*
+          --repo "$GITHUB_REPOSITORY"
+          --title "$GITHUB_REF_NAME"
+          --generate-notes
+          --verify-tag

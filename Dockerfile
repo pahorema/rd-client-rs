@@ -24,6 +24,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked -p rdc-server \
     && install -D target/release/rd-client /out/rd-client
 
+FROM scratch AS binary
+COPY --from=server /out/rd-client /rd-client
+
 FROM alpine:${ALPINE_VERSION}
 RUN apk add --no-cache ca-certificates su-exec tzdata \
     && mkdir -p /data/db /data/downloads
