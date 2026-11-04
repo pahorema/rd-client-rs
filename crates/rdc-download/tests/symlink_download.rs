@@ -236,3 +236,33 @@ async fn existing_file_or_link_at_the_destination_is_replaced() {
     assert!(again.is_ok(), "{again:?}");
     assert_links_to(&destination, &source);
 }
+
+#[tokio::test]
+async fn cancel_stops_the_search() {
+    let layout = Layout::new();
+    let engine = std::sync::Arc::new(
+        SymlinkDownload::new(layout.request("Movie/Movie.mkv"))
+            .with_retry_step(Duration::from_secs(5)),
+    );
+    let running = {
+        let engine = std::sync::Arc::clone(&engine);
+        tokio::spawn(async move { engine.start().await })
+    };
+    let mut progress = engine.progress();
+    progress
+        .wait_for(|progress| progress.bytes_done >= 1)
+        .await
+        .expect("searching");
+    tokio::time::timeout(Duration::from_secs(2), engine.cancel())
+        .await
+        .expect("cancel returns");
+    let error = running.await.expect("task").expect_err("cancelled");
+    assert_eq!(error.message(), CANCELLED_MESSAGE);
+    assert_eq!(
+        engine.completion().outcome(),
+        Some(Err(CANCELLED_MESSAGE.to_owned()))
+    );
+    engine.pause().await;
+    engine.resume().await;
+    engine.cancel().await;
+}

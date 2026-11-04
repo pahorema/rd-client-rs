@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 use crate::engine::{
-    CANCELLED_MESSAGE, Completion, CompletionSender, DownloadEngine, Progress, StartError,
-    completion_channel,
+    CANCELLED_MESSAGE, Completion, CompletionSender, DownloadEngine, Progress,
+    STOPPED_UNEXPECTEDLY_MESSAGE, StartError, completion_channel,
 };
 
 /// Search rounds before giving up.
@@ -60,6 +61,9 @@ pub enum SymlinkError {
     /// The file was not found on the mount, or the link could not be created.
     #[error("Could not find file from rclone mount!")]
     NotFound,
+    /// The engine was cancelled while searching.
+    #[error("{CANCELLED_MESSAGE}")]
+    Cancelled,
 }
 
 /// Links the file of a mounted provider drive to the download path.
@@ -67,14 +71,15 @@ pub enum SymlinkError {
 /// [`start`](DownloadEngine::start) does the whole job: it searches the mount for the file
 /// (up to ten rounds, round `n` waiting `n` seconds first, about 45 s in total), creates the
 /// link and returns the source path as remote id. Progress reports the round as
-/// `{bytes_done: round, bytes_total: 10, speed: 1}`. Pausing does nothing; cancelling before
-/// the start completes the engine.
+/// `{bytes_done: round, bytes_total: 10, speed: 1}`. Pausing does nothing; cancelling stops the
+/// search.
 #[derive(Debug)]
 pub struct SymlinkDownload {
     request: SymlinkRequest,
     retry_step: Duration,
     progress: watch::Sender<Progress>,
     completion: CompletionSender,
+    cancel: CancellationToken,
     started: AtomicBool,
 }
 
@@ -87,6 +92,7 @@ impl SymlinkDownload {
             retry_step: DEFAULT_RETRY_STEP,
             progress: watch::Sender::new(Progress::default()),
             completion,
+            cancel: CancellationToken::new(),
             started: AtomicBool::new(false),
         }
     }
@@ -148,7 +154,7 @@ impl SymlinkDownload {
             let candidates = candidate_directories(&mount, &search_path, &file_name, &stem);
             found = self
                 .search(&mount, search_subdirectories, &candidates, &file_name)
-                .await;
+                .await?;
         }
         let Some(source) = found else {
             log_mount_contents(&mount).await;
@@ -185,8 +191,11 @@ impl SymlinkDownload {
         search_subdirectories: bool,
         candidates: &[PathBuf],
         file_name: &str,
-    ) -> Option<PathBuf> {
+    ) -> Result<Option<PathBuf>, SymlinkError> {
         for attempt in 0..MAX_ATTEMPTS {
+            if self.cancel.is_cancelled() {
+                return Err(SymlinkError::Cancelled);
+            }
             self.progress.send_replace(Progress {
                 bytes_done: attempt,
                 bytes_total: MAX_ATTEMPTS,
@@ -197,21 +206,24 @@ impl SymlinkDownload {
                 mount.display()
             );
             if let Some(file) = find_file(mount, candidates, file_name).await {
-                return Some(file);
+                return Ok(Some(file));
             }
             if search_subdirectories {
                 for subdirectory in subdirectories(mount).await {
                     if let Some(file) = find_file(&subdirectory, candidates, file_name).await {
-                        return Some(file);
+                        return Ok(Some(file));
                     }
                 }
             }
             let delay = self
                 .retry_step
                 .saturating_mul(u32::try_from(attempt).unwrap_or(u32::MAX));
-            tokio::time::sleep(delay).await;
+            tokio::select! {
+                () = self.cancel.cancelled() => return Err(SymlinkError::Cancelled),
+                () = tokio::time::sleep(delay) => {}
+            }
         }
-        None
+        Ok(None)
     }
 }
 
@@ -222,7 +234,9 @@ impl DownloadEngine for SymlinkDownload {
         if self.started.swap(true, Ordering::SeqCst) {
             return Err(StartError::new("The download was already started"));
         }
-        if self.completion.is_completed() {
+        let _guard = CompleteOnDrop(&self.completion);
+        if self.cancel.is_cancelled() {
+            self.completion.complete(Err(CANCELLED_MESSAGE.to_owned()));
             return Err(StartError::new(CANCELLED_MESSAGE));
         }
         tracing::debug!(
@@ -251,16 +265,28 @@ impl DownloadEngine for SymlinkDownload {
         self.completion.subscribe()
     }
 
-    /// Completes an engine that was not started; a running search finishes on its own.
+    /// Stops a running search and returns once `start` gave up.
     async fn cancel(&self) {
+        self.cancel.cancel();
         if !self.started.load(Ordering::SeqCst) {
             self.completion.complete(Err(CANCELLED_MESSAGE.to_owned()));
         }
+        self.completion().wait().await.ok();
     }
 
     async fn pause(&self) {}
 
     async fn resume(&self) {}
+}
+
+/// Reports an unexpected stop when `start` is abandoned before it finished.
+struct CompleteOnDrop<'sender>(&'sender CompletionSender);
+
+impl Drop for CompleteOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0
+            .complete(Err(STOPPED_UNEXPECTEDLY_MESSAGE.to_owned()));
+    }
 }
 
 /// Splits the configured mount path into the directory and whether to search one level of
