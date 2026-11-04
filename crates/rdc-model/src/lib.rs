@@ -10,6 +10,7 @@ mod size;
 mod torrent;
 
 pub mod paths;
+pub mod settings;
 
 pub use download::{Download, DownloadInfo};
 pub use enums::{
