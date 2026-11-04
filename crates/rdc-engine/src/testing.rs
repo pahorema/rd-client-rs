@@ -1,5 +1,7 @@
 //! Controllable, network-free provider and isolated engine fixtures for integration tests.
 
+pub mod downloads;
+
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt,
