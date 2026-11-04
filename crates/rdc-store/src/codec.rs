@@ -12,6 +12,9 @@ use uuid::Uuid;
 
 use crate::error::{Result, StoreError};
 
+/// Number of nanoseconds in the smallest stored fraction (100 ns).
+const NANOS_PER_TICK: i32 = 100;
+
 /// The stored text of an identifier: upper-case and hyphenated.
 pub(crate) fn uuid_text(id: Uuid) -> String {
     let mut buffer = Uuid::encode_buffer();
@@ -21,6 +24,42 @@ pub(crate) fn uuid_text(id: Uuid) -> String {
 /// Decodes an identifier in any letter case.
 pub(crate) fn parse_uuid(column: &'static str, text: &str) -> Result<Uuid> {
     Uuid::try_parse(text.trim()).map_err(|_| StoreError::invalid(column, text))
+}
+
+/// The stored text of an instant, in UTC with 100 ns precision.
+pub(crate) fn timestamp_text(instant: Timestamp) -> String {
+    let civil = Offset::UTC.to_datetime(instant);
+    let mut text = format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        civil.year(),
+        civil.month(),
+        civil.day(),
+        civil.hour(),
+        civil.minute(),
+        civil.second()
+    );
+    let ticks = civil.subsec_nanosecond() / NANOS_PER_TICK;
+    if ticks != 0 {
+        let fraction = format!("{ticks:07}");
+        text.push('.');
+        text.push_str(fraction.trim_end_matches('0'));
+    }
+    text.push_str("+00:00");
+    text
+}
+
+/// The current instant at the stored precision, so that a value written
+/// now reads back unchanged.
+pub(crate) fn now() -> Timestamp {
+    let nanos = Timestamp::now().as_nanosecond();
+    let tick = i128::from(NANOS_PER_TICK);
+    Timestamp::from_nanosecond(nanos - nanos.rem_euclid(tick))
+        .expect("truncating the current instant stays in range")
+}
+
+/// The stored text of an optional instant.
+pub(crate) fn optional_timestamp_text(instant: Option<Timestamp>) -> Option<String> {
+    instant.map(timestamp_text)
 }
 
 /// Decodes a stored instant; see the module documentation for the accepted
@@ -171,6 +210,36 @@ mod tests {
         let lower = parse_uuid("Id", "3f2504e0-4f89-11d3-9a0c-0305e82c3301").expect("lower");
         assert_eq!(upper, lower);
         assert!(parse_uuid("Id", "not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn timestamps_trim_the_fraction() {
+        let cases = [
+            ("2026-05-28T16:30:00Z", "2026-05-28 16:30:00+00:00"),
+            (
+                "2026-05-28T16:30:00.1234567Z",
+                "2026-05-28 16:30:00.1234567+00:00",
+            ),
+            ("2026-05-28T16:30:00.5Z", "2026-05-28 16:30:00.5+00:00"),
+            ("2026-05-28T16:30:00.120Z", "2026-05-28 16:30:00.12+00:00"),
+            (
+                "2026-05-28T16:30:00.000000099Z",
+                "2026-05-28 16:30:00+00:00",
+            ),
+            ("2026-05-28T18:30:00+02:00", "2026-05-28 16:30:00+00:00"),
+        ];
+        for (input, stored) in cases {
+            assert_eq!(timestamp_text(instant(input)), stored, "input {input}");
+        }
+    }
+
+    #[test]
+    fn timestamps_round_trip() {
+        let value = instant("2001-02-03T04:05:06.7000008Z");
+        assert_eq!(
+            parse_timestamp("Added", &timestamp_text(value)).expect("parse"),
+            value
+        );
     }
 
     #[test]

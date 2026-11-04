@@ -32,6 +32,10 @@ macro_rules! torrent_columns {
     };
 }
 
+mod writes;
+
+pub use self::writes::{NewTorrent, RetryOnError};
+
 /// Sort key of torrents without a priority.
 const NO_PRIORITY: i32 = 9999;
 

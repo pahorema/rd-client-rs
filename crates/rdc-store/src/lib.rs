@@ -18,7 +18,7 @@ use sqlx::{
 };
 
 pub use error::{Result, StoreError};
-pub use torrents::Torrents;
+pub use torrents::{NewTorrent, RetryOnError, Torrents};
 
 /// How long a connection waits for a lock held by another connection.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
