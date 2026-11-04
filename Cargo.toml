@@ -18,6 +18,7 @@ fancy-regex = "0.20"
 fastrand = "2"
 if-addrs = "0.15"
 jiff = { version = "0.2", default-features = false }
+rdc-aria2 = { path = "crates/rdc-aria2" }
 rdc-model = { path = "crates/rdc-model" }
 reqwest = { version = "0.13", default-features = false }
 serde = { version = "1", default-features = false }

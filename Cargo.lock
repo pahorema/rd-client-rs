@@ -1218,13 +1218,16 @@ dependencies = [
  "async-trait",
  "fastrand",
  "if-addrs",
+ "rdc-aria2",
  "reqwest",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
  "tracing",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
