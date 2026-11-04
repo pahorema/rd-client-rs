@@ -1,5 +1,6 @@
 //! A logged-in DSM session.
 
+use std::fmt;
 use std::sync::Arc;
 
 use serde::de::IgnoredAny;
@@ -8,17 +9,34 @@ use crate::{Client, Error};
 
 /// A logged-in DSM session, created by [`Client::login`].
 ///
-/// Cheap to clone; clones are handles to the same login.
-#[derive(Debug, Clone)]
+/// Cheap to clone; clones are handles to the same login and compare equal, while two
+/// separate logins never do, even with the same credentials.
+#[derive(Clone)]
 pub struct Session {
     inner: Arc<Inner>,
 }
 
-#[derive(Debug)]
 struct Inner {
     client: Client,
     sid: String,
 }
+
+impl fmt::Debug for Session {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Session")
+            .field("client", &self.inner.client)
+            .field("sid", &"<redacted>")
+            .finish()
+    }
+}
+
+impl PartialEq for Session {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+}
+
+impl Eq for Session {}
 
 impl Session {
     pub(crate) fn new(client: Client, sid: String) -> Self {

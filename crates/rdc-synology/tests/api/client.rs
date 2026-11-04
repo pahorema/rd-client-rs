@@ -232,3 +232,14 @@ async fn error_details_are_kept() {
     assert_eq!(api.errors[0].code, 401);
     assert_eq!(api.errors[0].path.as_deref(), Some("/x"));
 }
+
+#[test]
+fn debug_output_redacts_the_session_id() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let debug = runtime.block_on(async {
+        let server = MockServer::start().await;
+        format!("{:?}", logged_in(&server).await)
+    });
+
+    assert!(!debug.contains(SID), "{debug}");
+}
