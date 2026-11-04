@@ -9,6 +9,7 @@
 
 mod background;
 mod core;
+mod diagnostics;
 mod error;
 mod operations;
 mod options;
