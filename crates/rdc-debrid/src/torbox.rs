@@ -8,7 +8,7 @@ use std::fmt;
 use std::time::Duration;
 
 use jiff::Timestamp;
-use rdc_model::RemoteFile;
+use rdc_model::{Provider, RemoteFile, Torrent, TorrentStatus};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::de::{DeserializeOwned, IgnoredAny};
@@ -269,6 +269,34 @@ impl TorBox {
         let _: Option<IgnoredAny> = self
             .call(|| Ok(self.request(Method::POST, path, &[])?.json(&body)))
             .await?;
+        Ok(())
+    }
+
+    /// Copies the torrent state into the torrent's `rd_*` fields.
+    ///
+    /// Without `remote` the torrent is looked up; a torrent TorBox no longer
+    /// knows is marked `"deleted"`.
+    pub async fn refresh(
+        &self,
+        torrent: &mut Torrent,
+        remote: Option<&RemoteTorrent>,
+    ) -> Result<(), DebridError> {
+        let Some(rd_id) = torrent.rd_id.as_deref() else {
+            return Ok(());
+        };
+        let fetched;
+        let remote = if let Some(remote) = remote {
+            remote
+        } else {
+            let Some(found) = self.torrent(rd_id).await? else {
+                tracing::info!(rd_id, "TorBox torrent no longer exists");
+                torrent.rd_status_raw = Some("deleted".to_owned());
+                return Ok(());
+            };
+            fetched = found;
+            &fetched
+        };
+        apply(torrent, remote);
         Ok(())
     }
 
@@ -677,4 +705,85 @@ fn parse_id(id: &str) -> Result<i64, DebridError> {
 )]
 fn percent(fraction: f64) -> i64 {
     (fraction * 100.0) as i64
+}
+
+/// Writes `remote` into the torrent's `rd_*` fields.
+fn apply(torrent: &mut Torrent, remote: &RemoteTorrent) {
+    if !remote.filename.trim().is_empty() {
+        torrent.rd_name = Some(remote.filename.clone());
+    }
+    if let Some(name) = remote
+        .original_filename
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
+    {
+        torrent.rd_name = Some(name.to_owned());
+    }
+    if remote.bytes > 0 {
+        torrent.rd_size = Some(remote.bytes);
+    } else if remote.original_bytes > 0 {
+        torrent.rd_size = Some(remote.original_bytes);
+    }
+    if let Some(files) = &remote.files {
+        torrent.set_files(files);
+    }
+    torrent.client_kind = Some(Provider::TorBox);
+    torrent.rd_host.clone_from(&remote.host);
+    torrent.rd_split = Some(remote.split);
+    torrent.rd_progress = Some(remote.progress);
+    torrent.rd_added = remote.added;
+    torrent.rd_ended = remote.ended;
+    torrent.rd_speed = remote.speed;
+    torrent.rd_seeders = remote.seeders;
+    torrent.rd_status_raw.clone_from(&remote.status);
+    // Files that are present can be downloaded whatever the state says.
+    let status = if remote.host.as_deref() == Some("True") {
+        Some(TorrentStatus::Finished)
+    } else {
+        remote.status.as_deref().and_then(mapped_status)
+    };
+    torrent.rd_status = Some(status.unwrap_or_else(|| unmapped_status(remote, torrent)));
+}
+
+/// Maps a TorBox download state; `None` for states without a mapping.
+fn mapped_status(state: &str) -> Option<TorrentStatus> {
+    let starts = |prefix: &&str| starts_with_ignore_case(state, prefix);
+    let status = match state {
+        "allocating" | "metaDL" => TorrentStatus::Processing,
+        _ if starts(&"queued") => TorrentStatus::Processing,
+        "completed" | "processing" => TorrentStatus::Downloading,
+        _ if ["paused", "stalled", "downloading", "checking", "waiting"]
+            .iter()
+            .any(starts) =>
+        {
+            TorrentStatus::Downloading
+        }
+        _ if starts(&"uploading") => TorrentStatus::Uploading,
+        "cached" => TorrentStatus::Finished,
+        "error" => TorrentStatus::Error,
+        _ if starts(&"failed") => TorrentStatus::Error,
+        _ => return None,
+    };
+    Some(status)
+}
+
+/// Keeps the previous status for a state without a mapping; a torrent TorBox
+/// already handles is at least processing.
+fn unmapped_status(remote: &RemoteTorrent, torrent: &Torrent) -> TorrentStatus {
+    if let Some(state) = remote
+        .status
+        .as_deref()
+        .filter(|state| !state.trim().is_empty())
+    {
+        tracing::info!(
+            state,
+            torrent = torrent.rd_name.as_deref(),
+            previous = ?torrent.rd_status,
+            "TorBox reported an unmapped status"
+        );
+    }
+    match torrent.rd_status {
+        None | Some(TorrentStatus::Queued) => TorrentStatus::Processing,
+        Some(previous) => previous,
+    }
 }
