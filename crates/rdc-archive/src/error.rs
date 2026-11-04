@@ -41,6 +41,9 @@ pub enum Error {
         #[source]
         source: io::Error,
     },
+    /// The operation was cancelled through its cancellation token.
+    #[error("the unpack was cancelled")]
+    Cancelled,
 }
 
 impl Error {

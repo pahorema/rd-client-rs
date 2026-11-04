@@ -1,6 +1,6 @@
 //! Helpers shared by the integration tests.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
@@ -23,4 +23,30 @@ pub(crate) fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
         }
     }
     zip.finish().expect("zip fixture can be finished");
+}
+
+/// Every file below `dir`, as `/`-separated paths relative to `dir`, sorted.
+pub(crate) fn files_below(dir: &Path) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, files: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).expect("directory is readable") {
+            let path = entry.expect("directory entry is readable").path();
+            if path.is_dir() {
+                walk(root, &path, files);
+            } else {
+                let parts: Vec<_> = path
+                    .strip_prefix(root)
+                    .expect("walked path is below the root")
+                    .components()
+                    .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                files.push(parts.join("/"));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    if dir.exists() {
+        walk(dir, dir, &mut files);
+    }
+    files.sort();
+    files
 }
