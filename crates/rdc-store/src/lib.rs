@@ -4,12 +4,14 @@
 mod codec;
 mod downloads;
 mod error;
+mod password;
 mod row;
 mod schema;
 mod settings;
 #[cfg(test)]
 mod test_support;
 mod torrents;
+mod users;
 
 use std::{path::Path, time::Duration};
 
@@ -22,6 +24,7 @@ pub use downloads::{AddResult, DownloadWithTorrent, Downloads};
 pub use error::{Result, StoreError};
 pub use settings::StoredSettings;
 pub use torrents::{NewTorrent, RetryOnError, Torrents};
+pub use users::{LoginOutcome, User, UserError, Users};
 
 /// How long a connection waits for a lock held by another connection.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -85,6 +88,11 @@ impl Store {
     /// Settings operations.
     pub fn settings(&self) -> StoredSettings<'_> {
         StoredSettings::new(&self.pool)
+    }
+
+    /// Operations on the user account.
+    pub fn users(&self) -> Users<'_> {
+        Users::new(&self.pool)
     }
 
     /// Waits for running operations and closes every connection.
