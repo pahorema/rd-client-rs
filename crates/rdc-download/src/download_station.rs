@@ -24,8 +24,9 @@ pub struct DownloadStationConfig {
     pub username: Option<String>,
     /// Account password.
     pub password: Option<String>,
-    /// Root folder of the downloads, starting with a shared folder (`/Media/Downloads`).
-    /// Blank means the account's default destination is the root.
+    /// Root folder of the downloads, starting with a shared folder (`/Media/Downloads`); it
+    /// also becomes the account's default destination when it has none. Blank means the
+    /// account's default destination is the root.
     pub download_path: Option<String>,
 }
 
@@ -185,7 +186,10 @@ impl Shared {
         })?;
         *self.session.lock().expect("session lock poisoned") = Some(session);
         let root = match self.config.download_path.as_deref() {
-            Some(root) if !root.trim().is_empty() => Some(root.to_owned()),
+            Some(root) if !root.trim().is_empty() => {
+                self.ensure_default_destination(root).await;
+                Some(root.to_owned())
+            }
             _ => {
                 let config = self
                     .with_session(|session| async move { session.server_config().await })
@@ -270,6 +274,37 @@ impl Shared {
         match ids.into_iter().next() {
             Some(gid) => Ok(Some(gid)),
             None => Ok(self.gid_from_uri().await),
+        }
+    }
+
+    /// Makes `root` the account's default destination when it has none, best-effort:
+    /// without one Download Station leaves every task waiting.
+    async fn ensure_default_destination(&self, root: &str) {
+        let result = self
+            .with_session(|session| async move {
+                let mut config = session.server_config().await?;
+                if config
+                    .default_destination
+                    .as_deref()
+                    .is_some_and(|destination| !destination.trim().is_empty())
+                {
+                    return Ok(false);
+                }
+                config.default_destination = Some(root.to_owned());
+                session.set_server_config(&config).await?;
+                Ok(true)
+            })
+            .await;
+        match result {
+            Ok(true) => tracing::info!(
+                "Set the Download Station default destination to '{root}' for this account"
+            ),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                "Could not set the Download Station default destination automatically ({error}). \
+                 If downloads stay in 'Waiting', sign into Download Station as this account and \
+                 set a default destination under Settings > BT/HTTP/FTP/NZB > Location."
+            ),
         }
     }
 

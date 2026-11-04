@@ -232,6 +232,41 @@ async fn a_refused_login_explains_two_factor_accounts() {
 }
 
 #[tokio::test]
+async fn the_root_becomes_the_default_destination_when_the_account_has_none() {
+    let fake = FakeDsm::start().await;
+    fake.config.always(Reply::Data(
+        json!({"default_destination": "", "bt_max_download": 5}),
+    ));
+    engine(&fake, request(&fake, None))
+        .start()
+        .await
+        .expect("start");
+    let calls = fake.calls().await;
+    let (_, query) = calls
+        .iter()
+        .find(|(name, _)| name == "DownloadStation/info.cgi setserverconfig")
+        .expect("default destination set");
+    assert!(query.contains(&(
+        "default_destination".to_owned(),
+        "/Media/Downloads/Torrents".to_owned()
+    )));
+    assert!(query.contains(&("bt_max_download".to_owned(), "5".to_owned())));
+}
+
+#[tokio::test]
+async fn an_existing_default_destination_is_kept() {
+    let fake = FakeDsm::start().await;
+    engine(&fake, request(&fake, None))
+        .start()
+        .await
+        .expect("start");
+    assert_eq!(
+        fake.count("DownloadStation/info.cgi setserverconfig").await,
+        0
+    );
+}
+
+#[tokio::test]
 async fn without_a_root_the_default_destination_is_used() {
     let fake = FakeDsm::start().await;
     let config = DownloadStationConfig {
