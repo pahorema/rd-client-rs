@@ -7,8 +7,11 @@
 use std::fmt;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use jiff::Timestamp;
-use rdc_model::{DownloadClient, DownloadInfo, Provider, RemoteFile, Torrent, TorrentStatus};
+use rdc_model::{
+    Download, DownloadClient, DownloadInfo, Provider, RemoteFile, Torrent, TorrentStatus,
+};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::de::{DeserializeOwned, IgnoredAny};
@@ -16,7 +19,7 @@ use serde::{Deserialize, Deserializer};
 
 use crate::error::DebridError;
 use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp, RetryPolicy};
-use crate::provider::{DebridUser, ProviderConfig, RemoteTorrent};
+use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
 
 /// Address of the TorBox API.
 pub const DEFAULT_BASE_URL: &str = "https://api.torbox.app/v1/api/";
@@ -383,6 +386,35 @@ impl TorBox {
                 "Unrestrict returned an invalid download: no link".to_owned(),
             )
         })
+    }
+
+    /// Lists the files TorBox already has cached for `hash`.
+    pub async fn available_files(&self, hash: &str) -> Result<Vec<AvailableFile>, DebridError> {
+        let cached: Option<serde_json::Value> = self
+            .call(|| {
+                self.request(
+                    Method::GET,
+                    "torrents/checkcached",
+                    &[("hash", hash), ("format", "list"), ("list_files", "true")],
+                )
+            })
+            .await?;
+        // Hashes that are not cached come back as an empty list or object.
+        let entries: Vec<Option<CachedTorrent>> = cached
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default();
+        Ok(entries
+            .into_iter()
+            .next()
+            .flatten()
+            .and_then(|torrent| torrent.files)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|file| AvailableFile {
+                filename: file.name.unwrap_or_default(),
+                filesize: file.size.unwrap_or_default(),
+            })
+            .collect())
     }
 
     fn queued_request(&self, id: Option<&str>) -> Result<RequestBuilder, DebridError> {
@@ -904,4 +936,85 @@ fn parse_sentinel_link(link: &str) -> Result<(i64, Option<i64>), DebridError> {
 /// The last component of a provider path.
 fn base_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// A cached torrent of a `checkcached` answer.
+#[derive(Debug, Deserialize)]
+struct CachedTorrent {
+    files: Option<Vec<CachedFile>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CachedFile {
+    name: Option<String>,
+    size: Option<i64>,
+}
+
+#[async_trait]
+impl DebridProvider for TorBox {
+    fn kind(&self) -> Provider {
+        Provider::TorBox
+    }
+
+    async fn list_torrents(&self) -> Result<Vec<RemoteTorrent>, DebridError> {
+        self.list_torrents().await
+    }
+
+    async fn user(&self) -> Result<DebridUser, DebridError> {
+        self.user().await
+    }
+
+    async fn add_magnet(&self, magnet: &str) -> Result<String, DebridError> {
+        self.add_magnet(magnet).await
+    }
+
+    async fn add_torrent_file(&self, bytes: &[u8]) -> Result<String, DebridError> {
+        self.add_torrent_file(bytes).await
+    }
+
+    async fn available_files(&self, hash: &str) -> Result<Vec<AvailableFile>, DebridError> {
+        self.available_files(hash).await
+    }
+
+    /// TorBox downloads every file; selection waits until the file list is known.
+    async fn select_files(&self, torrent: &Torrent) -> Result<Option<usize>, DebridError> {
+        let count = torrent.files().len();
+        Ok((count > 0).then_some(count))
+    }
+
+    async fn delete(&self, torrent: &Torrent) -> Result<(), DebridError> {
+        match torrent.rd_id.as_deref() {
+            Some(id) => self.delete_torrent(id).await,
+            None => Ok(()),
+        }
+    }
+
+    async fn unrestrict(&self, _torrent: &Torrent, link: &str) -> Result<String, DebridError> {
+        self.unrestrict_link(link).await
+    }
+
+    async fn refresh(
+        &self,
+        torrent: &mut Torrent,
+        remote: Option<&RemoteTorrent>,
+    ) -> Result<(), DebridError> {
+        self.refresh(torrent, remote).await
+    }
+
+    async fn download_infos(
+        &self,
+        torrent: &Torrent,
+    ) -> Result<Option<Vec<DownloadInfo>>, DebridError> {
+        self.download_infos(torrent)
+    }
+
+    async fn file_name(&self, download: &Download) -> Result<String, DebridError> {
+        download
+            .file_name
+            .clone()
+            .or_else(|| rdc_model::paths::file_name(download))
+            .ok_or_else(|| {
+                DebridError::InvalidResponse("TorBox reported no name for this file".to_owned())
+            })
+    }
 }

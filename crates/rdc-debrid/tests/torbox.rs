@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use rdc_debrid::{
-    DebridError, ProviderHttp, RateLimitCoordinator, RemoteTorrent, RetryPolicy, TorBox,
+    DebridError, DebridProvider, ProviderHttp, RateLimitCoordinator, RemoteTorrent, RetryPolicy,
+    TorBox,
 };
 use rdc_model::{DownloadClient, DownloadInfo, Provider, RemoteFile, Torrent, TorrentStatus};
 use wiremock::matchers::{body_json_string, header, method, path, query_param};
@@ -975,4 +976,82 @@ async fn unrestrict_without_a_link_fails() {
             .starts_with("Unrestrict returned an invalid download"),
         "{error}"
     );
+}
+
+#[tokio::test]
+async fn available_files_come_from_the_cache_check() {
+    let (server, client) = client().await;
+    Mock::given(method("GET"))
+        .and(path("/torrents/checkcached"))
+        .and(query_param("hash", "abc"))
+        .and(query_param("format", "list"))
+        .and(query_param("list_files", "true"))
+        .respond_with(json(&data(
+            r#"[{"name":"R","size":3,"hash":"abc","files":[{"name":"R/a.mkv","size":2},{"name":"R/b.srt","size":1}]}]"#,
+        )))
+        .mount(&server)
+        .await;
+
+    let files = client.available_files("abc").await.expect("files");
+
+    let files: Vec<(&str, i64)> = files
+        .iter()
+        .map(|file| (file.filename.as_str(), file.filesize))
+        .collect();
+    assert_eq!(files, [("R/a.mkv", 2), ("R/b.srt", 1)]);
+}
+
+#[tokio::test]
+async fn available_files_are_empty_when_not_cached() {
+    for body in [data("[]"), data("{}"), data("null")] {
+        let (server, client) = client().await;
+        Mock::given(path("/torrents/checkcached"))
+            .respond_with(json(&body))
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            client.available_files("abc").await.expect("files"),
+            Vec::new()
+        );
+    }
+}
+
+#[tokio::test]
+async fn provider_selects_once_the_files_are_known() {
+    let (_server, client) = client().await;
+    let provider: &dyn DebridProvider = &client;
+
+    assert_eq!(provider.kind(), Provider::TorBox);
+    assert_eq!(
+        provider
+            .select_files(&sent_torrent(None))
+            .await
+            .expect("select"),
+        None
+    );
+    let torrent = with_files(&[(1, "a.mkv", 10), (2, "b.srt", 1)]);
+    assert_eq!(
+        provider.select_files(&torrent).await.expect("select"),
+        Some(2)
+    );
+}
+
+#[tokio::test]
+async fn provider_delete_uses_the_provider_id() {
+    let (server, client) = client().await;
+    let provider: &dyn DebridProvider = &client;
+    mount_mylist(&server, Some("12345"), data(TORRENT)).await;
+    Mock::given(method("POST"))
+        .and(path("/torrents/controltorrent"))
+        .respond_with(json(r#"{"success":true}"#))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    provider
+        .delete(&Torrent::default())
+        .await
+        .expect("nothing to delete");
+    provider.delete(&sent_torrent(None)).await.expect("deleted");
 }
