@@ -541,3 +541,86 @@ async fn add_uri_rejects_an_empty_uri_list_without_calling_aria2() {
 
     assert!(matches!(error, Error::EmptyUriList), "{error:?}");
 }
+
+#[tokio::test]
+async fn force_remove_sends_the_gid() {
+    let server = MockServer::start().await;
+    expect_call(
+        &server,
+        "aria2.forceRemove",
+        json!(["token:secret", "abc"]),
+        result(&json!("abc")),
+    )
+    .await;
+
+    let gid = client(&server, "secret").force_remove("abc").await.unwrap();
+
+    assert_eq!(gid, "abc");
+}
+
+#[tokio::test]
+async fn remove_download_result_sends_the_gid() {
+    let server = MockServer::start().await;
+    expect_call(
+        &server,
+        "aria2.removeDownloadResult",
+        json!(["token:secret", "abc"]),
+        result(&json!("OK")),
+    )
+    .await;
+
+    client(&server, "secret")
+        .remove_download_result("abc")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn pause_sends_the_gid() {
+    let server = MockServer::start().await;
+    expect_call(
+        &server,
+        "aria2.pause",
+        json!(["token:secret", "abc"]),
+        result(&json!("abc")),
+    )
+    .await;
+
+    let gid = client(&server, "secret").pause("abc").await.unwrap();
+
+    assert_eq!(gid, "abc");
+}
+
+#[tokio::test]
+async fn unpause_sends_the_gid() {
+    let server = MockServer::start().await;
+    expect_call(
+        &server,
+        "aria2.unpause",
+        json!(["token:secret", "abc"]),
+        result(&json!("abc")),
+    )
+    .await;
+
+    let gid = client(&server, "secret").unpause("abc").await.unwrap();
+
+    assert_eq!(gid, "abc");
+}
+
+#[tokio::test]
+async fn unknown_gid_is_reported_as_rpc_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "jsonrpc": "2.0", "id": "rd-client", "error": {"code": 1, "message": "Active Download not found for GID#abc"}
+        })))
+        .mount(&server)
+        .await;
+
+    let error = client(&server, "secret")
+        .force_remove("abc")
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.rpc_code(), Some(1));
+}

@@ -4,7 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use reqwest::StatusCode;
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -275,6 +275,45 @@ impl Client {
             vec![Value::from(offset), Value::from(num)],
         )
         .await
+    }
+
+    /// `aria2.forceRemove`: stops the download `gid` immediately and returns its GID.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Error`] of the RPC round trip.
+    pub async fn force_remove(&self, gid: &str) -> Result<String, Error> {
+        self.call("aria2.forceRemove", vec![Value::from(gid)]).await
+    }
+
+    /// `aria2.removeDownloadResult`: forgets the stopped download `gid`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Error`] of the RPC round trip.
+    pub async fn remove_download_result(&self, gid: &str) -> Result<(), Error> {
+        let _: IgnoredAny = self
+            .call("aria2.removeDownloadResult", vec![Value::from(gid)])
+            .await?;
+        Ok(())
+    }
+
+    /// `aria2.pause`: pauses the download `gid` and returns its GID.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Error`] of the RPC round trip.
+    pub async fn pause(&self, gid: &str) -> Result<String, Error> {
+        self.call("aria2.pause", vec![Value::from(gid)]).await
+    }
+
+    /// `aria2.unpause`: resumes the paused download `gid` and returns its GID.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Error`] of the RPC round trip.
+    pub async fn unpause(&self, gid: &str) -> Result<String, Error> {
+        self.call("aria2.unpause", vec![Value::from(gid)]).await
     }
 
     /// Every download aria2 knows about, fetched with one `system.multicall` request:
