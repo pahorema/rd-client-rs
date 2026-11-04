@@ -13,6 +13,8 @@
 mod bind;
 mod engine;
 mod http;
+#[expect(dead_code, reason = "the remote engines built on it follow")]
+mod remote;
 mod symlink;
 mod verify;
 
