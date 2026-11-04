@@ -5,10 +5,14 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::path::Path;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use jiff::Timestamp;
-use rdc_model::{Provider, RemoteFile, Torrent, TorrentStatus};
+use rdc_model::{
+    Download, DownloadClient, DownloadInfo, Provider, RemoteFile, Torrent, TorrentStatus,
+};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
@@ -16,7 +20,7 @@ use serde::{Deserialize, Deserializer};
 
 use crate::error::DebridError;
 use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp};
-use crate::provider::{AvailableFile, DebridUser, ProviderConfig, RemoteTorrent};
+use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
 
 /// The public HIGHWAY API endpoint.
 pub const DEFAULT_ENDPOINT: &str = "https://cloud.high-way.me/center-api/transfers.php";
@@ -26,6 +30,9 @@ const SERVICE: &str = "torrent";
 
 /// Account name reported when the server has no statistics.
 const FALLBACK_USERNAME: &str = "HIGHWAY";
+
+/// Top-level folder of torrent transfers in the shared file tree.
+const SERVICE_DIR: &str = "TORRENT";
 
 /// Scheme of the links rd-client hands out for transfers without signed
 /// per-file URLs; resolved by [`Highway::unrestrict`].
@@ -326,6 +333,180 @@ impl Highway {
         }
         Ok((!body.trim().is_empty()).then_some(body))
     }
+}
+
+#[async_trait]
+impl DebridProvider for Highway {
+    fn kind(&self) -> Provider {
+        Provider::Highway
+    }
+
+    async fn list_torrents(&self) -> Result<Vec<RemoteTorrent>, DebridError> {
+        Highway::list_torrents(self).await
+    }
+
+    async fn user(&self) -> Result<DebridUser, DebridError> {
+        Highway::user(self).await
+    }
+
+    async fn add_magnet(&self, magnet: &str) -> Result<String, DebridError> {
+        Highway::add_magnet(self, magnet).await
+    }
+
+    async fn add_torrent_file(&self, bytes: &[u8]) -> Result<String, DebridError> {
+        Highway::add_torrent_file(self, bytes).await
+    }
+
+    async fn available_files(&self, hash: &str) -> Result<Vec<AvailableFile>, DebridError> {
+        Highway::available_files(self, hash).await
+    }
+
+    /// Transfers always download every file. The symlink downloader needs
+    /// the file list, so it waits until the server indexed it; the other
+    /// downloaders can fall back to the zip of the whole transfer.
+    async fn select_files(&self, torrent: &Torrent) -> Result<Option<usize>, DebridError> {
+        let count = torrent.files().len();
+        if count == 0 && torrent.download_client == DownloadClient::Symlink {
+            return Ok(None);
+        }
+        Ok(Some(count.max(1)))
+    }
+
+    async fn delete(&self, torrent: &Torrent) -> Result<(), DebridError> {
+        Highway::delete(self, torrent).await
+    }
+
+    async fn unrestrict(&self, _torrent: &Torrent, link: &str) -> Result<String, DebridError> {
+        Highway::unrestrict(self, link).await
+    }
+
+    async fn refresh(
+        &self,
+        torrent: &mut Torrent,
+        remote: Option<&RemoteTorrent>,
+    ) -> Result<(), DebridError> {
+        Highway::refresh(self, torrent, remote).await
+    }
+
+    /// Works from the stored file list, without a request.
+    ///
+    /// The symlink downloader gets one `highway://<id>/torrent/<file id>`
+    /// reference per file; the other downloaders get the signed per-file
+    /// URLs when every file has one and the `highway://<id>/torrent/zip`
+    /// reference otherwise. Spool references and transfers without an
+    /// indexed file list are not ready yet.
+    async fn download_infos(
+        &self,
+        torrent: &Torrent,
+    ) -> Result<Option<Vec<DownloadInfo>>, DebridError> {
+        download_infos(torrent)
+    }
+
+    async fn file_name(&self, download: &Download) -> Result<String, DebridError> {
+        non_blank(download.file_name.as_deref())
+            .map(str::to_owned)
+            .or_else(|| rdc_model::paths::file_name(download))
+            .ok_or_else(|| {
+                DebridError::InvalidResponse(format!(
+                    "No file name is known for the download of {}",
+                    download.path
+                ))
+            })
+    }
+
+    /// The path inside the mount of the shared file tree:
+    /// `TORRENT/<file path>`, e.g. `TORRENT/Some.Release/Some.Release.mkv`.
+    fn symlink_path(
+        &self,
+        torrent: &Torrent,
+        download: &Download,
+    ) -> Result<Option<String>, DebridError> {
+        Ok(symlink_path(torrent, download))
+    }
+}
+
+fn download_infos(torrent: &Torrent) -> Result<Option<Vec<DownloadInfo>>, DebridError> {
+    let Some(id) = non_blank(torrent.rd_id.as_deref()).filter(|id| !is_spool_id(id)) else {
+        return Ok(None);
+    };
+    let files = torrent.files();
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let filter = torrent.file_filter()?;
+    let mut downloadable = Vec::new();
+    for file in files {
+        if file.selected && filter.is_downloadable(&file.path, file.bytes)? {
+            downloadable.push(file);
+        }
+    }
+    let info = |file: &RemoteFile, restricted_link: String| DownloadInfo {
+        file_name: Some(file_name_of(&file.path).to_owned()),
+        restricted_link,
+    };
+    if torrent.download_client == DownloadClient::Symlink {
+        let infos = downloadable
+            .iter()
+            .map(|file| info(file, format!("{LINK_SCHEME}{id}/{SERVICE}/{}", file.id)))
+            .collect();
+        return Ok(Some(infos));
+    }
+    if downloadable.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    let signed: Option<Vec<DownloadInfo>> = downloadable
+        .iter()
+        .map(|file| {
+            let link = non_blank(file.download_link.as_deref())?;
+            Some(info(file, link.to_owned()))
+        })
+        .collect();
+    if let Some(infos) = signed {
+        return Ok(Some(infos));
+    }
+    let name = torrent.rd_name.as_deref().unwrap_or(id);
+    Ok(Some(vec![DownloadInfo {
+        file_name: Some(format!("{name}.zip")),
+        restricted_link: format!("{LINK_SCHEME}{id}/{SERVICE}/zip"),
+    }]))
+}
+
+fn symlink_path(torrent: &Torrent, download: &Download) -> Option<String> {
+    let file_name = rdc_model::paths::file_name(download).filter(|name| !name.trim().is_empty())?;
+    let files = torrent.files();
+    let relative = files
+        .iter()
+        .find(|file| !file.path.trim().is_empty() && file.path.ends_with(&file_name))
+        .map_or(file_name.as_str(), |file| file.path.as_str());
+    let service_dir = torrent
+        .rd_host
+        .as_deref()
+        .and_then(|host| {
+            host.split(['/', '\\'])
+                .find(|segment| !segment.trim().is_empty())
+        })
+        .unwrap_or(SERVICE_DIR);
+    if starts_with_dir(relative, service_dir) {
+        return Some(relative.to_owned());
+    }
+    Some(
+        Path::new(service_dir)
+            .join(relative)
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+/// Whether `path` starts with the directory `dir` (compared case-insensitively).
+fn starts_with_dir(path: &str, dir: &str) -> bool {
+    path.get(..dir.len())
+        .is_some_and(|prefix| prefix.to_lowercase() == dir.to_lowercase())
+        && matches!(path.as_bytes().get(dir.len()), Some(b'/' | b'\\'))
+}
+
+/// Last component of a provider file path.
+fn file_name_of(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// The service to name for `id`: spool references are looked up without one.

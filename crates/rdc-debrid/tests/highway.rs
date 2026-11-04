@@ -5,10 +5,12 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use rdc_debrid::{
-    DebridError, Highway, ProviderConfig, ProviderHttp, RateLimitCoordinator, RemoteTorrent,
-    RetryPolicy, is_spool_id,
+    DebridError, DebridProvider, Highway, ProviderConfig, ProviderHttp, RateLimitCoordinator,
+    RemoteTorrent, RetryPolicy, is_spool_id,
 };
-use rdc_model::{Provider, Torrent, TorrentStatus};
+use rdc_model::{
+    Download, DownloadClient, DownloadInfo, Provider, RemoteFile, Torrent, TorrentStatus,
+};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_string_contains, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -786,4 +788,243 @@ async fn available_files_ignore_hashes_that_are_not_hex() {
 
     assert_eq!(files.len(), 0);
     assert_eq!(server.received_requests().await.expect("recorded").len(), 0);
+}
+
+fn provider(server: &MockServer) -> Box<dyn DebridProvider> {
+    Box::new(client(server))
+}
+
+fn file(id: i64, path: &str, selected: bool, download_link: Option<&str>) -> RemoteFile {
+    RemoteFile {
+        id,
+        path: path.to_owned(),
+        bytes: 8120,
+        selected,
+        download_link: download_link.map(str::to_owned),
+    }
+}
+
+fn indexed(download_client: DownloadClient, files: &[RemoteFile]) -> Torrent {
+    let mut torrent = Torrent {
+        rd_name: Some("Some.Release".to_owned()),
+        download_client,
+        ..with_id("4213")
+    };
+    torrent.set_files(files);
+    torrent
+}
+
+async fn infos(torrent: &Torrent) -> Option<Vec<DownloadInfo>> {
+    let server = MockServer::start().await;
+    let infos = provider(&server)
+        .download_infos(torrent)
+        .await
+        .expect("infos");
+    assert_eq!(server.received_requests().await.expect("recorded").len(), 0);
+    infos
+}
+
+fn info(file_name: &str, link: &str) -> DownloadInfo {
+    DownloadInfo {
+        file_name: Some(file_name.to_owned()),
+        restricted_link: link.to_owned(),
+    }
+}
+
+const SIGNED_A: &str = "https://nl.dwld.link/dav/TORRENT/Some.Release/a.mkv?sig=1";
+const SIGNED_B: &str = "https://nl.dwld.link/dav/TORRENT/Some.Release/b.nfo?sig=2";
+
+#[tokio::test]
+async fn provider_kind_is_highway() {
+    let server = MockServer::start().await;
+
+    assert_eq!(provider(&server).kind(), Provider::Highway);
+}
+
+#[tokio::test]
+async fn selecting_files_waits_for_the_index_with_the_symlink_downloader() {
+    let server = MockServer::start().await;
+
+    let selected = provider(&server)
+        .select_files(&indexed(DownloadClient::Symlink, &[]))
+        .await
+        .expect("selected");
+
+    assert_eq!(selected, None);
+}
+
+#[tokio::test]
+async fn selecting_files_does_not_block_other_downloaders_without_an_index() {
+    let server = MockServer::start().await;
+    for download_client in [
+        DownloadClient::Internal,
+        DownloadClient::Aria2c,
+        DownloadClient::DownloadStation,
+    ] {
+        let selected = provider(&server)
+            .select_files(&indexed(download_client, &[]))
+            .await
+            .expect("selected");
+
+        assert_eq!(selected, Some(1), "{download_client:?}");
+    }
+}
+
+#[tokio::test]
+async fn selecting_files_counts_the_indexed_files() {
+    let server = MockServer::start().await;
+    let files = [file(0, "a.mkv", true, None), file(1, "b.nfo", true, None)];
+
+    let selected = provider(&server)
+        .select_files(&indexed(DownloadClient::Symlink, &files))
+        .await
+        .expect("selected");
+
+    assert_eq!(selected, Some(2));
+}
+
+#[tokio::test]
+async fn download_infos_give_the_symlink_downloader_per_file_references() {
+    let files = [
+        file(0, "Some.Release/Some.Release.mkv", true, None),
+        file(1, "Some.Release/Some.Release.part", false, None),
+    ];
+
+    let infos = infos(&indexed(DownloadClient::Symlink, &files)).await;
+
+    assert_eq!(
+        infos,
+        Some(vec![info("Some.Release.mkv", "highway://4213/torrent/0")])
+    );
+}
+
+#[tokio::test]
+async fn download_infos_use_signed_file_urls_when_every_file_has_one() {
+    let files = [
+        file(0, "a.mkv", true, Some(SIGNED_A)),
+        file(1, "b.nfo", true, Some(SIGNED_B)),
+    ];
+
+    let infos = infos(&indexed(DownloadClient::Internal, &files)).await;
+
+    assert_eq!(
+        infos,
+        Some(vec![info("a.mkv", SIGNED_A), info("b.nfo", SIGNED_B)])
+    );
+}
+
+#[tokio::test]
+async fn download_infos_fall_back_to_the_zip_without_signed_urls() {
+    let zip = Some(vec![info("Some.Release.zip", "highway://4213/torrent/zip")]);
+    let unsigned = [file(0, "a.mkv", true, None)];
+    let partly_signed = [
+        file(0, "a.mkv", true, Some(SIGNED_A)),
+        file(1, "b.nfo", true, None),
+    ];
+
+    assert_eq!(
+        infos(&indexed(DownloadClient::Internal, &unsigned)).await,
+        zip
+    );
+    assert_eq!(
+        infos(&indexed(DownloadClient::Aria2c, &partly_signed)).await,
+        zip
+    );
+}
+
+#[tokio::test]
+async fn download_infos_are_empty_when_every_file_is_filtered_out() {
+    let torrent = Torrent {
+        exclude_regex: Some("sample".to_owned()),
+        ..indexed(
+            DownloadClient::Internal,
+            &[file(0, "sample.mkv", true, None)],
+        )
+    };
+
+    assert_eq!(infos(&torrent).await, Some(Vec::new()));
+}
+
+#[tokio::test]
+async fn download_infos_are_not_ready_before_the_files_are_indexed() {
+    for download_client in [DownloadClient::Symlink, DownloadClient::Internal] {
+        assert_eq!(
+            infos(&indexed(download_client, &[])).await,
+            None,
+            "{download_client:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn download_infos_are_not_ready_for_spool_references() {
+    let torrent = Torrent {
+        rd_id: Some(SPOOL_ID.to_owned()),
+        ..indexed(
+            DownloadClient::Internal,
+            &[file(0, "a.mkv", true, Some(SIGNED_A))],
+        )
+    };
+
+    assert_eq!(infos(&torrent).await, None);
+}
+
+fn symlinked(files: &[RemoteFile]) -> Option<String> {
+    let torrent = Torrent {
+        rd_host: Some("TORRENT/Some.Release".to_owned()),
+        ..indexed(DownloadClient::Symlink, files)
+    };
+    let download = Download {
+        link: Some("highway://4213/torrent/0".to_owned()),
+        file_name: Some("Some.Release.mkv".to_owned()),
+        ..Download::default()
+    };
+    let http = ProviderHttp::new(
+        Duration::from_secs(5),
+        Arc::new(RateLimitCoordinator::new()),
+    )
+    .expect("client builds");
+    let provider: Box<dyn DebridProvider> = Box::new(Highway::new(&config("test-token"), http));
+    provider
+        .symlink_path(&torrent, &download)
+        .expect("path")
+        .map(|path| path.replace('\\', "/"))
+}
+
+#[test]
+fn symlink_path_prepends_the_service_folder_to_the_file_path() {
+    let files = [file(0, "Some.Release/Some.Release.mkv", true, None)];
+
+    assert_eq!(
+        symlinked(&files).as_deref(),
+        Some("TORRENT/Some.Release/Some.Release.mkv")
+    );
+}
+
+#[test]
+fn symlink_path_keeps_paths_already_inside_the_service_folder() {
+    let files = [file(0, "TORRENT/Some.Release/Some.Release.mkv", true, None)];
+
+    assert_eq!(
+        symlinked(&files).as_deref(),
+        Some("TORRENT/Some.Release/Some.Release.mkv")
+    );
+}
+
+#[test]
+fn symlink_path_uses_the_file_name_without_a_matching_file() {
+    assert_eq!(symlinked(&[]).as_deref(), Some("TORRENT/Some.Release.mkv"));
+}
+
+#[tokio::test]
+async fn provider_file_name_is_the_stored_download_name() {
+    let server = MockServer::start().await;
+    let download = Download {
+        file_name: Some("Some.Release.zip".to_owned()),
+        ..Download::default()
+    };
+
+    let name = provider(&server).file_name(&download).await.expect("name");
+
+    assert_eq!(name, "Some.Release.zip");
 }
