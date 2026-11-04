@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rdc_aria2::{AddUriOptions, Client, DownloadStatus, Error};
+use rdc_aria2::{AddUriOptions, Client, DownloadState, DownloadStatus, Error};
 use tokio::sync::watch;
 
-use crate::engine::{CANCELLED_MESSAGE, Completion, DownloadEngine, Progress, StartError};
-use crate::remote::{Signals, Timing, remote_parent, remote_path};
+use crate::engine::{CANCELLED_MESSAGE, Completion, DownloadEngine, Outcome, Progress, StartError};
+use crate::remote::{Polled, Signals, Timing, remote_parent, remote_path, spawn_polling};
 
 /// Timeout of each aria2 request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -61,7 +61,10 @@ pub struct Aria2Request {
 ///
 /// [`start`](DownloadEngine::start) adopts the download of [`Aria2Request::gid`] when aria2
 /// still knows it, otherwise refuses a link aria2 already downloads and adds it (up to six
-/// tries). It returns the GID. Pausing and resuming pause and unpause the aria2 download; cancelling removes it.
+/// tries). It returns the GID. The engine then asks aria2 about the download every second:
+/// an error removes it and fails, a completed or removed download is removed and succeeds as
+/// soon as the local file exists (looked for ten times, about 45 s), and an unknown GID fails.
+/// Pausing and resuming pause and unpause the aria2 download; cancelling removes it.
 #[derive(Debug)]
 pub struct Aria2Download {
     shared: Arc<Shared>,
@@ -101,8 +104,15 @@ impl Aria2Download {
         }
     }
 
-    /// Replaces the wait unit of the start retries (one second by default): retry `n` waits
-    /// `n` units.
+    /// Replaces the wait between two looks at aria2 (one second by default).
+    #[must_use]
+    pub fn with_poll_interval(mut self, interval: Duration) -> Self {
+        self.shared_mut().timing.poll_interval = interval;
+        self
+    }
+
+    /// Replaces the wait unit of the retry loops (one second by default): retry `n` of the
+    /// start and check `n` for the local file wait `n` units.
     #[must_use]
     pub fn with_retry_step(mut self, step: Duration) -> Self {
         self.shared_mut().timing.retry_step = step;
@@ -205,6 +215,14 @@ impl Shared {
             tracing::debug!("Ignoring failed aria2 result removal of {gid}: {error}");
         }
     }
+
+    fn report(&self, status: &DownloadStatus) {
+        self.signals.report(Progress {
+            bytes_done: status.completed_length,
+            bytes_total: status.total_length,
+            speed: status.download_speed,
+        });
+    }
 }
 
 /// Adopts `gid` when aria2 knows it, otherwise adds `url` and verifies the new download.
@@ -235,10 +253,62 @@ fn has_uri(download: &DownloadStatus, url: &str) -> bool {
 }
 
 #[async_trait]
+impl Polled for Shared {
+    fn signals(&self) -> &Signals {
+        &self.signals
+    }
+
+    async fn poll(&self) -> Option<Outcome> {
+        let (gid, client) = (self.gid()?, self.client.get()?);
+        let status = match client.tell_status(&gid).await {
+            Ok(status) => status,
+            Err(Error::Rpc { .. }) => {
+                return Some(Err("Download was not found in Aria2".to_owned()));
+            }
+            Err(error) => {
+                tracing::warn!("Unable to get the aria2 status of {gid}: {error}");
+                return None;
+            }
+        };
+        let message = status.error_message.as_deref().unwrap_or_default();
+        if !message.trim().is_empty() || status.status == DownloadState::Error {
+            self.remove().await;
+            let code = status.error_code.as_deref().unwrap_or_default();
+            return Some(Err(format!("{code}: {message}")));
+        }
+        self.report(&status);
+        if !matches!(
+            status.status,
+            DownloadState::Complete | DownloadState::Removed
+        ) {
+            return None;
+        }
+        tracing::debug!("aria2 download {gid} finished");
+        self.remove().await;
+        let file_path = &self.request.file_path;
+        let found = self
+            .signals
+            .wait_for_file(file_path, self.timing.retry_step)
+            .await?;
+        Some(if found {
+            Ok(())
+        } else {
+            Err(format!(
+                "File not found at {} (on aria2 {})",
+                file_path.display(),
+                self.remote_path
+            ))
+        })
+    }
+}
+
+#[async_trait]
 impl DownloadEngine for Aria2Download {
     async fn start(&self) -> Result<String, StartError> {
         self.shared.signals.begin()?;
-        self.shared.start().await
+        let gid = self.shared.start().await?;
+        spawn_polling(Arc::clone(&self.shared), self.shared.timing.poll_interval);
+        Ok(gid)
     }
 
     fn progress(&self) -> watch::Receiver<Progress> {

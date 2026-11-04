@@ -4,11 +4,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rdc_download::{Aria2Config, Aria2Download, Aria2Request, CANCELLED_MESSAGE, DownloadEngine};
+use rdc_download::{
+    Aria2Config, Aria2Download, Aria2Request, CANCELLED_MESSAGE, DownloadEngine, Outcome, Progress,
+};
 use serde_json::{Value, json};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 const URL: &str = "https://host/file.mkv";
+const WAIT_LIMIT: Duration = Duration::from_secs(10);
 
 /// Answer of one RPC method: a result, or a JSON-RPC error when `None`.
 type Answer = Arc<Mutex<Option<Value>>>;
@@ -100,7 +103,9 @@ impl FakeAria2 {
     }
 
     fn engine(&self, request: Aria2Request) -> Aria2Download {
-        Aria2Download::new(request, self.config()).with_retry_step(Duration::from_millis(1))
+        Aria2Download::new(request, self.config())
+            .with_poll_interval(Duration::from_millis(10))
+            .with_retry_step(Duration::from_millis(1))
     }
 
     fn set(answer: &Answer, value: Option<Value>) {
@@ -119,6 +124,12 @@ impl FakeAria2 {
             })
             .collect()
     }
+}
+
+async fn finish(engine: &Aria2Download) -> Outcome {
+    tokio::time::timeout(WAIT_LIMIT, engine.completion().wait())
+        .await
+        .expect("download finishes in time")
 }
 
 #[tokio::test]
@@ -235,6 +246,84 @@ async fn an_rpc_url_without_jsonrpc_fails_to_start() {
 }
 
 #[tokio::test]
+async fn progress_follows_the_aria2_status() {
+    let fake = FakeAria2::start().await;
+    let engine = fake.engine(fake.request());
+    engine.start().await.expect("start");
+    let mut progress = engine.progress();
+    let seen = tokio::time::timeout(WAIT_LIMIT, progress.wait_for(|p| p.bytes_total > 0))
+        .await
+        .expect("progress in time")
+        .expect("channel open");
+    assert_eq!(
+        *seen,
+        Progress {
+            bytes_done: 40,
+            bytes_total: 100,
+            speed: 10
+        }
+    );
+    assert!(!engine.completion().is_finished());
+}
+
+#[tokio::test]
+async fn an_aria2_error_removes_the_download_and_fails() {
+    let fake = FakeAria2::start().await;
+    let engine = fake.engine(fake.request());
+    engine.start().await.expect("start");
+    let mut failed = status("error");
+    failed["errorCode"] = json!("3");
+    failed["errorMessage"] = json!("Resource not found");
+    FakeAria2::set(&fake.status, Some(failed));
+    assert_eq!(
+        finish(&engine).await,
+        Err("3: Resource not found".to_owned())
+    );
+    assert_eq!(fake.calls("aria2.forceRemove").await.len(), 1);
+    assert_eq!(fake.calls("aria2.removeDownloadResult").await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_completed_download_succeeds_once_the_local_file_exists() {
+    let fake = FakeAria2::start().await;
+    let engine = fake.engine(fake.request());
+    engine.start().await.expect("start");
+    std::fs::create_dir_all(fake.local.parent().expect("parent")).expect("dir");
+    std::fs::write(&fake.local, b"done").expect("file");
+    FakeAria2::set(&fake.status, Some(status("complete")));
+    assert_eq!(finish(&engine).await, Ok(()));
+    assert_eq!(fake.calls("aria2.forceRemove").await.len(), 1);
+    assert_eq!(std::fs::read(&fake.local).expect("untouched"), b"done");
+}
+
+#[tokio::test]
+async fn a_completed_download_without_local_file_fails() {
+    let fake = FakeAria2::start().await;
+    let engine = fake.engine(fake.request());
+    engine.start().await.expect("start");
+    FakeAria2::set(&fake.status, Some(status("removed")));
+    assert_eq!(
+        finish(&engine).await,
+        Err(format!(
+            "File not found at {} (on aria2 /remote/Movie/file.mkv)",
+            fake.local.display()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn a_gid_aria2_no_longer_knows_fails() {
+    let fake = FakeAria2::start().await;
+    let engine = fake.engine(fake.request());
+    engine.start().await.expect("start");
+    FakeAria2::set(&fake.status, None);
+    assert_eq!(
+        finish(&engine).await,
+        Err("Download was not found in Aria2".to_owned())
+    );
+}
+
+#[tokio::test]
 async fn pause_and_resume_reach_aria2() {
     let fake = FakeAria2::start().await;
     let engine = fake.engine(fake.request());
@@ -260,10 +349,7 @@ async fn cancel_removes_the_download_even_when_aria2_fails() {
     FakeAria2::set(&fake.removed, None);
     engine.cancel().await;
     engine.cancel().await;
-    assert_eq!(
-        engine.completion().outcome(),
-        Some(Err(CANCELLED_MESSAGE.to_owned()))
-    );
+    assert_eq!(finish(&engine).await, Err(CANCELLED_MESSAGE.to_owned()));
     assert_eq!(fake.calls("aria2.forceRemove").await.len(), 2);
     assert_eq!(fake.calls("aria2.removeDownloadResult").await.len(), 2);
 }
@@ -273,10 +359,7 @@ async fn cancel_before_start_completes_without_aria2() {
     let fake = FakeAria2::start().await;
     let engine = fake.engine(fake.request());
     engine.cancel().await;
-    assert_eq!(
-        engine.completion().outcome(),
-        Some(Err(CANCELLED_MESSAGE.to_owned()))
-    );
+    assert_eq!(finish(&engine).await, Err(CANCELLED_MESSAGE.to_owned()));
     let error = engine.start().await.expect_err("cancelled");
     assert_eq!(error.message(), CANCELLED_MESSAGE);
     assert!(
