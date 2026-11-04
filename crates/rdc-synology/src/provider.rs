@@ -48,8 +48,10 @@ impl fmt::Debug for Credentials {
 ///
 /// DSM invalidates older sessions when the same account logs in many times concurrently,
 /// so every caller shares a single login: concurrent first calls log in once, later calls
-/// reuse the session while the credentials stay the same, and changed credentials log in
-/// again.
+/// reuse the session while the credentials stay the same, and changed credentials log the
+/// old session out and log in again. A caller that hits a session error
+/// ([`Error::is_session_error`]) calls [`SessionProvider::invalidate`] with the failed
+/// session and then asks for a fresh one.
 ///
 /// Cheap to clone; clones share the cached session.
 #[derive(Debug, Clone)]
@@ -92,7 +94,7 @@ impl SessionProvider {
     }
 
     /// The shared session for `credentials`, logging in when there is none yet or when the
-    /// credentials changed.
+    /// credentials changed (the previous session is logged out first, best-effort).
     ///
     /// # Errors
     ///
@@ -105,6 +107,9 @@ impl SessionProvider {
         {
             return Ok(shared.session.clone());
         }
+        if let Some(stale) = current.take() {
+            logout_quietly(&stale.session).await;
+        }
         let client = Client::connect_with_timeout(&credentials.url, self.inner.timeout).await?;
         let session = client
             .login(&credentials.account, &credentials.password)
@@ -114,6 +119,31 @@ impl SessionProvider {
             session: session.clone(),
         });
         Ok(session)
+    }
+
+    /// Drops the shared session (logging it out, best-effort) so the next
+    /// [`SessionProvider::session`] logs in again.
+    ///
+    /// Pass the session that just failed: when another caller already replaced it, the
+    /// current session is kept. `None` drops whatever session is cached.
+    pub async fn invalidate(&self, failed: Option<&Session>) {
+        let mut current = self.inner.current.lock().await;
+        let is_current = current
+            .as_ref()
+            .is_some_and(|shared| failed.is_none_or(|failed| *failed == shared.session));
+        if !is_current {
+            return;
+        }
+        if let Some(stale) = current.take() {
+            logout_quietly(&stale.session).await;
+        }
+    }
+}
+
+/// Logs `session` out, ignoring failures: an expired session cannot be logged out anyway.
+async fn logout_quietly(session: &Session) {
+    if let Err(error) = session.logout().await {
+        tracing::debug!(%error, "ignoring a failed Synology logout");
     }
 }
 
