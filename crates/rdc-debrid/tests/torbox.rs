@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use rdc_debrid::{DebridError, ProviderHttp, RateLimitCoordinator, RetryPolicy, TorBox};
-use wiremock::matchers::{header, method, path, query_param};
+use wiremock::matchers::{body_json_string, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Retries transient errors twice without waiting.
@@ -371,4 +371,220 @@ async fn lookup_of_an_unknown_torrent_finds_nothing() {
     assert_eq!(client.torrent("5").await.expect("lookup"), None);
     let error = client.torrent("abcdef").await.expect_err("not a number");
     assert_eq!(error.to_string(), "Invalid TorBox torrent id: abcdef");
+}
+
+async fn mount_seed_setting(server: &MockServer, seed: Option<i64>) {
+    let settings = seed.map_or_else(
+        || "null".to_owned(),
+        |seed| format!(r#"{{"seed_torrents":{seed}}}"#),
+    );
+    Mock::given(method("GET"))
+        .and(path("/user/me"))
+        .and(query_param("settings", "true"))
+        .respond_with(json(&data(&format!(
+            r#"{{"email":"me@example.com","settings":{settings}}}"#
+        ))))
+        .mount(server)
+        .await;
+}
+
+fn multipart_field(body: &str, name: &str) -> Option<String> {
+    let marker = format!("name=\"{name}\"\r\n\r\n");
+    let start = body.find(&marker)? + marker.len();
+    let end = body[start..].find("\r\n")?;
+    Some(body[start..start + end].to_owned())
+}
+
+#[tokio::test]
+async fn add_magnet_creates_an_unqueued_torrent_with_the_seed_setting() {
+    let (server, client) = client().await;
+    mount_seed_setting(&server, Some(5)).await;
+    Mock::given(method("POST"))
+        .and(path("/torrents/createtorrent"))
+        .and(header("authorization", "Bearer test-api-key"))
+        .respond_with(json(&data(r#"{"torrent_id":4242,"hash":"abc"}"#)))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let id = client
+        .add_magnet("magnet:?xt=urn:btih:abc")
+        .await
+        .expect("added");
+
+    assert_eq!(id, "4242");
+    let requests = server.received_requests().await.expect("recorded");
+    let body = String::from_utf8_lossy(&requests[1].body).into_owned();
+    assert_eq!(
+        multipart_field(&body, "magnet").as_deref(),
+        Some("magnet:?xt=urn:btih:abc")
+    );
+    assert_eq!(multipart_field(&body, "seed").as_deref(), Some("5"));
+    assert_eq!(
+        multipart_field(&body, "allow_zip").as_deref(),
+        Some("false")
+    );
+    assert_eq!(
+        multipart_field(&body, "as_queued").as_deref(),
+        Some("false")
+    );
+    assert_eq!(
+        multipart_field(&body, "add_only_if_cached").as_deref(),
+        Some("false")
+    );
+    assert_eq!(multipart_field(&body, "name"), None);
+}
+
+#[tokio::test]
+async fn add_torrent_file_uploads_the_file_and_honours_zip_preference() {
+    let server = MockServer::start().await;
+    let mut config = common::config();
+    config.prefer_zipped_downloads = true;
+    let client = TorBox::new(&config, common::http()).with_base_url(&server.uri());
+    mount_seed_setting(&server, None).await;
+    Mock::given(method("POST"))
+        .and(path("/torrents/createtorrent"))
+        .respond_with(json(&data(r#"{"torrent_id":7}"#)))
+        .mount(&server)
+        .await;
+
+    let id = client
+        .add_torrent_file(b"torrent body")
+        .await
+        .expect("added");
+
+    assert_eq!(id, "7");
+    let requests = server.received_requests().await.expect("recorded");
+    let body = String::from_utf8_lossy(&requests[1].body).into_owned();
+    assert!(
+        body.contains(r#"name="file"; filename="torrent.torrent""#),
+        "{body}"
+    );
+    assert!(body.contains("application/x-bittorrent"), "{body}");
+    assert!(body.contains("torrent body"), "{body}");
+    assert_eq!(multipart_field(&body, "seed").as_deref(), Some("3"));
+    assert_eq!(multipart_field(&body, "allow_zip").as_deref(), Some("true"));
+}
+
+#[tokio::test]
+async fn add_without_a_torrent_id_fails() {
+    let (server, client) = client().await;
+    mount_seed_setting(&server, Some(1)).await;
+    Mock::given(path("/torrents/createtorrent"))
+        .respond_with(json(&data("{}")))
+        .mount(&server)
+        .await;
+
+    let error = client
+        .add_magnet("magnet:?xt=urn:btih:abc")
+        .await
+        .expect_err("no id");
+
+    assert_eq!(error.to_string(), "TorBox API did not return torrent ID.");
+}
+
+#[tokio::test]
+async fn add_on_active_limit_is_rate_limited_and_never_queued() {
+    for limit in [
+        r#"{"success":false,"error":"active_limit","detail":"Active limit reached"}"#,
+        r#"{"success":false,"error":"UNAUTHORIZED","detail":"slow_down"}"#,
+    ] {
+        let (server, client) = client().await;
+        mount_seed_setting(&server, Some(5)).await;
+        Mock::given(path("/torrents/createtorrent"))
+            .respond_with(json(limit))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let magnet = client
+            .add_magnet("magnet:?xt=urn:btih:abc")
+            .await
+            .expect_err("limited");
+        assert_eq!(
+            magnet.retry_after(),
+            Some(Duration::from_secs(120)),
+            "{limit}"
+        );
+        let requests = server.received_requests().await.expect("recorded");
+        let body = String::from_utf8_lossy(&requests[1].body).into_owned();
+        assert_eq!(
+            multipart_field(&body, "as_queued").as_deref(),
+            Some("false")
+        );
+    }
+}
+
+#[tokio::test]
+async fn add_file_on_active_limit_is_rate_limited() {
+    let (server, client) = client().await;
+    mount_seed_setting(&server, Some(5)).await;
+    Mock::given(path("/torrents/createtorrent"))
+        .respond_with(json(
+            r#"{"success":false,"error":"ACTIVE_LIMIT","detail":"Active limit reached"}"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let error = client
+        .add_torrent_file(b"torrent")
+        .await
+        .expect_err("limited");
+
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(120)));
+    assert_eq!(error.to_string(), "ACTIVE_LIMIT: Active limit reached");
+}
+
+#[tokio::test]
+async fn add_keeps_the_cooldown_announced_by_too_many_requests() {
+    let (server, client) = client().await;
+    mount_seed_setting(&server, Some(5)).await;
+    Mock::given(path("/torrents/createtorrent"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "3600"))
+        .mount(&server)
+        .await;
+
+    let error = client
+        .add_magnet("magnet:?xt=urn:btih:abc")
+        .await
+        .expect_err("limited");
+
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(3600)));
+}
+
+#[tokio::test]
+async fn delete_controls_started_and_queued_torrents_differently() {
+    for (current, queued, endpoint, body) in [
+        (
+            data(TORRENT),
+            data("null"),
+            "/torrents/controltorrent",
+            r#"{"operation":"delete","torrent_id":12345}"#,
+        ),
+        (
+            data("null"),
+            data(QUEUED),
+            "/torrents/controlqueued",
+            r#"{"operation":"delete","queued_id":12345}"#,
+        ),
+        (
+            data("null"),
+            data("[]"),
+            "/torrents/controltorrent",
+            r#"{"operation":"delete","torrent_id":12345}"#,
+        ),
+    ] {
+        let (server, client) = client().await;
+        mount_mylist(&server, Some("12345"), current).await;
+        mount_queued(&server, Some("12345"), queued).await;
+        Mock::given(method("POST"))
+            .and(path(endpoint))
+            .and(body_json_string(body))
+            .respond_with(json(r#"{"success":true,"detail":"Deleted."}"#))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        client.delete_torrent("12345").await.expect("deleted");
+    }
 }

@@ -9,8 +9,9 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use rdc_model::RemoteFile;
+use reqwest::multipart::{Form, Part};
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Deserializer};
 
 use crate::error::DebridError;
@@ -25,6 +26,9 @@ const LIST_LIMIT: &str = "1000";
 
 /// Download state of torrents TorBox has queued but not started yet.
 const QUEUED_STATE: &str = "queued";
+
+/// Seeding setting used when the account settings do not say.
+const DEFAULT_SEED_SETTING: i64 = 3;
 
 /// Error codes TorBox reports for failures that usually go away on retry.
 const TRANSIENT_ERRORS: [&str; 4] = [
@@ -184,6 +188,88 @@ impl TorBox {
             Err(error) if error.is_not_found() => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    /// Adds a magnet link and returns the id of the new torrent.
+    pub async fn add_magnet(&self, magnet: &str) -> Result<String, DebridError> {
+        self.create(|| Ok(Form::new().text("magnet", magnet.to_owned())))
+            .await?
+            .ok_or_else(|| {
+                DebridError::InvalidResponse("TorBox API did not return torrent ID.".to_owned())
+            })
+    }
+
+    /// Uploads a `.torrent` file and returns the id of the new torrent.
+    pub async fn add_torrent_file(&self, bytes: &[u8]) -> Result<String, DebridError> {
+        self.create(|| {
+            let file = Part::bytes(bytes.to_vec())
+                .file_name("torrent.torrent")
+                .mime_str("application/x-bittorrent")?;
+            Ok(Form::new().part("file", file))
+        })
+        .await?
+        .ok_or_else(|| {
+            DebridError::InvalidResponse("TorBox API did not return torrent ID".to_owned())
+        })
+    }
+
+    /// Creates a torrent from `source` with the account's seeding setting,
+    /// zipping as configured and never queueing it.
+    async fn create(
+        &self,
+        source: impl Fn() -> Result<Form, DebridError> + Send + Sync,
+    ) -> Result<Option<String>, DebridError> {
+        let seed = self
+            .account(true)
+            .await?
+            .settings
+            .and_then(|settings| settings.seed_torrents)
+            .unwrap_or(DEFAULT_SEED_SETTING)
+            .to_string();
+        let allow_zip = if self.prefer_zipped_downloads {
+            "true"
+        } else {
+            "false"
+        };
+        let added: Option<Added> = self
+            .call(|| {
+                let form = source()?
+                    .text("seed", seed.clone())
+                    .text("allow_zip", allow_zip)
+                    .text("as_queued", "false")
+                    .text("add_only_if_cached", "false");
+                Ok(self
+                    .request(Method::POST, "torrents/createtorrent", &[])?
+                    .multipart(form))
+            })
+            .await?;
+        Ok(added
+            .and_then(|added| added.torrent_id)
+            .map(|id| id.to_string()))
+    }
+
+    /// Removes the torrent `id`, through the queue when it has not started.
+    pub async fn delete_torrent(&self, id: &str) -> Result<(), DebridError> {
+        let numeric = parse_id(id)?;
+        let queued = self
+            .torrent(id)
+            .await?
+            .is_some_and(|torrent| torrent.status.as_deref() == Some(QUEUED_STATE));
+        let (path, body) = if queued {
+            (
+                "torrents/controlqueued",
+                serde_json::json!({"queued_id": numeric, "operation": "delete"}),
+            )
+        } else {
+            (
+                "torrents/controltorrent",
+                serde_json::json!({"torrent_id": numeric, "operation": "delete"}),
+            )
+        };
+        let _: Option<IgnoredAny> = self
+            .call(|| Ok(self.request(Method::POST, path, &[])?.json(&body)))
+            .await?;
+        Ok(())
     }
 
     fn queued_request(&self, id: Option<&str>) -> Result<RequestBuilder, DebridError> {
@@ -361,6 +447,18 @@ struct User {
     plan: Option<i64>,
     #[serde(default, deserialize_with = "timestamp")]
     premium_expires_at: Option<Timestamp>,
+    settings: Option<UserSettings>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserSettings {
+    /// How long added torrents seed (a TorBox setting value).
+    seed_torrents: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Added {
+    torrent_id: Option<i64>,
 }
 
 /// A torrent of the account.
