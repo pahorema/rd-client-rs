@@ -2,9 +2,9 @@
 
 use std::sync::LazyLock;
 
-use super::GeneralSettings;
 use super::field::Leaf;
 use super::value::SettingKind;
+use super::{DownloadClientSettings, GeneralSettings};
 
 /// One entry of the settings catalogue: a group node or a stored setting.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,12 +61,20 @@ struct Group {
 }
 
 /// Every group in display order; each group node precedes its settings.
-const GROUPS: &[Group] = &[Group {
-    key: "General",
-    display_name: Some("General"),
-    description: Some(""),
-    leaves: GeneralSettings::LEAVES,
-}];
+const GROUPS: &[Group] = &[
+    Group {
+        key: "General",
+        display_name: Some("General"),
+        description: Some(""),
+        leaves: GeneralSettings::LEAVES,
+    },
+    Group {
+        key: "DownloadClient",
+        display_name: Some("Download Client"),
+        description: Some(""),
+        leaves: DownloadClientSettings::LEAVES,
+    },
+];
 
 static CATALOGUE: LazyLock<Vec<SettingDescriptor>> = LazyLock::new(|| {
     GROUPS

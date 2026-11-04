@@ -7,6 +7,7 @@
 //! catalogue but never stored.
 
 mod catalogue;
+mod download_client;
 mod field;
 mod general;
 mod value;
@@ -16,6 +17,7 @@ use thiserror::Error;
 use self::field::LeafError;
 
 pub use self::catalogue::{SettingDescriptor, catalogue};
+pub use self::download_client::DownloadClientSettings;
 pub use self::general::GeneralSettings;
 pub use self::value::{SettingKind, SettingValue, stored_text_from_json};
 
@@ -25,6 +27,8 @@ pub use self::value::{SettingKind, SettingValue, stored_text_from_json};
 pub struct Settings {
     /// `General:*`.
     pub general: GeneralSettings,
+    /// `DownloadClient:*`.
+    pub download_client: DownloadClientSettings,
 }
 
 /// Error returned when a stored row cannot be applied.
@@ -50,6 +54,7 @@ pub enum ApplySettingError {
 /// The group a stored key belongs to, with the setting name inside it.
 enum Target<'key> {
     General(&'key str),
+    DownloadClient(&'key str),
 }
 
 impl<'key> Target<'key> {
@@ -57,6 +62,7 @@ impl<'key> Target<'key> {
         let (group, name) = key.split_once(':')?;
         match group {
             "General" => Some(Self::General(name)),
+            "DownloadClient" => Some(Self::DownloadClient(name)),
             _ => None,
         }
     }
@@ -85,6 +91,7 @@ impl Settings {
     pub fn apply(&mut self, key: &str, raw: Option<&str>) -> Result<(), ApplySettingError> {
         let result = match Target::of(key) {
             Some(Target::General(name)) => self.general.apply_leaf(name, raw),
+            Some(Target::DownloadClient(name)) => self.download_client.apply_leaf(name, raw),
             None => Err(LeafError::Unknown),
         };
         result.map_err(|error| match error {
@@ -103,6 +110,7 @@ impl Settings {
     pub fn value(&self, key: &str) -> Option<SettingValue> {
         match Target::of(key)? {
             Target::General(name) => self.general.leaf_value(name),
+            Target::DownloadClient(name) => self.download_client.leaf_value(name),
         }
     }
 
@@ -124,15 +132,26 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AuthenticationType, LogLevel};
+    use crate::{AuthenticationType, DownloadClient, LogLevel};
+
+    /// The default stored rows whose key starts with `prefix`.
+    fn default_rows(prefix: &str) -> Vec<(&'static str, Option<String>)> {
+        Settings::default()
+            .stored_rows()
+            .filter(|(key, _)| key.starts_with(prefix))
+            .collect()
+    }
+
+    fn rows(expected: &[(&'static str, Option<&str>)]) -> Vec<(&'static str, Option<String>)> {
+        expected
+            .iter()
+            .map(|&(key, value)| (key, value.map(str::to_owned)))
+            .collect()
+    }
 
     #[test]
     fn general_defaults() {
-        let rows: Vec<(&str, Option<String>)> = Settings::default()
-            .stored_rows()
-            .filter(|(key, _)| key.starts_with("General:"))
-            .collect();
-        let expected = [
+        let expected = rows(&[
             ("General:LogLevel", Some("4")),
             ("General:DownloadLimit", Some("2")),
             ("General:UnpackLimit", Some("1")),
@@ -145,12 +164,59 @@ mod tests {
             ("General:TrackerEnrichmentCacheExpiration", Some("60")),
             ("General:BannedTrackers", None),
             ("General:DisableUpdateNotifications", Some("False")),
-        ];
-        let expected: Vec<(&str, Option<String>)> = expected
-            .into_iter()
-            .map(|(key, value)| (key, value.map(str::to_owned)))
-            .collect();
-        assert_eq!(rows, expected);
+        ]);
+        assert_eq!(default_rows("General:"), expected);
+    }
+
+    #[test]
+    fn download_client_defaults() {
+        let expected = rows(&[
+            ("DownloadClient:Client", Some("0")),
+            ("DownloadClient:DownloadPath", Some("/data/downloads")),
+            ("DownloadClient:MappedPath", Some("C:\\Downloads")),
+            ("DownloadClient:MaxSpeed", Some("0")),
+            ("DownloadClient:MaxSpeedSliderMax", Some("100")),
+            ("DownloadClient:ParallelCount", Some("8")),
+            ("DownloadClient:ChunkCount", Some("0")),
+            ("DownloadClient:BufferSize", Some("4194304")),
+            ("DownloadClient:Timeout", Some("5000")),
+            ("DownloadClient:ProxyServer", None),
+            ("DownloadClient:BindToSpecificIp", Some("False")),
+            ("DownloadClient:BindIpAddress", None),
+        ]);
+        assert_eq!(default_rows("DownloadClient:"), expected);
+    }
+
+    #[test]
+    fn download_client_group_applies_stored_rows() {
+        let mut settings = Settings::new();
+        settings
+            .apply("DownloadClient:Client", Some("Bezzad"))
+            .unwrap();
+        assert_eq!(settings.download_client.client, DownloadClient::Internal);
+        settings
+            .apply("DownloadClient:Client", Some("Symlink"))
+            .unwrap();
+        settings.apply("DownloadClient:DownloadPath", None).unwrap();
+        settings
+            .apply("DownloadClient:BindToSpecificIp", Some("TRUE"))
+            .unwrap();
+        let group = &settings.download_client;
+        assert_eq!(group.client, DownloadClient::Symlink);
+        assert_eq!(group.download_path, "");
+        assert!(group.bind_to_specific_ip);
+        assert_eq!(
+            settings.value("DownloadClient:DownloadPath"),
+            Some(SettingValue::String(Some(String::new())))
+        );
+        assert_eq!(
+            settings.apply("DownloadClient:Client", Some("Aria2")),
+            Err(ApplySettingError::InvalidValue {
+                key: "DownloadClient:Client".to_owned(),
+                value: "Aria2".to_owned(),
+            })
+        );
+        assert_eq!(settings.download_client.client, DownloadClient::Symlink);
     }
 
     #[test]
