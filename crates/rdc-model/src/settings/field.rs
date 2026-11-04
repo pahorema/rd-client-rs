@@ -14,12 +14,31 @@ pub(crate) trait Field: Sized {
     /// `(value, label)` pairs of an enum setting.
     const OPTIONS: &'static [(i32, &'static str)] = &[];
 
+    /// Decodes the stored text (`None` = SQL NULL); `None` when invalid.
+    fn parse(raw: Option<&str>) -> Option<Self>;
+
     /// The current value.
     fn to_value(&self) -> SettingValue;
 }
 
 impl Field for bool {
     const KIND: SettingKind = SettingKind::Boolean;
+
+    /// NULL is `false`; otherwise `True` or `False` in any case, ignoring
+    /// surrounding whitespace and NUL characters.
+    fn parse(raw: Option<&str>) -> Option<Self> {
+        let Some(raw) = raw else {
+            return Some(false);
+        };
+        let text = raw.trim_matches(|c: char| c.is_whitespace() || c == '\0');
+        if text.eq_ignore_ascii_case("true") {
+            Some(true)
+        } else if text.eq_ignore_ascii_case("false") {
+            Some(false)
+        } else {
+            None
+        }
+    }
 
     fn to_value(&self) -> SettingValue {
         SettingValue::Boolean(*self)
@@ -29,6 +48,24 @@ impl Field for bool {
 impl Field for i32 {
     const KIND: SettingKind = SettingKind::Int32;
 
+    /// NULL is 0; otherwise a decimal integer with an optional sign, or a
+    /// hexadecimal one prefixed with `#`, `0x` or `&h` (two's complement),
+    /// ignoring surrounding whitespace.
+    fn parse(raw: Option<&str>) -> Option<Self> {
+        let Some(raw) = raw else {
+            return Some(0);
+        };
+        let text = raw.trim();
+        let hex = ["#", "0x", "0X", "&h", "&H"]
+            .into_iter()
+            .find_map(|prefix| text.strip_prefix(prefix));
+        match hex {
+            Some(digits) if digits.starts_with(['+', '-']) => None,
+            Some(digits) => u32::from_str_radix(digits, 16).ok().map(u32::cast_signed),
+            None => text.parse().ok(),
+        }
+    }
+
     fn to_value(&self) -> SettingValue {
         SettingValue::Int32(*self)
     }
@@ -36,6 +73,11 @@ impl Field for i32 {
 
 impl Field for String {
     const KIND: SettingKind = SettingKind::String;
+
+    /// The text as stored; NULL is the empty string.
+    fn parse(raw: Option<&str>) -> Option<Self> {
+        Some(raw.unwrap_or_default().to_owned())
+    }
 
     fn to_value(&self) -> SettingValue {
         SettingValue::String(Some(self.clone()))
@@ -45,18 +87,28 @@ impl Field for String {
 impl Field for Option<String> {
     const KIND: SettingKind = SettingKind::String;
 
+    /// The text as stored; NULL is `None`.
+    fn parse(raw: Option<&str>) -> Option<Self> {
+        Some(raw.map(str::to_owned))
+    }
+
     fn to_value(&self) -> SettingValue {
         SettingValue::String(self.clone())
     }
 }
 
-/// Implements [`Field`] for enums.
+/// Implements [`Field`] for enums: NULL is the value 0, otherwise the
+/// variant name (case-sensitive, legacy names included) or its number.
 macro_rules! enum_field {
     ($($enum:ty),+ $(,)?) => {
         $(
             impl Field for $enum {
                 const KIND: SettingKind = SettingKind::Enum;
                 const OPTIONS: &'static [(i32, &'static str)] = <$enum>::OPTIONS;
+
+                fn parse(raw: Option<&str>) -> Option<Self> {
+                    raw.unwrap_or("0").parse().ok()
+                }
 
                 fn to_value(&self) -> SettingValue {
                     SettingValue::Enum(self.as_i32())
@@ -87,10 +139,19 @@ pub(crate) struct Leaf {
     pub(crate) options: &'static [(i32, &'static str)],
 }
 
+/// Why a stored row could not be applied to a group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LeafError {
+    /// The group has no setting with that name.
+    Unknown,
+    /// The stored text does not decode; the field is unchanged.
+    Invalid,
+}
+
 /// Connects the fields of a settings group to their catalogue entries.
 ///
 /// Generates, in declaration order, the group's `LEAVES` metadata plus
-/// `leaf_value` dispatching on the setting name.
+/// `leaf_value` and `apply_leaf` dispatching on the setting name.
 macro_rules! section {
     (
         $group:ty {
@@ -124,6 +185,22 @@ macro_rules! section {
                     _ => None,
                 }
             }
+
+            /// Applies the stored text of the setting `name` of this group.
+            pub(crate) fn apply_leaf(
+                &mut self,
+                name: &str,
+                raw: Option<&str>,
+            ) -> Result<(), $crate::settings::field::LeafError> {
+                match name {
+                    $($name => {
+                        self.$field = <$ty as $crate::settings::field::Field>::parse(raw)
+                            .ok_or($crate::settings::field::LeafError::Invalid)?;
+                        Ok(())
+                    })+
+                    _ => Err($crate::settings::field::LeafError::Unknown),
+                }
+            }
         }
     };
 }
@@ -133,6 +210,77 @@ pub(crate) use section;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn booleans_parse_true_and_false_in_any_case() {
+        let cases = [
+            (Some("True"), Some(true)),
+            (Some("false"), Some(false)),
+            (Some(" TRUE \n"), Some(true)),
+            (Some("\0False\0"), Some(false)),
+            (None, Some(false)),
+            (Some("1"), None),
+            (Some("0"), None),
+            (Some("yes"), None),
+            (Some(""), None),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(bool::parse(raw), expected, "raw {raw:?}");
+        }
+    }
+
+    #[test]
+    fn integers_parse_decimal_and_hexadecimal() {
+        let cases = [
+            (Some("60"), Some(60)),
+            (Some(" -12 "), Some(-12)),
+            (Some("+7"), Some(7)),
+            (Some("2147483647"), Some(i32::MAX)),
+            (Some("#ff"), Some(255)),
+            (Some("0x10"), Some(16)),
+            (Some("0X10"), Some(16)),
+            (Some("&h1A"), Some(26)),
+            (Some("&HFFFFFFFF"), Some(-1)),
+            (None, Some(0)),
+            (Some("2147483648"), None),
+            (Some("2.5"), None),
+            (Some("1,000"), None),
+            (Some("0x"), None),
+            (Some("0x+1"), None),
+            (Some("ten"), None),
+            (Some(""), None),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(i32::parse(raw), expected, "raw {raw:?}");
+        }
+    }
+
+    #[test]
+    fn strings_keep_the_stored_text() {
+        assert_eq!(String::parse(Some(" a ")).as_deref(), Some(" a "));
+        assert_eq!(String::parse(None).as_deref(), Some(""));
+        assert_eq!(<Option<String>>::parse(Some("")), Some(Some(String::new())));
+        assert_eq!(<Option<String>>::parse(None), Some(None));
+    }
+
+    #[test]
+    fn enums_parse_names_and_numbers() {
+        assert_eq!(LogLevel::parse(Some("Error")), Some(LogLevel::Error));
+        assert_eq!(LogLevel::parse(Some("3")), Some(LogLevel::Warning));
+        assert_eq!(LogLevel::parse(None), Some(LogLevel::Verbose));
+        assert_eq!(
+            DownloadClient::parse(Some("Bezzad")),
+            Some(DownloadClient::Internal)
+        );
+        assert_eq!(Provider::parse(Some("HIGHWAY")), Some(Provider::Highway));
+        assert_eq!(
+            TorrentFinishedAction::parse(Some("RemoveRealDebrid")),
+            Some(TorrentFinishedAction::RemoveProvider)
+        );
+        assert_eq!(LogLevel::parse(Some("error")), None);
+        assert_eq!(LogLevel::parse(Some("9")), None);
+        assert_eq!(LogLevel::parse(Some("")), None);
+    }
 
     #[test]
     fn values_reflect_the_field_type() {
