@@ -14,6 +14,7 @@ mod error;
 mod operations;
 mod options;
 mod registry;
+mod startup;
 mod sync;
 mod types;
 

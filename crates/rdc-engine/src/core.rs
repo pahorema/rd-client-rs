@@ -70,13 +70,14 @@ pub(crate) struct Inner {
 impl Engine {
     /// Seeds persisted settings, builds the provider and starts configured background jobs.
     ///
-    /// The caller must have an active Tokio runtime. Startup repair and host processing
-    /// are separate from the facade's settings and provider-monitoring lifecycle.
+    /// The caller must have an active Tokio runtime. Interrupted transfers and extractions
+    /// are requeued before any background job starts, preserving remote transfer identities.
     pub async fn start(store: Store, options: EngineOptions) -> Result<Self, EngineError> {
         store.settings().seed().await?;
         let settings = Arc::new(store.settings().load().await?);
         let coordinator = Arc::new(RateLimitCoordinator::new());
         let provider = build_provider(&settings, &options, &coordinator)?;
+        crate::startup::repair(&store, &settings).await?;
         let (events, _) = broadcast::channel(128);
         let (internal_config, _) = watch::channel(internal_config(&settings));
         let (disk_config, _) = watch::channel(disk_config(&settings));
