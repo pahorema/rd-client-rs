@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 
 use super::field::Leaf;
 use super::value::SettingKind;
-use super::{DownloadClientSettings, GeneralSettings};
+use super::{DownloadClientSettings, GeneralSettings, ProviderSettings};
 
 /// One entry of the settings catalogue: a group node or a stored setting.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +73,12 @@ const GROUPS: &[Group] = &[
         display_name: Some("Download Client"),
         description: Some(""),
         leaves: DownloadClientSettings::LEAVES,
+    },
+    Group {
+        key: "Provider",
+        display_name: Some("Provider"),
+        description: Some(""),
+        leaves: ProviderSettings::LEAVES,
     },
 ];
 

@@ -10,6 +10,7 @@ mod catalogue;
 mod download_client;
 mod field;
 mod general;
+mod provider;
 mod value;
 
 use thiserror::Error;
@@ -19,6 +20,7 @@ use self::field::LeafError;
 pub use self::catalogue::{SettingDescriptor, catalogue};
 pub use self::download_client::DownloadClientSettings;
 pub use self::general::GeneralSettings;
+pub use self::provider::ProviderSettings;
 pub use self::value::{SettingKind, SettingValue, stored_text_from_json};
 
 /// The typed settings tree; [`Default`] holds the value of every setting
@@ -29,6 +31,8 @@ pub struct Settings {
     pub general: GeneralSettings,
     /// `DownloadClient:*`.
     pub download_client: DownloadClientSettings,
+    /// `Provider:*`.
+    pub provider: ProviderSettings,
 }
 
 /// Error returned when a stored row cannot be applied.
@@ -55,6 +59,7 @@ pub enum ApplySettingError {
 enum Target<'key> {
     General(&'key str),
     DownloadClient(&'key str),
+    Provider(&'key str),
 }
 
 impl<'key> Target<'key> {
@@ -63,6 +68,7 @@ impl<'key> Target<'key> {
         match group {
             "General" => Some(Self::General(name)),
             "DownloadClient" => Some(Self::DownloadClient(name)),
+            "Provider" => Some(Self::Provider(name)),
             _ => None,
         }
     }
@@ -92,6 +98,7 @@ impl Settings {
         let result = match Target::of(key) {
             Some(Target::General(name)) => self.general.apply_leaf(name, raw),
             Some(Target::DownloadClient(name)) => self.download_client.apply_leaf(name, raw),
+            Some(Target::Provider(name)) => self.provider.apply_leaf(name, raw),
             None => Err(LeafError::Unknown),
         };
         result.map_err(|error| match error {
@@ -111,6 +118,7 @@ impl Settings {
         match Target::of(key)? {
             Target::General(name) => self.general.leaf_value(name),
             Target::DownloadClient(name) => self.download_client.leaf_value(name),
+            Target::Provider(name) => self.provider.leaf_value(name),
         }
     }
 
@@ -132,7 +140,38 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AuthenticationType, DownloadClient, DownloadClientLogLevel, LogLevel};
+    use crate::{AuthenticationType, DownloadClient, DownloadClientLogLevel, LogLevel, Provider};
+
+    #[test]
+    fn provider_defaults() {
+        let expected = rows(&[
+            ("Provider:Provider", Some("0")),
+            ("Provider:ApiKey", Some("")),
+            ("Provider:ApiHostname", None),
+            ("Provider:AutoImport", Some("False")),
+            ("Provider:AutoDelete", Some("False")),
+            ("Provider:Timeout", Some("10")),
+            ("Provider:CheckInterval", Some("10")),
+            ("Provider:MaxParallelDownloads", Some("0")),
+            ("Provider:PreferZippedDownloads", Some("False")),
+        ]);
+        assert_eq!(default_rows("Provider:"), expected);
+    }
+
+    #[test]
+    fn provider_group_applies_stored_rows() {
+        let mut settings = Settings::new();
+        settings
+            .apply("Provider:Provider", Some("HIGHWAY"))
+            .unwrap();
+        settings.apply("Provider:ApiKey", Some("secret")).unwrap();
+        assert_eq!(settings.provider.provider, Provider::Highway);
+        assert_eq!(settings.provider.api_key, "secret");
+        assert!(matches!(
+            settings.apply("Provider:Default", Some("1")),
+            Err(ApplySettingError::UnknownKey { .. })
+        ));
+    }
 
     /// The default stored rows whose key starts with `prefix`.
     fn default_rows(prefix: &str) -> Vec<(&'static str, Option<String>)> {
