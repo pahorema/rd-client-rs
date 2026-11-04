@@ -3,12 +3,14 @@
 //! Parsing is bounded and performs no network or filesystem I/O. Tracker fetching,
 //! caching and fail-open handling of fetch failures belong to the calling engine.
 
+mod banned;
 pub mod bencode;
 mod enrich;
 mod magnet;
 mod torrent;
 mod trackers;
 
+pub use banned::{banned_magnet_error, banned_torrent_error};
 pub use enrich::{EnrichTorrentError, enrich_magnet, enrich_torrent};
 pub use magnet::{MagnetLink, ParseMagnetError};
 pub use torrent::{ParseTorrentError, TorrentEntry, TorrentFile};
