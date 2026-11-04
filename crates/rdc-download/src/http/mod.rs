@@ -8,6 +8,7 @@
 mod config;
 mod connection;
 mod error;
+mod plan;
 mod probe;
 mod transfer;
 

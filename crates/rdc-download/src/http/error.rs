@@ -25,6 +25,8 @@ pub(crate) enum TransferError {
     ReadTimeout(Duration),
     #[error("The server did not respond within {} ms.", .0.as_millis())]
     HeaderTimeout(Duration),
+    #[error("The download ended prematurely: received {received} of {expected} bytes of a chunk.")]
+    Incomplete { received: u64, expected: u64 },
     #[error("Unable to write {}: {source}", .path.display())]
     Io {
         path: PathBuf,

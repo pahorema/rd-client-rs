@@ -351,3 +351,55 @@ async fn redirects_are_followed() {
             .all(|request| request.path() == "/file.bin" || request.path() == "/old")
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failures_without_range_support_are_final_and_clean_up() {
+    let data = test_data(64 * 1024);
+    let server = {
+        let data = Arc::clone(&data);
+        TestServer::start(move |request| {
+            let options = FileOptions {
+                ranges: false,
+                ..FileOptions::default()
+            };
+            let mut reply = file_reply(&data, request, &options);
+            if request.range().is_none() {
+                reply.abort_after = Some(1000);
+            }
+            reply
+        })
+        .await
+    };
+    let (run, outcome) = download(&server.url("/file.bin"), config()).await;
+    assert!(outcome.is_err(), "outcome {outcome:?}");
+    assert!(!run.target.exists());
+    assert!(!run.partial().exists());
+    assert_eq!(server.transfer_requests().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn responses_ending_early_fail_as_incomplete() {
+    let data = test_data(8000);
+    let server = {
+        let data = Arc::clone(&data);
+        TestServer::start(move |request| {
+            let options = FileOptions {
+                ranges: false,
+                ..FileOptions::default()
+            };
+            let mut reply = file_reply(&data, request, &options);
+            if request.range().is_none() {
+                reply.framing = Framing::CloseDelimited;
+                reply.body.truncate(5000);
+            }
+            reply
+        })
+        .await
+    };
+    let (run, outcome) = download(&server.url("/file.bin"), config()).await;
+    assert_eq!(
+        outcome,
+        Err("The download ended prematurely: received 5000 of 8000 bytes of a chunk.".to_owned())
+    );
+    assert!(!run.partial().exists());
+}
