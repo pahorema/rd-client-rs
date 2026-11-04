@@ -5,7 +5,8 @@ mod common;
 use std::time::Duration;
 
 use jiff::Timestamp;
-use rdc_debrid::{DebridError, Premiumize};
+use rdc_debrid::{DebridError, Premiumize, RemoteTorrent};
+use rdc_model::{Provider, Torrent, TorrentStatus};
 use wiremock::matchers::{body_string, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -300,4 +301,122 @@ async fn delete_posts_the_transfer_id() {
         .await;
 
     client.delete_transfer("t1").await.expect("deleted");
+}
+
+async fn mount_transfers(server: &MockServer, body: &str) {
+    Mock::given(method("POST"))
+        .and(path("/transfer/list"))
+        .respond_with(json(body))
+        .mount(server)
+        .await;
+}
+
+fn sent_torrent(rd_id: &str) -> Torrent {
+    Torrent {
+        rd_id: Some(rd_id.to_owned()),
+        ..Torrent::default()
+    }
+}
+
+#[tokio::test]
+async fn refresh_maps_transfer_statuses() {
+    for (raw, expected) in [
+        ("waiting", TorrentStatus::Processing),
+        ("queued", TorrentStatus::Processing),
+        ("running", TorrentStatus::Downloading),
+        ("seeding", TorrentStatus::Finished),
+        ("finished", TorrentStatus::Finished),
+        ("error", TorrentStatus::Error),
+        ("timeout", TorrentStatus::Error),
+        ("banned", TorrentStatus::Error),
+    ] {
+        let (server, client) = client().await;
+        let body = serde_json::json!({"status": "success", "transfers": [
+            {"id": "t1", "name": "Some.Release", "status": raw, "progress": 0.5}
+        ]})
+        .to_string();
+        mount_transfers(&server, &body).await;
+        let mut torrent = sent_torrent("t1");
+
+        client.refresh(&mut torrent, None).await.expect("refreshed");
+
+        assert_eq!(torrent.rd_status, Some(expected), "{raw}");
+        assert_eq!(torrent.rd_status_raw.as_deref(), Some(raw));
+    }
+}
+
+#[tokio::test]
+async fn refresh_copies_the_listed_transfer() {
+    let (server, client) = client().await;
+    let mut torrent = Torrent {
+        rd_name: Some("Old".to_owned()),
+        rd_size: Some(123),
+        rd_files: Some(
+            r#"[{"Id":1,"Path":"a.mkv","Bytes":1,"Selected":true,"DownloadLink":null}]"#.to_owned(),
+        ),
+        ..sent_torrent("t1")
+    };
+    let remote = RemoteTorrent {
+        id: "t1".to_owned(),
+        filename: "Some.Release".to_owned(),
+        progress: 42,
+        status: Some("running".to_owned()),
+        files: Some(Vec::new()),
+        speed: Some(0),
+        seeders: Some(0),
+        ..RemoteTorrent::default()
+    };
+
+    client
+        .refresh(&mut torrent, Some(&remote))
+        .await
+        .expect("refreshed");
+
+    assert_eq!(torrent.client_kind, Some(Provider::Premiumize));
+    assert_eq!(torrent.rd_name.as_deref(), Some("Some.Release"));
+    assert_eq!(torrent.rd_size, Some(123), "sizes are never reported");
+    assert_eq!(torrent.rd_files.as_deref(), Some("[]"));
+    assert_eq!(torrent.rd_progress, Some(42));
+    assert_eq!((torrent.rd_speed, torrent.rd_seeders), (Some(0), Some(0)));
+    assert_eq!((torrent.rd_added, torrent.rd_ended), (None, None));
+    assert_eq!(torrent.rd_status, Some(TorrentStatus::Downloading));
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn refresh_marks_a_vanished_transfer_deleted() {
+    let (server, client) = client().await;
+    mount_transfers(&server, r#"{"status":"success","transfers":[]}"#).await;
+    let mut torrent = Torrent {
+        rd_status: Some(TorrentStatus::Downloading),
+        ..sent_torrent("t1")
+    };
+
+    client.refresh(&mut torrent, None).await.expect("refreshed");
+
+    assert_eq!(torrent.rd_status_raw.as_deref(), Some("deleted"));
+    assert_eq!(torrent.rd_status, Some(TorrentStatus::Downloading));
+}
+
+#[tokio::test]
+async fn refresh_without_a_provider_id_does_nothing() {
+    let (server, client) = client().await;
+    let mut torrent = Torrent::default();
+
+    client.refresh(&mut torrent, None).await.expect("refreshed");
+
+    assert_eq!(torrent, Torrent::default());
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .is_empty()
+    );
 }

@@ -3,11 +3,16 @@
 //! Every call authenticates with the `apikey` query parameter. Responses are
 //! JSON objects whose `status` is `"success"` unless the call failed, in which
 //! case `message` explains why.
+//!
+//! The transfer listing reports neither sizes nor files, so a refreshed
+//! torrent keeps no size and an empty file list; the files to download are
+//! discovered from the transfer's folder when downloads are created.
 
 use std::fmt;
 use std::time::Duration;
 
 use jiff::Timestamp;
+use rdc_model::{Provider, Torrent, TorrentStatus};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
@@ -136,6 +141,46 @@ impl Premiumize {
             .form(&[("id", id)]);
         let _: IgnoredAny = self.call(request).await?;
         Ok(())
+    }
+
+    /// Copies the transfer state into the torrent's `rd_*` fields.
+    ///
+    /// Without `remote` the transfer is looked up in the listing; a transfer
+    /// that is no longer listed marks the torrent `"deleted"`.
+    pub async fn refresh(
+        &self,
+        torrent: &mut Torrent,
+        remote: Option<&RemoteTorrent>,
+    ) -> Result<(), DebridError> {
+        let Some(rd_id) = torrent.rd_id.as_deref() else {
+            return Ok(());
+        };
+        let fetched;
+        let remote = match remote {
+            Some(remote) => remote,
+            None => match self.transfer(rd_id).await {
+                Ok(transfer) => {
+                    fetched = transfer.to_remote();
+                    &fetched
+                }
+                Err(error) if error.is_not_found() => {
+                    tracing::info!(rd_id, "Premiumize transfer no longer exists");
+                    torrent.rd_status_raw = Some("deleted".to_owned());
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            },
+        };
+        apply(torrent, remote);
+        Ok(())
+    }
+
+    async fn transfer(&self, id: &str) -> Result<Transfer, DebridError> {
+        self.transfers()
+            .await?
+            .into_iter()
+            .find(|transfer| transfer.id == id)
+            .ok_or_else(|| DebridError::NotFound(format!("Unable to find transfer with ID {id}")))
     }
 
     async fn transfers(&self) -> Result<Vec<Transfer>, DebridError> {
@@ -325,4 +370,38 @@ fn excerpt(body: &str) -> &str {
     body.char_indices()
         .nth(BODY_EXCERPT_CHARS)
         .map_or(body, |(end, _)| &body[..end])
+}
+
+/// Writes `remote` into the torrent's `rd_*` fields.
+fn apply(torrent: &mut Torrent, remote: &RemoteTorrent) {
+    if !remote.filename.trim().is_empty() {
+        torrent.rd_name = Some(remote.filename.clone());
+    }
+    if remote.bytes > 0 {
+        torrent.rd_size = Some(remote.bytes);
+    }
+    if let Some(files) = &remote.files {
+        torrent.set_files(files);
+    }
+    torrent.client_kind = Some(Provider::Premiumize);
+    torrent.rd_host.clone_from(&remote.host);
+    torrent.rd_split = Some(remote.split);
+    torrent.rd_progress = Some(remote.progress);
+    torrent.rd_added = remote.added;
+    torrent.rd_ended = remote.ended;
+    torrent.rd_speed = remote.speed;
+    torrent.rd_seeders = remote.seeders;
+    torrent.rd_status_raw.clone_from(&remote.status);
+    torrent.rd_status = Some(status_of(remote.status.as_deref()));
+}
+
+/// Maps a Premiumize transfer status; anything unknown (`error`, `timeout`,
+/// `banned`, `deleted`, ...) is an error.
+fn status_of(status: Option<&str>) -> TorrentStatus {
+    match status {
+        Some("waiting" | "queued") => TorrentStatus::Processing,
+        Some("running") => TorrentStatus::Downloading,
+        Some("seeding" | "finished") => TorrentStatus::Finished,
+        _ => TorrentStatus::Error,
+    }
 }
