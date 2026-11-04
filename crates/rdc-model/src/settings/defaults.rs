@@ -4,6 +4,21 @@
 use super::field::section;
 use crate::{TorrentFinishedAction, TorrentHostDownloadAction};
 
+/// Torrents added through the qBittorrent API, usually by Sonarr or Radarr
+/// (`Integrations:*` keys).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct IntegrationsSettings {
+    /// `Integrations:Default:*`.
+    pub default: TorrentDefaults,
+}
+
+/// Torrents added through the web UI (`Gui:*` keys).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GuiSettings {
+    /// `Gui:Default:*`.
+    pub default: TorrentDefaults,
+}
+
 /// Configuration copied into torrents added through one entry point (the
 /// provider auto-import, the qBittorrent API, the web UI or the watch
 /// folder); the `<group>:Default:*` keys.

@@ -13,17 +13,19 @@ mod field;
 mod general;
 mod provider;
 mod value;
+mod watch;
 
 use thiserror::Error;
 
 use self::field::LeafError;
 
 pub use self::catalogue::{SettingDescriptor, catalogue};
-pub use self::defaults::TorrentDefaults;
+pub use self::defaults::{GuiSettings, IntegrationsSettings, TorrentDefaults};
 pub use self::download_client::DownloadClientSettings;
 pub use self::general::GeneralSettings;
 pub use self::provider::ProviderSettings;
 pub use self::value::{SettingKind, SettingValue, stored_text_from_json};
+pub use self::watch::WatchSettings;
 
 /// The typed settings tree; [`Default`] holds the value of every setting
 /// before any stored row is applied.
@@ -35,6 +37,12 @@ pub struct Settings {
     pub download_client: DownloadClientSettings,
     /// `Provider:*`, including `Provider:Default:*`.
     pub provider: ProviderSettings,
+    /// `Integrations:Default:*`.
+    pub integrations: IntegrationsSettings,
+    /// `Gui:Default:*`.
+    pub gui: GuiSettings,
+    /// `Watch:*`, including `Watch:Default:*`.
+    pub watch: WatchSettings,
 }
 
 /// Error returned when a stored row cannot be applied.
@@ -63,6 +71,10 @@ enum Target<'key> {
     DownloadClient(&'key str),
     Provider(&'key str),
     ProviderDefault(&'key str),
+    IntegrationsDefault(&'key str),
+    GuiDefault(&'key str),
+    Watch(&'key str),
+    WatchDefault(&'key str),
 }
 
 impl<'key> Target<'key> {
@@ -74,6 +86,12 @@ impl<'key> Target<'key> {
             "Provider" => Some(match name.strip_prefix("Default:") {
                 Some(name) => Self::ProviderDefault(name),
                 None => Self::Provider(name),
+            }),
+            "Integrations" => name.strip_prefix("Default:").map(Self::IntegrationsDefault),
+            "Gui" => name.strip_prefix("Default:").map(Self::GuiDefault),
+            "Watch" => Some(match name.strip_prefix("Default:") {
+                Some(name) => Self::WatchDefault(name),
+                None => Self::Watch(name),
             }),
             _ => None,
         }
@@ -106,6 +124,12 @@ impl Settings {
             Some(Target::DownloadClient(name)) => self.download_client.apply_leaf(name, raw),
             Some(Target::Provider(name)) => self.provider.apply_leaf(name, raw),
             Some(Target::ProviderDefault(name)) => self.provider.default.apply_leaf(name, raw),
+            Some(Target::IntegrationsDefault(name)) => {
+                self.integrations.default.apply_leaf(name, raw)
+            }
+            Some(Target::GuiDefault(name)) => self.gui.default.apply_leaf(name, raw),
+            Some(Target::Watch(name)) => self.watch.apply_leaf(name, raw),
+            Some(Target::WatchDefault(name)) => self.watch.default.apply_leaf(name, raw),
             None => Err(LeafError::Unknown),
         };
         result.map_err(|error| match error {
@@ -127,6 +151,10 @@ impl Settings {
             Target::DownloadClient(name) => self.download_client.leaf_value(name),
             Target::Provider(name) => self.provider.leaf_value(name),
             Target::ProviderDefault(name) => self.provider.default.leaf_value(name),
+            Target::IntegrationsDefault(name) => self.integrations.default.leaf_value(name),
+            Target::GuiDefault(name) => self.gui.default.leaf_value(name),
+            Target::Watch(name) => self.watch.leaf_value(name),
+            Target::WatchDefault(name) => self.watch.default.leaf_value(name),
         }
     }
 
@@ -268,6 +296,121 @@ mod tests {
         let defaults = all.split_off(expected.len());
         assert_eq!(all, expected);
         assert_eq!(owned(defaults), torrent_default_rows("Provider"));
+    }
+
+    #[test]
+    fn watch_integrations_and_gui_defaults() {
+        let expected = rows(&[
+            ("Watch:Path", None),
+            ("Watch:ErrorPath", None),
+            ("Watch:ProcessedPath", None),
+            ("Watch:Interval", Some("60")),
+        ]);
+        let mut watch = default_rows("Watch:");
+        let defaults = watch.split_off(expected.len());
+        assert_eq!(watch, expected);
+        assert_eq!(owned(defaults), torrent_default_rows("Watch"));
+        for group in ["Integrations", "Gui"] {
+            let rows = owned(default_rows(&format!("{group}:")));
+            assert_eq!(rows, torrent_default_rows(group), "group {group}");
+        }
+    }
+
+    #[test]
+    fn catalogue_lists_every_key_in_order() {
+        let groups: Vec<(&str, Option<&str>, usize)> = catalogue()
+            .iter()
+            .enumerate()
+            .filter(|(_, descriptor)| !descriptor.is_stored())
+            .map(|(index, descriptor)| (descriptor.key(), descriptor.display_name(), index))
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                ("General", Some("General"), 0),
+                ("DownloadClient", Some("Download Client"), 13),
+                ("Provider", Some("Provider"), 37),
+                ("Provider:Default", Some("Auto Import Defaults"), 47),
+                ("Integrations", Some("qBittorrent / *darr"), 61),
+                ("Integrations:Default", None, 62),
+                ("Gui", Some("GUI Defaults"), 76),
+                ("Gui:Default", None, 77),
+                ("Watch", Some("Watch"), 91),
+                ("Watch:Default", Some("Import Defaults"), 96),
+            ]
+        );
+        assert_eq!(catalogue().len(), 110);
+        let stored: Vec<&str> = Settings::new().stored_rows().map(|(key, _)| key).collect();
+        assert_eq!(stored.len(), 100);
+        let unique: std::collections::HashSet<&str> = stored.iter().copied().collect();
+        assert_eq!(unique.len(), 100);
+        for (index, descriptor) in catalogue().iter().enumerate().skip(1) {
+            let parent = descriptor.key().rsplit_once(':').map(|(parent, _)| parent);
+            let preceding = catalogue()[..index]
+                .iter()
+                .rev()
+                .find(|entry| !entry.is_stored())
+                .map(SettingDescriptor::key);
+            if descriptor.is_stored() {
+                assert_eq!(parent, preceding, "key {}", descriptor.key());
+            }
+        }
+    }
+
+    #[test]
+    fn every_stored_key_has_a_value_matching_its_kind() {
+        let settings = Settings::new();
+        for descriptor in catalogue().iter().filter(|entry| entry.is_stored()) {
+            let value = settings
+                .value(descriptor.key())
+                .expect("stored key has a value");
+            let kind = match value {
+                SettingValue::Boolean(_) => SettingKind::Boolean,
+                SettingValue::Int32(_) => SettingKind::Int32,
+                SettingValue::Enum(_) => SettingKind::Enum,
+                SettingValue::String(_) => SettingKind::String,
+            };
+            assert_eq!(kind, descriptor.kind(), "key {}", descriptor.key());
+            assert_eq!(
+                descriptor.kind() == SettingKind::Enum,
+                !descriptor.enum_options().is_empty(),
+                "key {}",
+                descriptor.key()
+            );
+            assert!(descriptor.display_name().is_some() && descriptor.description().is_some());
+        }
+    }
+
+    #[test]
+    fn every_stored_row_round_trips() {
+        let mut settings = Settings::new();
+        settings.apply("Watch:Default:Priority", Some("3")).unwrap();
+        settings
+            .apply("Gui:Default:IncludeRegex", Some("mkv$"))
+            .unwrap();
+        settings
+            .apply("Integrations:Default:Category", Some("radarr"))
+            .unwrap();
+        settings.apply("Watch:Path", Some("/watch")).unwrap();
+        assert_eq!(settings.watch.default.priority, 3);
+        assert_eq!(settings.gui.default.include_regex.as_deref(), Some("mkv$"));
+        assert_eq!(
+            settings.integrations.default.category.as_deref(),
+            Some("radarr")
+        );
+        let mut reloaded = Settings::new();
+        for (key, text) in settings.stored_rows() {
+            reloaded.apply(key, text.as_deref()).unwrap();
+        }
+        assert_eq!(reloaded, settings);
+        for key in [
+            "Integrations:Category",
+            "Gui:Priority",
+            "Watch",
+            "Watch:Default",
+        ] {
+            assert_eq!(settings.value(key), None, "key {key}");
+        }
     }
 
     #[test]

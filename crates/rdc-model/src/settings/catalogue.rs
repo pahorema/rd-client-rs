@@ -4,7 +4,9 @@ use std::sync::LazyLock;
 
 use super::field::Leaf;
 use super::value::SettingKind;
-use super::{DownloadClientSettings, GeneralSettings, ProviderSettings, TorrentDefaults};
+use super::{
+    DownloadClientSettings, GeneralSettings, ProviderSettings, TorrentDefaults, WatchSettings,
+};
 
 /// One entry of the settings catalogue: a group node or a stored setting.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +85,47 @@ const GROUPS: &[Group] = &[
     Group {
         key: "Provider:Default",
         display_name: Some("Auto Import Defaults"),
+        description: None,
+        leaves: TorrentDefaults::LEAVES,
+    },
+    Group {
+        key: "Integrations",
+        display_name: Some("qBittorrent / *darr"),
+        description: Some(
+            "The following settings only apply when a torrent gets added through the qBittorrent API, \
+             usually Radarr or Sonarr.",
+        ),
+        leaves: &[],
+    },
+    Group {
+        key: "Integrations:Default",
+        display_name: None,
+        description: None,
+        leaves: TorrentDefaults::LEAVES,
+    },
+    Group {
+        key: "Gui",
+        display_name: Some("GUI Defaults"),
+        description: Some("Settings used when adding a torrent through the web interface."),
+        leaves: &[],
+    },
+    Group {
+        key: "Gui:Default",
+        display_name: None,
+        description: None,
+        leaves: TorrentDefaults::LEAVES,
+    },
+    Group {
+        key: "Watch",
+        display_name: Some("Watch"),
+        description: Some(
+            "The following settings only apply when a torrent gets added through the watch folder.",
+        ),
+        leaves: WatchSettings::LEAVES,
+    },
+    Group {
+        key: "Watch:Default",
+        display_name: Some("Import Defaults"),
         description: None,
         leaves: TorrentDefaults::LEAVES,
     },
