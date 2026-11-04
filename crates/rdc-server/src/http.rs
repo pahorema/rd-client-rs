@@ -4,7 +4,7 @@ use std::{any::Any, fmt, sync::Arc};
 
 use axum::{
     Router,
-    body::Body,
+    body::{Body, to_bytes},
     extract::{DefaultBodyLimit, Request},
     http::{StatusCode, Uri, header},
     middleware::{self, Next},
@@ -191,6 +191,12 @@ async fn dispatch(mut request: Request, next: Next, plumbing: &Plumbing) -> Resp
         return ApiError::new(StatusCode::BAD_REQUEST, "Invalid request URI").into_response();
     };
     *request.uri_mut() = uri;
+    if tracing::enabled!(tracing::Level::DEBUG) && should_log(&canonical) {
+        request = match log_request(request, &plumbing.logs).await {
+            Ok(request) => request,
+            Err(error) => return error.into_response(),
+        };
+    }
     let mut response = next.run(request).await;
     if api && response.status() == StatusCode::UNAUTHORIZED {
         *response.status_mut() = StatusCode::FORBIDDEN;
@@ -266,6 +272,129 @@ fn is_api(path: &str) -> bool {
         .is_some_and(|prefix| {
             prefix.eq_ignore_ascii_case("api") || prefix.eq_ignore_ascii_case("qbittorrent")
         })
+}
+
+fn has_prefix(path: &str, prefix: &str) -> bool {
+    path.get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        && (path.len() == prefix.len() || path.as_bytes().get(prefix.len()) == Some(&b'/'))
+}
+
+fn should_log(path: &str) -> bool {
+    has_prefix(path, "/api/v2")
+        || has_prefix(path, "/api/torrents")
+        || has_prefix(path, "/qbittorrent/api/v2")
+}
+
+fn sensitive(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "password" | "passwd" | "secret" | "apikey" | "token"
+    )
+}
+
+fn redact_pairs(value: &str) -> String {
+    let mut output = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in url::form_urlencoded::parse(value.as_bytes()) {
+        output.append_pair(&key, if sensitive(&key) { "*****" } else { &value });
+    }
+    output.finish()
+}
+
+fn redact_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                if sensitive(key) {
+                    *value = "*****".into();
+                } else {
+                    redact_json(value);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => values.iter_mut().for_each(redact_json),
+        _ => {}
+    }
+}
+
+async fn log_request(request: Request, logs: &LogControl) -> Result<Request, ApiError> {
+    let (parts, body) = request.into_parts();
+    let content_type = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let json = content_type
+        .split(';')
+        .next()
+        .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("application/json"));
+    let form = content_type.starts_with("application/x-www-form-urlencoded");
+    let multipart = content_type.starts_with("multipart/form-data");
+    let mut logged_body = String::new();
+    let body = if json || form || multipart {
+        let bytes = to_bytes(body, MAX_BODY_SIZE).await.map_err(|_| {
+            ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Request body too large or unreadable",
+            )
+        })?;
+        if json {
+            // Never echo malformed JSON: credentials may be present even when parsing fails.
+            logged_body = serde_json::from_slice(&bytes).map_or_else(
+                |_| "[invalid JSON]".to_owned(),
+                |mut value| {
+                    redact_json(&mut value);
+                    value.to_string()
+                },
+            );
+        } else if multipart {
+            logged_body = log_multipart(&bytes, content_type).await;
+        } else {
+            logged_body = redact_pairs(&String::from_utf8_lossy(&bytes));
+        }
+        Body::from(bytes)
+    } else {
+        body
+    };
+    tracing::debug!(method = %parts.method, path = %logs.redact(parts.uri.path()), query = %logs.redact(&redact_pairs(parts.uri.query().unwrap_or(""))), body = %logs.redact(&logged_body), "HTTP request");
+    Ok(Request::from_parts(parts, body))
+}
+
+async fn log_multipart(bytes: &axum::body::Bytes, content_type: &str) -> String {
+    use axum::extract::{FromRequest, Multipart};
+    let request = Request::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(bytes.clone()))
+        .expect("existing content type is a valid header");
+    let Ok(mut multipart) = Multipart::from_request(request, &()).await else {
+        return "[invalid multipart]".to_owned();
+    };
+    let mut fields = Vec::new();
+    loop {
+        match multipart.next_field().await {
+            Ok(Some(field)) => {
+                if field.file_name().is_some() {
+                    continue;
+                }
+                let name = field.name().unwrap_or("").to_owned();
+                let value = if sensitive(&name) {
+                    "*****".to_owned()
+                } else {
+                    match field.text().await {
+                        Ok(value) => value,
+                        Err(_) => return "[invalid multipart]".to_owned(),
+                    }
+                };
+                fields.push((name, value));
+            }
+            Ok(None) => {
+                return url::form_urlencoded::Serializer::new(String::new())
+                    .extend_pairs(fields)
+                    .finish();
+            }
+            Err(_) => return "[invalid multipart]".to_owned(),
+        }
+    }
 }
 
 #[expect(
