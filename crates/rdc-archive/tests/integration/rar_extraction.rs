@@ -190,3 +190,25 @@ fn cancellation_is_honoured_between_rar_entries() {
     assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
     assert_eq!(files_below(&destination).len(), 1);
 }
+
+#[test]
+fn large_rar_entries_are_extracted_and_complete_the_progress() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = copy_fixtures(dir.path(), &["zeros.rar"]);
+    let destination = dir.path().join("out");
+    let mut seen = Vec::new();
+
+    extract(
+        &archive,
+        &destination,
+        |percent| seen.push(percent),
+        &CancellationToken::new(),
+    )
+    .unwrap();
+
+    let zeros = fs::read(destination.join("zeros.bin")).unwrap();
+    assert_eq!(zeros.len(), 9 * 1024 * 1024);
+    assert!(zeros.iter().all(|byte| *byte == 0));
+    assert_eq!(seen.last(), Some(&100));
+    assert!(seen.windows(2).all(|pair| pair[0] < pair[1]), "{seen:?}");
+}

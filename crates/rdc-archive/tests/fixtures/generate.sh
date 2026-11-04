@@ -9,6 +9,7 @@
 #   nested4.rar          RAR4: same content as nested.rar
 #   multi.partN.rar      RAR5, 3 volumes, new-style names: big.txt (stored, 6 KiB volumes)
 #   legacy.rar/.r00/.r01 RAR4, 3 volumes, old-style names: big.txt (stored, 6 KiB volumes)
+#   zeros.rar            RAR5: zeros.bin, 9 MiB of zero bytes (large enough to be watched)
 # big.txt holds 1500 lines "line 00000" … "line 01499".
 set -eu
 
@@ -26,11 +27,13 @@ while [ "$i" -lt 1500 ]; do
     printf 'line %05d\n' "$i"
     i=$((i + 1))
 done > "$work/big.txt"
+head -c 9437184 /dev/zero > "$work/zeros.bin"
 
 cd "$here"
-rm -f nested.rar nested4.rar multi.part*.rar legacy.rar legacy.r0*
+rm -f nested.rar nested4.rar multi.part*.rar legacy.rar legacy.r0* zeros.rar
 cd "$work"
 "$RAR" a -idq -ma5 "$here/nested.rar" top.txt folder
 "$RAR" a -idq -ma4 "$here/nested4.rar" top.txt folder
 "$RAR" a -idq -ma5 -m0 -v6k "$here/multi.rar" big.txt
 "$RAR" a -idq -ma4 -m0 -vn -v6k "$here/legacy.rar" big.txt
+"$RAR" a -idq -ma5 -m5 "$here/zeros.rar" zeros.bin

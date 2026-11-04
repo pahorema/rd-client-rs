@@ -4,16 +4,28 @@
 //! ones (`.partN.rar`, `.rNN` or `.NNN` names) as their content is needed and fails when one is
 //! missing.
 
+use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
-use unrar_ng::Archive;
+use unrar_ng::{Archive, CursorBeforeFile, CursorBeforeHeader, OpenArchive, Process, UnrarResult};
 
 use crate::Error;
 use crate::extract::Entry;
 use crate::path::{create_entry_directory, entry_destination, prepare_file_target};
 use crate::progress::Progress;
+
+/// Entries at least this large are watched while the library writes them, so progress keeps moving
+/// during a long write instead of jumping once the entry is done.
+const WATCHED_ENTRY_SIZE: u64 = 8 * 1024 * 1024;
+
+/// Interval between two size checks of a watched entry.
+const WATCH_INTERVAL: Duration = Duration::from_millis(250);
 
 /// The library takes C strings; a path with a NUL byte cannot name a file anyway.
 fn ensure_no_nul(path: &Path) -> Result<(), Error> {
@@ -93,9 +105,46 @@ pub(crate) fn extract(
         }
         prepare_file_target(destination, &target, &name)?;
         let size = entry.unpacked_size;
-        open = header.extract_to(&target).map_err(Error::read(archive))?;
-        progress.advance(size);
+        let start = progress.done();
+        open = if size >= WATCHED_ENTRY_SIZE {
+            extract_watched(header, &target, size, &mut progress)
+        } else {
+            header.extract_to(&target)
+        }
+        .map_err(Error::read(archive))?;
+        progress.advance_to(start.saturating_add(size));
     }
     progress.finish();
     Ok(())
+}
+
+/// Extracts the entry under `header` to `target` while a helper thread turns the growing size
+/// of `target` into progress.
+fn extract_watched(
+    header: OpenArchive<Process, CursorBeforeFile>,
+    target: &Path,
+    size: u64,
+    progress: &mut Progress<'_>,
+) -> UnrarResult<OpenArchive<Process, CursorBeforeHeader>> {
+    let start = progress.done();
+    let progress = Mutex::new(progress);
+    let finished = AtomicBool::new(false);
+    thread::scope(|scope| {
+        let watcher = scope.spawn(|| {
+            while !finished.load(Ordering::Acquire) {
+                thread::park_timeout(WATCH_INTERVAL);
+                if let Ok(metadata) = fs::metadata(target) {
+                    let written = metadata.len().min(size);
+                    progress
+                        .lock()
+                        .expect("progress lock is never poisoned")
+                        .advance_to(start.saturating_add(written));
+                }
+            }
+        });
+        let result = header.extract_to(target);
+        finished.store(true, Ordering::Release);
+        watcher.thread().unpark();
+        result
+    })
 }

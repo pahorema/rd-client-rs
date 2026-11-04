@@ -21,6 +21,11 @@ impl<'a> Progress<'a> {
         progress
     }
 
+    /// Bytes counted so far.
+    pub(crate) fn done(&self) -> u64 {
+        self.done
+    }
+
     /// Counts `bytes` more extracted bytes.
     pub(crate) fn advance(&mut self, bytes: u64) {
         self.advance_to(self.done.saturating_add(bytes));
