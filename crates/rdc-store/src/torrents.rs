@@ -96,18 +96,9 @@ impl<'store> Torrents<'store> {
     ///
     /// Fails on database errors and undecodable rows.
     pub async fn get(&self, torrent_id: Uuid) -> Result<Option<Torrent>> {
-        let row = sqlx::query(concat!(
-            "SELECT ",
-            torrent_columns!(),
-            r#" FROM "Torrents" WHERE "TorrentId" = ? AND "Type" = 0"#
-        ))
-        .bind(codec::uuid_text(torrent_id))
-        .fetch_optional(self.pool)
-        .await?;
-        let Some(row) = row else {
+        let Some(mut torrent) = row_by_id(self.pool, torrent_id).await? else {
             return Ok(None);
         };
-        let mut torrent = from_row(&row)?;
         torrent.downloads = self.downloads_of(torrent_id).await?;
         torrent.payload = self.payload(torrent_id).await?;
         Ok(Some(torrent))
@@ -167,6 +158,19 @@ impl<'store> Torrents<'store> {
         .await?;
         rows.iter().map(downloads::from_row).collect()
     }
+}
+
+/// The visible torrent row with this id, without downloads and payload.
+pub(crate) async fn row_by_id(pool: &SqlitePool, torrent_id: Uuid) -> Result<Option<Torrent>> {
+    let row = sqlx::query(concat!(
+        "SELECT ",
+        torrent_columns!(),
+        r#" FROM "Torrents" WHERE "TorrentId" = ? AND "Type" = 0"#
+    ))
+    .bind(codec::uuid_text(torrent_id))
+    .fetch_optional(pool)
+    .await?;
+    row.as_ref().map(from_row).transpose()
 }
 
 /// Decodes a row selected with [`torrent_columns`]; downloads and payload

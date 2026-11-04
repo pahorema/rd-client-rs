@@ -17,6 +17,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 
+pub use downloads::{AddResult, DownloadWithTorrent, Downloads};
 pub use error::{Result, StoreError};
 pub use torrents::{NewTorrent, RetryOnError, Torrents};
 
@@ -72,6 +73,11 @@ impl Store {
     /// Torrent operations.
     pub fn torrents(&self) -> Torrents<'_> {
         Torrents::new(&self.pool)
+    }
+
+    /// Download operations.
+    pub fn downloads(&self) -> Downloads<'_> {
+        Downloads::new(&self.pool)
     }
 
     /// Waits for running operations and closes every connection.
