@@ -1057,7 +1057,9 @@ version = "0.1.0"
 dependencies = [
  "tempfile",
  "thiserror",
+ "tokio",
  "tokio-util",
+ "tracing",
  "unrar-ng",
  "zip",
 ]

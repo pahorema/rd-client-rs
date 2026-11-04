@@ -10,10 +10,6 @@ use crate::Error;
 ///
 /// `name` is used as is, nested components included, but must stay below `base`: absolute
 /// names and names with `..` components are refused. An empty name yields `base`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by the unpack procedure, added next")
-)]
 pub(crate) fn join_name(base: &Path, name: &str) -> Result<PathBuf, Error> {
     let stays_inside = Path::new(name)
         .components()

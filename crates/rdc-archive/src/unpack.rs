@@ -1,0 +1,133 @@
+//! The unpack procedure run after a downloaded archive is complete.
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
+
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, warn};
+
+use crate::path::join_name;
+use crate::{Error, extract, list_entries};
+
+/// Delays before the retries of a failed delete. A freshly written file may still be held
+/// open for a moment by another process (an indexer, an antivirus).
+const DELETE_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(3),
+];
+
+/// What to unpack and where.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnpackRequest {
+    /// The downloaded archive (a `.zip`, a `.rar` or the first volume of a RAR set).
+    pub archive: PathBuf,
+    /// The download directory of the torrent's category, i.e. the parent of the torrent folder.
+    pub destination: PathBuf,
+    /// The torrent name, as used for the torrent folder below `destination`.
+    pub torrent_name: String,
+}
+
+/// Unpacks a downloaded archive next to the torrent's other files, then deletes it.
+///
+/// The steps, in order:
+/// 1. A missing archive file is not an error: there is nothing to do (it was most likely
+///    unpacked and deleted before a restart).
+/// 2. When some entry already sits below a folder named like the torrent (`<name>/…` or
+///    `<name>\…`), the archive is extracted into `destination`; otherwise into
+///    `destination/<name>`.
+/// 3. The archive is extracted, then deleted.
+///
+/// `on_progress` receives an increasing percentage of the whole procedure, ending with 100 on
+/// success. Deletes are retried a few times over several seconds before failing. The work runs
+/// on a blocking thread.
+///
+/// # Errors
+///
+/// Fails when the archive cannot be read or extracted (see [`extract`](crate::extract)), when
+/// `torrent_name` would leave `destination`, when a file cannot be deleted, or with
+/// [`Error::Cancelled`] once `cancel` is triggered. Use [`Error::unpack_failure_message`] for the
+/// message to show.
+///
+/// # Panics
+///
+/// Propagates a panic of the blocking task.
+pub async fn unpack<F>(
+    request: UnpackRequest,
+    on_progress: F,
+    cancel: CancellationToken,
+) -> Result<(), Error>
+where
+    F: FnMut(u8) + Send + 'static,
+{
+    let task = tokio::task::spawn_blocking(move || unpack_blocking(&request, on_progress, &cancel));
+    match task.await {
+        Ok(result) => result,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(_) => Err(Error::Cancelled),
+    }
+}
+
+fn unpack_blocking<F>(
+    request: &UnpackRequest,
+    on_progress: F,
+    cancel: &CancellationToken,
+) -> Result<(), Error>
+where
+    F: FnMut(u8) + Send,
+{
+    let UnpackRequest {
+        archive,
+        destination,
+        torrent_name,
+    } = request;
+    if !archive.is_file() {
+        debug!(archive = %archive.display(), "archive to unpack is gone, nothing to do");
+        return Ok(());
+    }
+    if cancel.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    let entries = list_entries(archive)?;
+
+    let rooted = entries.iter().any(|entry| {
+        entry
+            .name
+            .strip_prefix(torrent_name.as_str())
+            .is_some_and(|rest| rest.starts_with(['/', '\\']))
+    });
+    let extract_path = if rooted {
+        destination.clone()
+    } else {
+        join_name(destination, torrent_name)?
+    };
+
+    extract(archive, &extract_path, on_progress, cancel)?;
+    remove_with_retry(archive, |path| fs::remove_file(path), "delete")
+}
+
+/// Runs `remove` on `path`, retrying after [`DELETE_RETRY_DELAYS`]; a missing path counts as
+/// removed.
+fn remove_with_retry(
+    path: &Path,
+    remove: fn(&Path) -> io::Result<()>,
+    action: &'static str,
+) -> Result<(), Error> {
+    let mut delays = DELETE_RETRY_DELAYS.iter();
+    loop {
+        match remove(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => match delays.next() {
+                Some(delay) => {
+                    warn!(path = %path.display(), %error, "{action} failed, retrying");
+                    thread::sleep(*delay);
+                }
+                None => return Err(Error::io(action, path)(error)),
+            },
+        }
+    }
+}

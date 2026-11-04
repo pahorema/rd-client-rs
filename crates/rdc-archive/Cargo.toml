@@ -10,12 +10,15 @@ publish.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+tokio = { workspace = true, features = ["rt"] }
 tokio-util.workspace = true
+tracing = { workspace = true, features = ["std"] }
 unrar-ng.workspace = true
 zip = { workspace = true, features = ["deflate-flate2-zlib-rs", "deflate64"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true
