@@ -1,5 +1,6 @@
 //! Shared state of one running download and the HTTP requests it sends.
 
+use std::net::IpAddr;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -12,11 +13,14 @@ use tokio_util::sync::CancellationToken;
 use super::config::InternalConfig;
 use super::error::TransferError;
 use super::rate::Throttle;
+use crate::bind::resolve_bind_address;
 
 /// `User-Agent` of every request.
 const USER_AGENT: &str = concat!("rd-client/", env!("CARGO_PKG_VERSION"));
 /// Redirects followed before a request fails.
 const MAX_REDIRECTS: usize = 50;
+/// Wait between attempts to connect through the bind address.
+const BIND_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// An inclusive byte range to request; `end: None` reads to the end of the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +38,7 @@ impl ByteRange {
     }
 }
 
-/// State shared by the probe and every request of one download.
+/// State shared by the probe and every chunk of one download.
 #[derive(Debug)]
 pub(crate) struct Context {
     pub(crate) config: watch::Receiver<InternalConfig>,
@@ -48,6 +52,7 @@ pub(crate) struct Context {
 #[derive(Debug)]
 struct CachedClient {
     proxy: Option<String>,
+    bind: Option<IpAddr>,
     client: Client,
 }
 
@@ -120,56 +125,93 @@ impl Context {
     }
 
     /// Sends a GET for `url`, optionally limited to `range`, and returns a successful response.
+    ///
+    /// With a bind address configured the request waits until the address is usable and
+    /// retries connection failures every second, as long as the download is not cancelled.
     pub(crate) async fn get(
         &self,
         url: &Url,
         range: Option<ByteRange>,
         cancel: &CancellationToken,
     ) -> Result<Response, TransferError> {
-        let mut request = self
-            .client()?
-            .get(url.clone())
-            .header(ACCEPT, "*/*")
-            .header(ACCEPT_ENCODING, "identity")
-            .header(CACHE_CONTROL, "no-cache");
-        if let Some(range) = range {
-            request = request.header(RANGE, range.header_value());
-        }
-        let limit = self.config.borrow().header_timeout();
-        let response =
-            match Self::cancellable(cancel, tokio::time::timeout(limit, request.send())).await? {
-                Ok(result) => result.map_err(TransferError::Http)?,
-                Err(_) => return Err(TransferError::HeaderTimeout(limit)),
+        loop {
+            let (client, config) = self.client(cancel).await?;
+            let mut request = client
+                .get(url.clone())
+                .header(ACCEPT, "*/*")
+                .header(ACCEPT_ENCODING, "identity")
+                .header(CACHE_CONTROL, "no-cache");
+            if let Some(range) = range {
+                request = request.header(RANGE, range.header_value());
+            }
+            let sent = request.send();
+            let result = match config.header_timeout() {
+                Some(limit) => {
+                    match Self::cancellable(cancel, tokio::time::timeout(limit, sent)).await? {
+                        Ok(result) => result,
+                        Err(_) => return Err(TransferError::HeaderTimeout(limit)),
+                    }
+                }
+                None => Self::cancellable(cancel, sent).await?,
             };
-        if !response.status().is_success() {
-            return Err(TransferError::Status(response.status()));
+            match result {
+                Ok(response) if response.status().is_success() => return Ok(response),
+                Ok(response) => return Err(TransferError::Status(response.status())),
+                Err(error) if config.bind_address.is_some() && error.is_connect() => {
+                    tracing::warn!("Unable to connect through the bind address, retrying: {error}");
+                    Self::sleep(cancel, BIND_RETRY_DELAY).await?;
+                }
+                Err(error) => return Err(TransferError::Http(error)),
+            }
         }
-        Ok(response)
     }
 
-    /// Returns a client for the current proxy setting, building it when it changed.
-    fn client(&self) -> Result<Client, TransferError> {
-        let proxy = self.config.borrow().proxy_url().map(str::to_owned);
-        let mut cached = self.client.lock().expect("client cache lock poisoned");
-        if let Some(current) = cached.as_ref()
-            && current.proxy == proxy
-        {
-            return Ok(current.client.clone());
+    /// Returns a client for the current proxy and bind settings, building it when they changed.
+    async fn client(
+        &self,
+        cancel: &CancellationToken,
+    ) -> Result<(Client, InternalConfig), TransferError> {
+        loop {
+            let config = self.config();
+            let bind = match config.bind_address.as_deref() {
+                None => None,
+                Some(configured) => {
+                    if let Some(address) = resolve_bind_address(Some(configured)) {
+                        Some(address)
+                    } else {
+                        tracing::warn!(
+                            "The bind address {configured:?} is not assigned to an active network interface, retrying"
+                        );
+                        Self::sleep(cancel, BIND_RETRY_DELAY).await?;
+                        continue;
+                    }
+                }
+            };
+            let proxy = config.proxy_url().map(str::to_owned);
+            let mut cached = self.client.lock().expect("client cache lock poisoned");
+            if let Some(current) = cached.as_ref()
+                && current.proxy == proxy
+                && current.bind == bind
+            {
+                return Ok((current.client.clone(), config));
+            }
+            let client = build_client(proxy.as_deref(), bind)?;
+            *cached = Some(CachedClient {
+                proxy,
+                bind,
+                client: client.clone(),
+            });
+            return Ok((client, config));
         }
-        let client = build_client(proxy.as_deref())?;
-        *cached = Some(CachedClient {
-            proxy,
-            client: client.clone(),
-        });
-        Ok(client)
     }
 }
 
-fn build_client(proxy: Option<&str>) -> Result<Client, TransferError> {
+fn build_client(proxy: Option<&str>, bind: Option<IpAddr>) -> Result<Client, TransferError> {
     let mut builder = Client::builder()
         .user_agent(USER_AGENT)
         .http1_only()
-        .redirect(redirect::Policy::limited(MAX_REDIRECTS));
+        .redirect(redirect::Policy::limited(MAX_REDIRECTS))
+        .local_address(bind);
     builder = match proxy {
         Some(proxy) => {
             let proxy_error = |error| TransferError::Proxy {
@@ -211,7 +253,7 @@ mod tests {
 
     #[test]
     fn invalid_proxy_is_reported() {
-        let error = build_client(Some("::not a url::")).expect_err("invalid proxy");
+        let error = build_client(Some("::not a url::"), None).expect_err("invalid proxy");
         assert!(
             error
                 .to_string()

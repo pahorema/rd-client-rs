@@ -21,8 +21,8 @@ const MAX_BUFFER_SIZE: usize = 64 * 1024 * 1024;
 ///
 /// Integer fields take the raw values of the settings they come from; out-of-range values
 /// are normalised as documented on each field. Speed and connection limits apply to running
-/// downloads immediately; the chunk count, timeout and buffer size apply to downloads and
-/// connections started afterwards; the proxy applies to new connections.
+/// downloads immediately; the chunk count, timeout and buffer size apply to connections opened
+/// afterwards; proxy and bind address apply to new connections.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InternalConfig {
     /// Speed limit of one download in bytes per second, shared by its connections; `0` means
@@ -39,6 +39,9 @@ pub struct InternalConfig {
     pub buffer_size: i32,
     /// Proxy URL every request goes through; blank means a direct connection.
     pub proxy: Option<String>,
+    /// Local IP address connections are bound to; `None` disables binding. The address must
+    /// belong to an interface that is up; until it does, connecting waits and retries.
+    pub bind_address: Option<String>,
 }
 
 impl InternalConfig {
@@ -69,10 +72,15 @@ impl InternalConfig {
         Duration::from_millis(millis)
     }
 
-    /// How long to wait for response headers.
-    pub(crate) fn header_timeout(&self) -> Duration {
-        self.read_timeout()
-            .max(Duration::from_millis(MIN_HEADER_TIMEOUT_MS))
+    /// How long to wait for response headers; binding to an address waits indefinitely.
+    pub(crate) fn header_timeout(&self) -> Option<Duration> {
+        if self.bind_address.is_some() {
+            return None;
+        }
+        Some(
+            self.read_timeout()
+                .max(Duration::from_millis(MIN_HEADER_TIMEOUT_MS)),
+        )
     }
 
     pub(crate) fn effective_buffer_size(&self) -> usize {
@@ -143,14 +151,16 @@ mod tests {
     }
 
     #[test]
-    fn header_timeout_is_at_least_one_second() {
+    fn header_timeout_is_at_least_one_second_unless_bound() {
         let mut config = InternalConfig {
             timeout_ms: 200,
             ..InternalConfig::new()
         };
-        assert_eq!(config.header_timeout(), Duration::from_millis(1000));
+        assert_eq!(config.header_timeout(), Some(Duration::from_millis(1000)));
         config.timeout_ms = 3000;
-        assert_eq!(config.header_timeout(), Duration::from_millis(3000));
+        assert_eq!(config.header_timeout(), Some(Duration::from_millis(3000)));
+        config.bind_address = Some("127.0.0.1".to_owned());
+        assert_eq!(config.header_timeout(), None);
     }
 
     #[test]

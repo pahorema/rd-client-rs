@@ -823,3 +823,16 @@ async fn invalid_proxy_fails_the_download() {
         "{message}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connections_can_be_bound_to_a_local_address() {
+    let data = test_data(4096);
+    let server = TestServer::file(Arc::clone(&data), FileOptions::default()).await;
+    let bound = InternalConfig {
+        bind_address: Some("127.0.0.1".to_owned()),
+        ..config()
+    };
+    let (run, outcome) = download(&server.url("/file.bin"), bound).await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+}
