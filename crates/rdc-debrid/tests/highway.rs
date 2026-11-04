@@ -710,3 +710,80 @@ async fn unrestrict_rejects_empty_and_malformed_links() {
         "Invalid HIGHWAY link format: highway://4213/zip"
     );
 }
+
+const HASH: &str = "3641ad15ad451518f558d5ce5b76be4a618911c1";
+
+async fn mount_check(server: &MockServer, response: ResponseTemplate) {
+    Mock::given(method("GET"))
+        .and(path(ENDPOINT))
+        .and(query_param("check", HASH))
+        .and(query_param("service", "torrent"))
+        .respond_with(response)
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn available_files_list_a_ready_cached_transfer_linked_to_the_account() {
+    let server = MockServer::start().await;
+    let check = json!({ "service": "torrent", "results": { HASH: { "known": true, "ready": true, "id": "4213" } } });
+    mount_check(&server, json_response(200, &check)).await;
+    let mut linked = transfer("4213", "completed");
+    linked["files"]
+        .as_array_mut()
+        .expect("files")
+        .push(json!({ "path": "", "size": 1 }));
+    mount_transfer(&server, "4213", json_response(200, &linked)).await;
+
+    let files = client(&server).available_files(HASH).await.expect("files");
+
+    let listed: Vec<(&str, i64)> = files
+        .iter()
+        .map(|f| (f.filename.as_str(), f.filesize))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("Some.Release/Some.Release.mkv", 990),
+            ("Some.Release/Some.Release.part", 10)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn available_files_are_empty_while_the_cache_is_not_ready() {
+    let server = MockServer::start().await;
+    let check = json!({ "results": { HASH: { "known": true, "ready": false } } });
+    mount_check(&server, json_response(200, &check)).await;
+
+    let files = client(&server).available_files(HASH).await.expect("files");
+
+    assert_eq!(files.len(), 0);
+}
+
+#[tokio::test]
+async fn available_files_are_empty_when_the_server_has_no_cache_lookup() {
+    let server = MockServer::start().await;
+    mount_check(
+        &server,
+        ResponseTemplate::new(200).set_body_string("<html></html>"),
+    )
+    .await;
+
+    let files = client(&server).available_files(HASH).await.expect("files");
+
+    assert_eq!(files.len(), 0);
+}
+
+#[tokio::test]
+async fn available_files_ignore_hashes_that_are_not_hex() {
+    let server = MockServer::start().await;
+
+    let files = client(&server)
+        .available_files("not-a-hash")
+        .await
+        .expect("files");
+
+    assert_eq!(files.len(), 0);
+    assert_eq!(server.received_requests().await.expect("recorded").len(), 0);
+}

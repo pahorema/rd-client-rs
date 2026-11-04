@@ -3,6 +3,7 @@
 //! The whole API is one endpoint, `transfers.php`, selected by query
 //! parameters. Only torrent transfers are managed.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
 
@@ -15,7 +16,7 @@ use serde::{Deserialize, Deserializer};
 
 use crate::error::DebridError;
 use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp};
-use crate::provider::{DebridUser, ProviderConfig, RemoteTorrent};
+use crate::provider::{AvailableFile, DebridUser, ProviderConfig, RemoteTorrent};
 
 /// The public HIGHWAY API endpoint.
 pub const DEFAULT_ENDPOINT: &str = "https://cloud.high-way.me/center-api/transfers.php";
@@ -227,6 +228,42 @@ impl Highway {
                      WebDAV mount instead."
                 ))
             })
+    }
+
+    /// Lists the files of a ready cached transfer for the info hash `hash`
+    /// (40 or 64 hex characters), when this account has it linked.
+    pub async fn available_files(&self, hash: &str) -> Result<Vec<AvailableFile>, DebridError> {
+        if !matches!(hash.len(), 40 | 64) || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Ok(Vec::new());
+        }
+        // Servers without a cache lookup answer with something else.
+        let check: Option<CacheCheck> = self
+            .call(Method::GET, &[("check", hash), ("service", SERVICE)])
+            .await?
+            .and_then(|body| serde_json::from_str(&body).ok());
+        let Some(entry) = check
+            .and_then(|check| check.results)
+            .and_then(|mut results| results.remove(hash))
+            .filter(|entry| entry.ready)
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(id) = non_blank(entry.id.as_deref()) else {
+            return Ok(Vec::new());
+        };
+        let transfer = self.transfer(id, Some(SERVICE)).await?;
+        Ok(transfer
+            .and_then(|transfer| transfer.files)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|file| {
+                let filename = file.path.filter(|path| !path.trim().is_empty())?;
+                Some(AvailableFile {
+                    filename,
+                    filesize: file.size,
+                })
+            })
+            .collect())
     }
 
     async fn transfer(
@@ -516,4 +553,20 @@ impl Transfer {
             ..RemoteTorrent::default()
         }
     }
+}
+
+/// Answer of `check=<hash>`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct CacheCheck {
+    results: Option<HashMap<String, CacheEntry>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct CacheEntry {
+    ready: bool,
+    /// Transfer id, when this account already linked the cached transfer.
+    #[serde(deserialize_with = "id_text")]
+    id: Option<String>,
 }
