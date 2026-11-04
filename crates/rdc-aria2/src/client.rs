@@ -6,12 +6,15 @@ use std::time::Duration;
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{DownloadStatus, Error};
 
 /// Request timeout used when [`ClientBuilder::timeout`] is not called.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How many stopped and how many waiting downloads [`Client::tell_all`] fetches.
+pub const TELL_ALL_LIMIT: u32 = 1000;
 
 /// Base delay between transport retries; the n-th retry waits `n` times this value.
 const DEFAULT_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -161,6 +164,15 @@ struct RpcErrorBody {
     message: Option<String>,
 }
 
+/// One entry of a `system.multicall` result: a one-element array holding the call's result,
+/// or a fault object when that call failed.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum MulticallEntry<T> {
+    Result((T,)),
+    Fault(RpcErrorBody),
+}
+
 impl From<RpcErrorBody> for Error {
     fn from(body: RpcErrorBody) -> Self {
         Self::Rpc {
@@ -238,9 +250,60 @@ impl Client {
         .await
     }
 
+    /// Every download aria2 knows about, fetched with one `system.multicall` request:
+    /// up to [`TELL_ALL_LIMIT`] stopped downloads, then up to [`TELL_ALL_LIMIT`] waiting
+    /// downloads, then all active downloads.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Rpc`] when aria2 rejects the batch or any call in it, or any other [`Error`]
+    /// of the round trip.
+    pub async fn tell_all(&self) -> Result<Vec<DownloadStatus>, Error> {
+        let window = || vec![Value::from(0), Value::from(TELL_ALL_LIMIT)];
+        let lists: Vec<Vec<DownloadStatus>> = self
+            .multicall([
+                ("aria2.tellStopped", window()),
+                ("aria2.tellWaiting", window()),
+                ("aria2.tellActive", Vec::new()),
+            ])
+            .await?;
+        Ok(lists.into_iter().flatten().collect())
+    }
+
     /// Calls `method` with the secret token (when configured) followed by `args`.
     async fn call<T: DeserializeOwned>(&self, method: &str, args: Vec<Value>) -> Result<T, Error> {
-        let body = self.post(method, &self.with_token(args)).await?;
+        self.invoke(method, &self.with_token(args)).await
+    }
+
+    /// Runs several calls in one `system.multicall` request. The token goes into each call's
+    /// parameters, never into the batch itself.
+    async fn multicall<'a, T: DeserializeOwned>(
+        &self,
+        calls: impl IntoIterator<Item = (&'a str, Vec<Value>)>,
+    ) -> Result<Vec<T>, Error> {
+        let calls: Vec<Value> = calls
+            .into_iter()
+            .map(|(method, args)| json!({"methodName": method, "params": self.with_token(args)}))
+            .collect();
+        let entries: Vec<MulticallEntry<T>> = self
+            .invoke("system.multicall", &[Value::Array(calls)])
+            .await?;
+        entries
+            .into_iter()
+            .map(|entry| match entry {
+                MulticallEntry::Result((value,)) => Ok(value),
+                MulticallEntry::Fault(fault) => Err(fault.into()),
+            })
+            .collect()
+    }
+
+    /// Calls `method` with exactly `params`.
+    async fn invoke<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: &[Value],
+    ) -> Result<T, Error> {
+        let body = self.post(method, params).await?;
         let response: Response<T> = decode(&body)?;
         if let Some(error) = response.error {
             return Err(error.into());

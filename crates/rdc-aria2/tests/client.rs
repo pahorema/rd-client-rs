@@ -411,3 +411,76 @@ async fn tell_stopped_sends_offset_and_count() {
 
     assert_eq!(stopped[0].status, DownloadState::Complete);
 }
+
+fn multicall_request(token: Option<&str>) -> Value {
+    let params = |args: Vec<Value>| {
+        let mut params: Vec<Value> = token.map(|token| json!(token)).into_iter().collect();
+        params.extend(args);
+        params
+    };
+    json!([[
+        {"methodName": "aria2.tellStopped", "params": params(vec![json!(0), json!(1000)])},
+        {"methodName": "aria2.tellWaiting", "params": params(vec![json!(0), json!(1000)])},
+        {"methodName": "aria2.tellActive", "params": params(Vec::new())},
+    ]])
+}
+
+#[tokio::test]
+async fn tell_all_batches_stopped_waiting_and_active_in_one_multicall() {
+    let server = MockServer::start().await;
+    expect_call(
+        &server,
+        "system.multicall",
+        multicall_request(Some("token:secret")),
+        result(&json!([
+            [[
+                status_json("s1", "complete", "https://host/s1"),
+                status_json("s2", "removed", "https://host/s2")
+            ]],
+            [[status_json("w1", "waiting", "https://host/w1")]],
+            [[status_json("a1", "active", "https://host/a1")]],
+        ])),
+    )
+    .await;
+
+    let all = client(&server, "secret").tell_all().await.unwrap();
+
+    let gids: Vec<&str> = all.iter().map(|status| status.gid.as_str()).collect();
+    assert_eq!(gids, ["s1", "s2", "w1", "a1"]);
+}
+
+#[tokio::test]
+async fn tell_all_without_secret_sends_no_token_in_any_call() {
+    let server = MockServer::start().await;
+    expect_call(
+        &server,
+        "system.multicall",
+        multicall_request(None),
+        result(&json!([[[]], [[]], [[]]])),
+    )
+    .await;
+
+    let all = client(&server, "").tell_all().await.unwrap();
+
+    assert_eq!(all.len(), 0);
+}
+
+#[tokio::test]
+async fn tell_all_reports_a_failed_call_in_the_batch() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(result(&json!([
+            [[]],
+            {"code": 1, "message": "Unauthorized"},
+            [[]],
+        ])))
+        .mount(&server)
+        .await;
+
+    let error = client(&server, "secret").tell_all().await.unwrap_err();
+
+    assert!(
+        matches!(&error, Error::Rpc { code: 1, message } if message == "Unauthorized"),
+        "{error:?}"
+    );
+}
