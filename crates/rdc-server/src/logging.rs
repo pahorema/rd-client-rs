@@ -1,16 +1,22 @@
-//! Reloadable tracing levels and bounded file rotation.
+//! Reloadable tracing levels, event-wide redaction, and bounded file rotation.
 
 use std::{
+    fmt,
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use rdc_model::LogLevel;
-use tracing::Subscriber;
+use tracing::{Event, Subscriber};
 use tracing_subscriber::{
-    Registry, filter::LevelFilter, fmt::MakeWriter, layer::SubscriberExt, reload,
+    Registry,
+    filter::LevelFilter,
+    fmt::{FmtContext, FormatEvent, FormatFields, MakeWriter, format::Writer},
+    layer::SubscriberExt,
+    registry::LookupSpan,
+    reload,
     util::SubscriberInitExt,
 };
 
@@ -18,10 +24,17 @@ use crate::config::Config;
 
 type LevelHandle = reload::Handle<LevelFilter, Registry>;
 
-/// Cloneable controls for runtime logging settings.
-#[derive(Clone, Debug)]
+/// Cloneable controls shared by settings updates and request logging.
+#[derive(Clone)]
 pub struct LogControl {
     level: LevelHandle,
+    secrets: Arc<RwLock<Vec<String>>>,
+}
+
+impl fmt::Debug for LogControl {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("LogControl").finish_non_exhaustive()
+    }
 }
 
 impl LogControl {
@@ -35,20 +48,68 @@ impl LogControl {
             LogLevel::Error => LevelFilter::ERROR,
         })
     }
+
+    /// Replace the secret catalogue; values of five characters or fewer are ignored.
+    pub fn set_secrets(&self, secrets: impl IntoIterator<Item = String>) {
+        let mut secrets: Vec<_> = secrets
+            .into_iter()
+            .filter(|s| s.chars().count() > 5)
+            .flat_map(|secret| {
+                let encoded: String =
+                    url::form_urlencoded::byte_serialize(secret.as_bytes()).collect();
+                let json = serde_json::to_string(&secret).expect("strings always serialize");
+                let escaped = json[1..json.len() - 1].to_owned();
+                [secret, encoded.replace('+', "%20"), encoded, escaped]
+            })
+            .collect();
+        // Longer overlapping values must be replaced before their substrings.
+        secrets.sort_unstable_by_key(|secret| std::cmp::Reverse(secret.len()));
+        secrets.dedup();
+        *self
+            .secrets
+            .write()
+            .expect("secret catalogue lock poisoned") = secrets;
+    }
+
+    /// Mask the current secret catalogue in arbitrary text.
+    pub fn redact(&self, text: &str) -> String {
+        redact(text, &self.secrets)
+    }
 }
 
-/// Build an isolated subscriber with an initial Warning level.
+fn redact(text: &str, secrets: &RwLock<Vec<String>>) -> String {
+    let secrets = secrets.read().expect("secret catalogue lock poisoned");
+    let mut result = text.to_owned();
+    for secret in secrets.iter() {
+        result = result.replace(secret, "*****");
+    }
+    result
+}
+
+/// Build a subscriber without installing it, allowing isolated embedded/test use.
+/// The initial level is Warning. Every formatted event is redacted before writing.
 pub fn subscriber<W>(writer: W) -> (impl Subscriber + Send + Sync, LogControl)
 where
     W: for<'a> MakeWriter<'a> + Send + Sync + 'static,
 {
     let (level, handle) = reload::Layer::new(LevelFilter::WARN);
+    let secrets = Arc::new(RwLock::new(Vec::new()));
+    let format = RedactedFormat {
+        secrets: secrets.clone(),
+    };
     let subscriber = Registry::default().with(level).with(
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
+            .event_format(format)
             .with_writer(writer),
     );
-    (subscriber, LogControl { level: handle })
+    (
+        subscriber,
+        LogControl {
+            level: handle,
+            secrets,
+        },
+    )
 }
 
 /// Install console and size-rotated file logging as the process subscriber.
@@ -64,6 +125,27 @@ pub fn init(config: &Config) -> anyhow::Result<LogControl> {
     let (subscriber, control) = subscriber(OutputWriter(Arc::new(Mutex::new(output))));
     subscriber.try_init()?;
     Ok(control)
+}
+
+struct RedactedFormat {
+    secrets: Arc<RwLock<Vec<String>>>,
+}
+
+impl<S, N> FormatEvent<S, N> for RedactedFormat
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        let mut rendered = String::new();
+        tracing_subscriber::fmt::format().format_event(ctx, Writer::new(&mut rendered), event)?;
+        writer.write_str(&redact(&rendered, &self.secrets))
+    }
 }
 
 #[derive(Clone)]

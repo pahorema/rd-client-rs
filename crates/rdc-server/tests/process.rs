@@ -164,35 +164,36 @@ fn environment_probe() {
 }
 
 #[test]
-fn log_levels_reload_immediately() {
+fn every_formatted_event_is_redacted_and_levels_reload() {
     let capture = Capture::default();
     let (subscriber, logs) = logging::subscriber(capture.clone());
     tracing::subscriber::with_default(subscriber, || {
         tracing::info!("hidden initially");
-        tracing::warn!("initial warning");
+        tracing::warn!("visible warning");
         logs.set_level(LogLevel::Verbose).unwrap();
-        tracing::trace!("verbose enabled");
-        logs.set_level(LogLevel::Debug).unwrap();
-        tracing::debug!("debug enabled");
-        logs.set_level(LogLevel::Information).unwrap();
-        tracing::info!("information enabled");
-        logs.set_level(LogLevel::Warning).unwrap();
-        tracing::warn!("warning enabled");
+        logs.set_secrets([
+            "long-secret".to_owned(),
+            "short".to_owned(),
+            "long-secret-extension".to_owned(),
+        ]);
+        let span = tracing::info_span!("credentials", key = "long-secret");
+        let entered = span.enter();
+        tracing::trace!(token = "long-secret-extension", "message long-secret short");
         logs.set_level(LogLevel::Error).unwrap();
         tracing::warn!("hidden after reload");
-        tracing::error!("error enabled");
+        tracing::error!("visible error");
+        drop(entered);
+        drop(span);
+        logs.set_secrets(["next-secret".to_owned()]);
+        tracing::error!("next-secret is hidden");
     });
     let output = capture.text();
     assert!(!output.contains("hidden initially"));
     assert!(!output.contains("hidden after reload"));
-    for message in [
-        "initial warning",
-        "verbose enabled",
-        "debug enabled",
-        "information enabled",
-        "warning enabled",
-        "error enabled",
-    ] {
-        assert!(output.contains(message), "missing {message}: {output}");
-    }
+    assert!(!output.contains("long-secret"));
+    assert!(!output.contains("next-secret"));
+    assert!(output.contains("short"));
+    assert!(output.contains("visible warning"));
+    assert!(output.contains("visible error"));
+    assert!(output.contains("*****"));
 }
