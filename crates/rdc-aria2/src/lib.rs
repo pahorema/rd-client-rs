@@ -17,6 +17,8 @@
 
 mod client;
 mod error;
+mod status;
 
 pub use client::{Client, ClientBuilder, DEFAULT_TIMEOUT, Version};
 pub use error::Error;
+pub use status::{DownloadFile, DownloadState, DownloadStatus, FileUri};
