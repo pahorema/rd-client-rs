@@ -4,3 +4,6 @@
 //! caching and fail-open handling of fetch failures belong to the calling engine.
 
 pub mod bencode;
+mod torrent;
+
+pub use torrent::{ParseTorrentError, TorrentEntry, TorrentFile};
