@@ -685,7 +685,10 @@ async fn symlink_path_of_a_multi_file_torrent_is_inside_the_torrent_folder() {
         )
         .expect("path");
 
-    assert_eq!(path.as_deref(), Some("Some.Release/b.nfo"));
+    assert_eq!(
+        path.as_deref().map(std::path::Path::new),
+        Some(std::path::Path::new("Some.Release/b.nfo"))
+    );
 }
 
 #[tokio::test]
