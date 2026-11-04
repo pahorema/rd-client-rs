@@ -1,5 +1,45 @@
+use std::{
+    io,
+    sync::{Arc, Mutex},
+};
+
 use clap::{CommandFactory, FromArgMatches, Parser};
-use rdc_server::config::{Config, normalize_base_path};
+use rdc_model::LogLevel;
+use rdc_server::{
+    config::{Config, normalize_base_path},
+    logging,
+};
+use tracing_subscriber::fmt::MakeWriter;
+
+#[derive(Clone, Debug, Default)]
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl Capture {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().expect("capture lock poisoned").clone())
+            .expect("logs are UTF-8")
+    }
+}
+
+impl io::Write for Capture {
+    fn write(&mut self, value: &[u8]) -> io::Result<usize> {
+        self.0
+            .lock()
+            .expect("capture lock poisoned")
+            .extend_from_slice(value);
+        Ok(value.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for Capture {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
+}
 
 fn parse(args: &[&str]) -> Config {
     let command = Config::command().mut_args(|arg| arg.env(None::<&str>));
@@ -121,4 +161,38 @@ fn environment_probe() {
     assert_eq!(config.port, 4321);
     assert_eq!(config.base_path, "/cli");
     assert_eq!(config.log_path(), std::path::Path::new("/tmp/cli.log"));
+}
+
+#[test]
+fn log_levels_reload_immediately() {
+    let capture = Capture::default();
+    let (subscriber, logs) = logging::subscriber(capture.clone());
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info!("hidden initially");
+        tracing::warn!("initial warning");
+        logs.set_level(LogLevel::Verbose).unwrap();
+        tracing::trace!("verbose enabled");
+        logs.set_level(LogLevel::Debug).unwrap();
+        tracing::debug!("debug enabled");
+        logs.set_level(LogLevel::Information).unwrap();
+        tracing::info!("information enabled");
+        logs.set_level(LogLevel::Warning).unwrap();
+        tracing::warn!("warning enabled");
+        logs.set_level(LogLevel::Error).unwrap();
+        tracing::warn!("hidden after reload");
+        tracing::error!("error enabled");
+    });
+    let output = capture.text();
+    assert!(!output.contains("hidden initially"));
+    assert!(!output.contains("hidden after reload"));
+    for message in [
+        "initial warning",
+        "verbose enabled",
+        "debug enabled",
+        "information enabled",
+        "warning enabled",
+        "error enabled",
+    ] {
+        assert!(output.contains(message), "missing {message}: {output}");
+    }
 }
