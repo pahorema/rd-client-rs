@@ -163,6 +163,20 @@ impl Sessions {
         .map(Some)
     }
 
+    /// Returns the first account name for torrent-client preference responses.
+    ///
+    /// # Errors
+    /// Returns store access or row decoding errors.
+    pub async fn user_name(&self) -> Result<Option<String>, AuthError> {
+        Ok(self
+            .0
+            .store
+            .users()
+            .first()
+            .await?
+            .and_then(|user| user.user_name))
+    }
+
     /// Returns an expiring `SID` Set-Cookie header at this request's mount path.
     ///
     /// Logout removes the browser cookie, not other sessions of the account.

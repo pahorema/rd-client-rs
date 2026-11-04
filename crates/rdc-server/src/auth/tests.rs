@@ -74,6 +74,22 @@ impl Fixture {
         cookie(&set_cookie)
     }
 }
+#[tokio::test]
+async fn sessions_expose_first_account_name() {
+    let fixture = Fixture::new().await;
+    assert_eq!(
+        fixture.sessions.user_name().await.unwrap().as_deref(),
+        Some("alice")
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let empty = Store::open(directory.path().join("empty.db"))
+        .await
+        .unwrap();
+    let sessions = Sessions::open(empty, &directory.path().join("session.key"))
+        .await
+        .unwrap();
+    assert_eq!(sessions.user_name().await.unwrap(), None);
+}
 
 async fn login(
     State(sessions): State<Sessions>,
