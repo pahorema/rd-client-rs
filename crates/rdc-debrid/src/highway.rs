@@ -7,17 +7,24 @@ use std::fmt;
 use std::time::Duration;
 
 use jiff::Timestamp;
-use rdc_model::RemoteFile;
-use reqwest::{Method, StatusCode};
+use rdc_model::{RemoteFile, Torrent};
+use reqwest::multipart::{Form, Part};
+use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 
 use crate::error::DebridError;
-use crate::http::ProviderHttp;
-use crate::provider::{ProviderConfig, RemoteTorrent};
+use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp};
+use crate::provider::{DebridUser, ProviderConfig, RemoteTorrent};
 
 /// The public HIGHWAY API endpoint.
 pub const DEFAULT_ENDPOINT: &str = "https://cloud.high-way.me/center-api/transfers.php";
+
+/// The only service rd-client uses.
+const SERVICE: &str = "torrent";
+
+/// Account name reported when the server has no statistics.
+const FALLBACK_USERNAME: &str = "HIGHWAY";
 
 /// Whether `id` is a spool reference: the 32-hex id of a queued transfer
 /// that has no numeric transfer id yet.
@@ -80,24 +87,96 @@ impl Highway {
             .collect())
     }
 
-    /// Sends a request and returns its body; `None` for 404 and empty bodies.
+    /// Returns the account from the server statistics.
+    ///
+    /// Servers without statistics (or answering with something else) yield
+    /// a stub account named `HIGHWAY`.
+    pub async fn user(&self) -> Result<DebridUser, DebridError> {
+        let stats: Stats = self
+            .call(Method::GET, &[("stats", "1")])
+            .await?
+            .and_then(|body| serde_json::from_str(&body).ok())
+            .unwrap_or_default();
+        let username = non_blank(stats.username.as_deref())
+            .or_else(|| non_blank(stats.plan.as_deref()))
+            .unwrap_or(FALLBACK_USERNAME)
+            .to_owned();
+        Ok(DebridUser {
+            username: Some(username),
+            expiration: stats
+                .plan_expires_at
+                .and_then(|seconds| Timestamp::from_second(seconds).ok()),
+            premium: stats.premium.unwrap_or(false),
+        })
+    }
+
+    /// Adds a magnet link and returns the transfer id (or spool id).
+    pub async fn add_magnet(&self, magnet: &str) -> Result<String, DebridError> {
+        self.add(Form::new().text("magnet", magnet.to_owned()))
+            .await
+    }
+
+    /// Uploads a `.torrent` file and returns the transfer id (or spool id).
+    pub async fn add_torrent_file(&self, bytes: &[u8]) -> Result<String, DebridError> {
+        let file = Part::bytes(bytes.to_vec())
+            .file_name("file.torrent")
+            .mime_str("application/octet-stream")?;
+        self.add(Form::new().part("file", file)).await
+    }
+
+    async fn add(&self, form: Form) -> Result<String, DebridError> {
+        let request = self.request(Method::POST, &[])?.multipart(form);
+        let body = self.send(request).await.map_err(rate_limit_from_text)?;
+        let transfer: Option<Transfer> = body.as_deref().map(decode).transpose()?;
+        transfer
+            .and_then(|transfer| transfer.id)
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| {
+                DebridError::InvalidResponse("HIGHWAY API did not return a transfer id.".to_owned())
+            })
+    }
+
+    /// Removes the transfer; a torrent without provider id is left alone.
+    pub async fn delete(&self, torrent: &Torrent) -> Result<(), DebridError> {
+        let Some(id) = non_blank(torrent.rd_id.as_deref()) else {
+            return Ok(());
+        };
+        self.call(Method::DELETE, &id_query(id, service_for(id)))
+            .await?;
+        Ok(())
+    }
+
+    /// Sends a request built by [`request`](Self::request) and returns its
+    /// body; `None` for 404 and empty bodies.
     async fn call(
         &self,
         method: Method,
         query: &[(&str, &str)],
     ) -> Result<Option<String>, DebridError> {
+        self.send(self.request(method, query)?).await
+    }
+
+    fn request(
+        &self,
+        method: Method,
+        query: &[(&str, &str)],
+    ) -> Result<RequestBuilder, DebridError> {
         if self.api_key.trim().is_empty() {
             return Err(DebridError::NotConfigured(
                 "The HIGHWAY API token is not set (provider API key)".to_owned(),
             ));
         }
-        let request = self
+        Ok(self
             .http
             .client()
             .request(method, &self.endpoint)
             .query(query)
             .bearer_auth(&self.api_key)
-            .timeout(self.timeout);
+            .timeout(self.timeout))
+    }
+
+    /// Sends a request; `None` for 404 and empty bodies.
+    async fn send(&self, request: RequestBuilder) -> Result<Option<String>, DebridError> {
         let response = self.http.send(request).await.inspect_err(|error| {
             if let DebridError::Transport(source) = error
                 && source.is_timeout()
@@ -114,6 +193,40 @@ impl Highway {
             return Err(error_from(status, &body));
         }
         Ok((!body.trim().is_empty()).then_some(body))
+    }
+}
+
+/// The service to name for `id`: spool references are looked up without one.
+fn service_for(id: &str) -> Option<&'static str> {
+    (!is_spool_id(id)).then_some(SERVICE)
+}
+
+fn id_query<'a>(id: &'a str, service: Option<&'a str>) -> Vec<(&'static str, &'a str)> {
+    let mut query = vec![("id", id)];
+    if let Some(service) = service {
+        query.push(("service", service));
+    }
+    query
+}
+
+fn non_blank(value: Option<&str>) -> Option<&str> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+/// Treats an add failure whose text asks to slow down as a two-minute rate limit.
+fn rate_limit_from_text(error: DebridError) -> DebridError {
+    if matches!(error, DebridError::RateLimited { .. }) {
+        return error;
+    }
+    let message = error.to_string();
+    let lowercase = message.to_lowercase();
+    if lowercase.contains("slow_down") || lowercase.contains("rate limit exceeded") {
+        DebridError::RateLimited {
+            message,
+            retry_after: DEFAULT_RATE_LIMIT_COOLDOWN,
+        }
+    } else {
+        error
     }
 }
 
@@ -157,6 +270,17 @@ fn error_from(status: StatusCode, body: &str) -> DebridError {
             DebridError::Provider(format!("HIGHWAY request failed ({label}): {detail}"))
         }
     }
+}
+
+/// Answer of `stats=1`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Stats {
+    username: Option<String>,
+    plan: Option<String>,
+    /// Unix seconds; `None` for plans without expiry.
+    plan_expires_at: Option<i64>,
+    premium: Option<bool>,
 }
 
 /// Reads an id sent either as a string or as a number.
