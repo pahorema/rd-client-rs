@@ -12,6 +12,7 @@ use crate::error::DebridError;
 use crate::http::ProviderHttp;
 use crate::json;
 use crate::provider::{DebridUser, ProviderConfig, RemoteTorrent};
+use crate::text_rate_limit::classify_add_error;
 
 /// API host used when no alternative hostname is configured.
 pub const DEFAULT_API_HOSTNAME: &str = "api.real-debrid.com";
@@ -95,6 +96,37 @@ impl RealDebrid {
         Ok(torrents)
     }
 
+    /// Adds a magnet link and returns the id of the new torrent.
+    ///
+    /// Errors mentioning `slow_down` or `rate limit exceeded` are reported as
+    /// [`DebridError::RateLimited`].
+    pub async fn add_magnet(&self, magnet: &str) -> Result<String, DebridError> {
+        let request = self
+            .request(Method::POST, "torrents/addMagnet")?
+            .form(&[("magnet", magnet)]);
+        self.add(request).await
+    }
+
+    /// Uploads a `.torrent` file and returns the id of the new torrent; rate
+    /// limits are detected like for [`add_magnet`](Self::add_magnet).
+    pub async fn add_torrent_file(&self, bytes: &[u8]) -> Result<String, DebridError> {
+        let request = self
+            .request(Method::PUT, "torrents/addTorrent")?
+            .body(bytes.to_vec());
+        self.add(request).await
+    }
+
+    async fn add(&self, request: RequestBuilder) -> Result<String, DebridError> {
+        let added: AddResult = self.call(request).await.map_err(classify_add_error)?;
+        if added.id.is_empty() {
+            return Err(DebridError::InvalidResponse(
+                "Real-Debrid did not return the id of the added torrent".to_owned(),
+            ));
+        }
+        tracing::debug!(id = %added.id, "torrent added to Real-Debrid");
+        Ok(added.id)
+    }
+
     /// The UTC offset of the Real-Debrid server clock, read once.
     async fn server_offset(&self) -> Result<SignedDuration, DebridError> {
         self.server_offset
@@ -151,6 +183,12 @@ struct User {
     #[serde(default)]
     premium: i64,
     expiration: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AddResult {
+    #[serde(default)]
+    id: String,
 }
 
 #[derive(Debug, Default, Deserialize)]

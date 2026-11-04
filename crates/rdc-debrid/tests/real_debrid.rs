@@ -7,7 +7,9 @@ use rdc_debrid::{
     DebridError, ProviderConfig, ProviderHttp, RateLimitCoordinator, RealDebrid, RetryPolicy,
 };
 use serde_json::json;
-use wiremock::matchers::{bearer_token, method, path, query_param, query_param_is_missing};
+use wiremock::matchers::{
+    bearer_token, body_bytes, body_string, method, path, query_param, query_param_is_missing,
+};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn config(api_key: &str, timeout: Duration) -> ProviderConfig {
@@ -308,4 +310,103 @@ async fn unreadable_server_time_fails_the_listing() {
         matches!(error, DebridError::InvalidResponse(_)),
         "{error:?}"
     );
+}
+
+#[tokio::test]
+async fn adding_a_magnet_posts_it_and_returns_the_torrent_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rest/1.0/torrents/addMagnet"))
+        .and(bearer_token("secret"))
+        .and(body_string("magnet=magnet%3A%3Fxt%3Durn%3Abtih%3Aabc"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(
+            json!({"id": "GGZIOQZAZHDIE", "uri": "https://api.real-debrid.com/rest/1.0/torrents/info/GGZIOQZAZHDIE"}),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let id = client(&server)
+        .add_magnet("magnet:?xt=urn:btih:abc")
+        .await
+        .expect("added");
+
+    assert_eq!(id, "GGZIOQZAZHDIE");
+}
+
+#[tokio::test]
+async fn adding_a_torrent_file_puts_the_raw_bytes() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/rest/1.0/torrents/addTorrent"))
+        .and(body_bytes(b"d8:announce0:e".to_vec()))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": "FILEID"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let id = client(&server)
+        .add_torrent_file(b"d8:announce0:e")
+        .await
+        .expect("added");
+
+    assert_eq!(id, "FILEID");
+}
+
+#[tokio::test]
+async fn too_many_requests_on_add_is_a_rate_limit_with_the_requested_delay() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rest/1.0/torrents/addMagnet"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "30"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let error = client(&server)
+        .add_magnet("magnet:?xt=urn:btih:abc")
+        .await
+        .expect_err("rate limited");
+
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(30)));
+}
+
+#[tokio::test]
+async fn rate_limit_text_on_add_is_a_two_minute_rate_limit() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/rest/1.0/torrents/addTorrent"))
+        .respond_with(ResponseTemplate::new(503).set_body_string("upstream rate limit exceeded"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let error = client(&server)
+        .add_torrent_file(b"torrent")
+        .await
+        .expect_err("rate limited");
+
+    assert_eq!(error.retry_after(), Some(Duration::from_secs(120)));
+    assert_eq!(error.to_string(), "upstream rate limit exceeded");
+}
+
+#[tokio::test]
+async fn other_add_errors_are_not_rate_limits() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rest/1.0/torrents/addMagnet"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_body_json(json!({"error": "torrent_file_invalid", "error_code": 30})),
+        )
+        .mount(&server)
+        .await;
+
+    let error = client(&server)
+        .add_magnet("magnet:?xt=urn:btih:abc")
+        .await
+        .expect_err("rejected");
+
+    assert_eq!(error.retry_after(), None);
+    assert_eq!(error.to_string(), "Torrent file invalid");
 }

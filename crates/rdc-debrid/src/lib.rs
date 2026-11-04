@@ -11,6 +11,7 @@ pub mod premiumize;
 pub mod provider;
 pub mod rate_limit;
 pub mod real_debrid;
+mod text_rate_limit;
 pub mod torbox;
 
 pub use debrid_link::DebridLink;
