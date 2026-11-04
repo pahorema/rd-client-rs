@@ -1,10 +1,12 @@
 //! Client for the Debrid-Link seedbox API (`https://debrid-link.fr/api/v2/`).
 
 use std::fmt;
+use std::path::Path;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use jiff::{SignedDuration, Timestamp};
-use rdc_model::{DownloadInfo, Provider, RemoteFile, Torrent, TorrentStatus};
+use rdc_model::{Download, DownloadInfo, Provider, RemoteFile, Torrent, TorrentStatus};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
@@ -12,7 +14,7 @@ use serde::de::{DeserializeOwned, IgnoredAny};
 
 use crate::error::DebridError;
 use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp};
-use crate::provider::{DebridUser, ProviderConfig, RemoteTorrent};
+use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
 
 /// `rd_status_raw` of a torrent the provider no longer knows.
 const DELETED: &str = "deleted";
@@ -251,6 +253,101 @@ impl DebridLink {
         let body = response.text().await?;
         parse_envelope(status, &body)
     }
+}
+
+#[async_trait]
+impl DebridProvider for DebridLink {
+    fn kind(&self) -> Provider {
+        Provider::DebridLink
+    }
+
+    async fn list_torrents(&self) -> Result<Vec<RemoteTorrent>, DebridError> {
+        DebridLink::list_torrents(self).await
+    }
+
+    async fn user(&self) -> Result<DebridUser, DebridError> {
+        DebridLink::user(self).await
+    }
+
+    async fn add_magnet(&self, magnet: &str) -> Result<String, DebridError> {
+        DebridLink::add_magnet(self, magnet).await
+    }
+
+    async fn add_torrent_file(&self, bytes: &[u8]) -> Result<String, DebridError> {
+        DebridLink::add_torrent_file(self, bytes).await
+    }
+
+    /// Debrid-Link has no cache lookup by hash; always empty.
+    async fn available_files(&self, _hash: &str) -> Result<Vec<AvailableFile>, DebridError> {
+        Ok(Vec::new())
+    }
+
+    /// Every file of a seedbox torrent is downloaded, so nothing is sent.
+    async fn select_files(&self, torrent: &Torrent) -> Result<Option<usize>, DebridError> {
+        Ok(Some(torrent.files().len()))
+    }
+
+    async fn delete(&self, torrent: &Torrent) -> Result<(), DebridError> {
+        DebridLink::delete(self, torrent).await
+    }
+
+    /// Seedbox links are already direct.
+    async fn unrestrict(&self, _torrent: &Torrent, link: &str) -> Result<String, DebridError> {
+        Ok(link.to_owned())
+    }
+
+    async fn refresh(
+        &self,
+        torrent: &mut Torrent,
+        remote: Option<&RemoteTorrent>,
+    ) -> Result<(), DebridError> {
+        DebridLink::refresh(self, torrent, remote).await
+    }
+
+    async fn download_infos(
+        &self,
+        torrent: &Torrent,
+    ) -> Result<Option<Vec<DownloadInfo>>, DebridError> {
+        DebridLink::download_infos(self, torrent).await
+    }
+
+    async fn file_name(&self, download: &Download) -> Result<String, DebridError> {
+        download_file_name(download)
+    }
+
+    /// Single-file torrents sit at the mount root, the others in a folder
+    /// named after the torrent.
+    fn symlink_path(
+        &self,
+        torrent: &Torrent,
+        download: &Download,
+    ) -> Result<Option<String>, DebridError> {
+        let (Some(name), Some(file_name)) = (&torrent.rd_name, &download.file_name) else {
+            return Ok(None);
+        };
+        if torrent.files().len() == 1 {
+            return Ok(Some(file_name.clone()));
+        }
+        Ok(Some(
+            Path::new(name)
+                .join(file_name)
+                .to_string_lossy()
+                .into_owned(),
+        ))
+    }
+}
+
+/// The stored file name of a download, else the name derived from its link.
+fn download_file_name(download: &Download) -> Result<String, DebridError> {
+    non_blank(download.file_name.as_deref())
+        .map(str::to_owned)
+        .or_else(|| rdc_model::paths::file_name(download))
+        .ok_or_else(|| {
+            DebridError::InvalidResponse(format!(
+                "No file name is known for the download of {}",
+                download.path
+            ))
+        })
 }
 
 /// The wrapper around every API response.

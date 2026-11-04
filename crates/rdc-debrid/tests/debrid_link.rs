@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use jiff::{SignedDuration, Timestamp};
 use rdc_debrid::{
-    DebridError, DebridLink, ProviderConfig, ProviderHttp, RateLimitCoordinator, RemoteTorrent,
-    RetryPolicy,
+    DebridError, DebridLink, DebridProvider, ProviderConfig, ProviderHttp, RateLimitCoordinator,
+    RemoteTorrent, RetryPolicy,
 };
-use rdc_model::{DownloadInfo, Provider, Torrent, TorrentStatus};
+use rdc_model::{Download, DownloadInfo, Provider, RemoteFile, Torrent, TorrentStatus};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_string_contains, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -575,4 +575,134 @@ async fn download_infos_of_a_missing_torrent_are_not_found() {
         .expect_err("missing");
 
     assert!(error.is_not_found(), "{error:?}");
+}
+
+fn provider(server: &MockServer) -> Box<dyn DebridProvider> {
+    Box::new(client(server))
+}
+
+fn torrent_with_files(paths: &[&str]) -> Torrent {
+    let files: Vec<RemoteFile> = paths
+        .iter()
+        .zip(0..)
+        .map(|(path, id)| RemoteFile {
+            id,
+            path: (*path).to_owned(),
+            bytes: 10,
+            selected: true,
+            download_link: None,
+        })
+        .collect();
+    let mut torrent = Torrent {
+        rd_name: Some("Some.Release".to_owned()),
+        ..with_id("t1")
+    };
+    torrent.set_files(&files);
+    torrent
+}
+
+fn named_download(file_name: Option<&str>) -> Download {
+    Download {
+        path: "https://dl.example/a.mkv".to_owned(),
+        file_name: file_name.map(str::to_owned),
+        ..Download::default()
+    }
+}
+
+#[tokio::test]
+async fn provider_selects_every_file_without_a_request() {
+    let server = MockServer::start().await;
+    let provider = provider(&server);
+
+    let selected = provider
+        .select_files(&torrent_with_files(&["a.mkv", "b.nfo"]))
+        .await
+        .expect("selected");
+
+    assert_eq!(provider.kind(), Provider::DebridLink);
+    assert_eq!(selected, Some(2));
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn provider_links_are_already_unrestricted_and_nothing_is_cached() {
+    let server = MockServer::start().await;
+    let provider = provider(&server);
+
+    let link = provider
+        .unrestrict(&with_id("t1"), "https://dl.example/a.mkv")
+        .await
+        .expect("unrestricted");
+    let cached = provider
+        .available_files("3641ad15ad451518f558d5ce5b76be4a618911c1")
+        .await
+        .expect("cache");
+
+    assert_eq!(link, "https://dl.example/a.mkv");
+    assert_eq!(cached.len(), 0);
+}
+
+#[tokio::test]
+async fn provider_file_name_is_the_stored_download_name() {
+    let server = MockServer::start().await;
+
+    let name = provider(&server)
+        .file_name(&named_download(Some("a.mkv")))
+        .await
+        .expect("name");
+
+    assert_eq!(name, "a.mkv");
+}
+
+#[tokio::test]
+async fn symlink_path_of_a_single_file_torrent_is_the_file_name() {
+    let server = MockServer::start().await;
+
+    let path = provider(&server)
+        .symlink_path(
+            &torrent_with_files(&["a.mkv"]),
+            &named_download(Some("a.mkv")),
+        )
+        .expect("path");
+
+    assert_eq!(path.as_deref(), Some("a.mkv"));
+}
+
+#[tokio::test]
+async fn symlink_path_of_a_multi_file_torrent_is_inside_the_torrent_folder() {
+    let server = MockServer::start().await;
+
+    let path = provider(&server)
+        .symlink_path(
+            &torrent_with_files(&["a.mkv", "b.nfo"]),
+            &named_download(Some("b.nfo")),
+        )
+        .expect("path");
+
+    assert_eq!(path.as_deref(), Some("Some.Release/b.nfo"));
+}
+
+#[tokio::test]
+async fn symlink_path_needs_torrent_and_file_names() {
+    let server = MockServer::start().await;
+    let provider = provider(&server);
+    let unnamed_torrent = Torrent {
+        rd_name: None,
+        ..torrent_with_files(&["a.mkv"])
+    };
+
+    let without_file = provider
+        .symlink_path(&torrent_with_files(&["a.mkv"]), &named_download(None))
+        .expect("path");
+    let without_torrent = provider
+        .symlink_path(&unnamed_torrent, &named_download(Some("a.mkv")))
+        .expect("path");
+
+    assert_eq!((without_file, without_torrent), (None, None));
 }
