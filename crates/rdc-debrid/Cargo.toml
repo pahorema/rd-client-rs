@@ -9,9 +9,12 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 fastrand.workspace = true
 jiff = { workspace = true, features = ["std"] }
+rdc-model.workspace = true
 reqwest = { workspace = true, features = ["charset", "form", "json", "multipart", "query", "rustls"] }
+serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tracing.workspace = true
