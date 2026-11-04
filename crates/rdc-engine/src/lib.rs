@@ -1,9 +1,11 @@
 //! Public torrent engine contracts and independent monitoring utilities.
 
+mod core;
 mod error;
 mod options;
 mod types;
 
+pub use core::Engine;
 pub use error::EngineError;
 pub use options::{
     DownloadFactory, DownloadRequest, EngineOptions, ProviderFactory, SettingsListener,
@@ -19,3 +21,9 @@ pub mod disk_space;
 pub mod tracker_list;
 pub mod update_check;
 pub mod watch_folder;
+
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+
+#[cfg(test)]
+mod core_tests;
