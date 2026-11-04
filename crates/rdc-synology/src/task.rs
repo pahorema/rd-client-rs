@@ -4,7 +4,11 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer};
 
-use crate::wire::{lenient_text, number};
+use crate::wire::{json_array, lenient_text, number};
+use crate::{Error, Session};
+
+/// Extra task information requested with every list and get call.
+const ADDITIONAL: [&str; 3] = ["detail", "file", "transfer"];
 
 /// State of a Download Station task.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
@@ -266,6 +270,51 @@ pub struct TaskTransfer {
     /// Upload speed in bytes per second.
     #[serde(default, deserialize_with = "number")]
     pub speed_upload: u64,
+}
+
+/// Task list of the `list` and `get` responses.
+#[derive(Deserialize)]
+struct TaskList {
+    #[serde(default, alias = "tasks")]
+    task: Vec<Task>,
+}
+
+impl Session {
+    /// Every task of this account, with detail, file and transfer information.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Error`] of the round trip.
+    pub async fn list_tasks(&self) -> Result<Vec<Task>, Error> {
+        let additional = json_array(ADDITIONAL);
+        let list: TaskList = self
+            .call(|apis| &apis.task, "list", &[("additional", &additional)])
+            .await?;
+        Ok(list.task)
+    }
+
+    /// The task `id`, with detail, file and transfer information.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::TaskNotFound`] when DSM answers without the task, or any other [`Error`] of
+    /// the round trip.
+    pub async fn task(&self, id: &str) -> Result<Task, Error> {
+        let ids = json_array([id]);
+        let additional = json_array(ADDITIONAL);
+        let found: TaskList = self
+            .call(
+                |apis| &apis.task,
+                "get",
+                &[("id", &ids), ("additional", &additional)],
+            )
+            .await?;
+        found
+            .task
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::TaskNotFound(id.to_owned()))
+    }
 }
 
 #[cfg(test)]

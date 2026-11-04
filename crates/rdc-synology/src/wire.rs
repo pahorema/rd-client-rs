@@ -6,6 +6,12 @@ use serde::Deserializer;
 use serde::de::{self, Visitor};
 use serde_json::Value;
 
+/// A JSON array of strings, the form DSM expects for list parameters (`["a","b"]`).
+pub(crate) fn json_array<'a>(items: impl IntoIterator<Item = &'a str>) -> String {
+    let items: Vec<&str> = items.into_iter().collect();
+    serde_json::to_string(&items).expect("a list of strings always serializes to JSON")
+}
+
 /// An unsigned integer sent as a number, a numeric string or `null` (0).
 pub(crate) fn number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
     struct NumberVisitor;
@@ -53,4 +59,19 @@ pub(crate) fn lenient_text<'de, D: Deserializer<'de>>(
         Value::String(text) => Some(text),
         other => Some(other.to_string()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_array_quotes_and_escapes_every_item() {
+        assert_eq!(json_array(["detail", "file"]), r#"["detail","file"]"#);
+        assert_eq!(
+            json_array(["https://h/a?b=\"c\""]),
+            r#"["https://h/a?b=\"c\""]"#
+        );
+        assert_eq!(json_array([]), "[]");
+    }
 }

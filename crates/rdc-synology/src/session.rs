@@ -3,8 +3,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use serde::de::IgnoredAny;
+use serde::de::{DeserializeOwned, IgnoredAny};
 
+use crate::api::{Api, Apis};
 use crate::{Client, Error};
 
 /// A logged-in DSM session, created by [`Client::login`].
@@ -63,6 +64,19 @@ impl Session {
             .await?;
         tracing::debug!("logged out of Synology");
         Ok(())
+    }
+
+    /// Calls the API chosen by `api` with this session's id.
+    pub(crate) async fn call<T: DeserializeOwned>(
+        &self,
+        api: fn(&Apis) -> &Api,
+        method: &'static str,
+        params: &[(&str, &str)],
+    ) -> Result<T, Error> {
+        let client = &self.inner.client;
+        client
+            .get(api(client.apis()), method, params, Some(&self.inner.sid))
+            .await
     }
 }
 
