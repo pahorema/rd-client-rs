@@ -31,6 +31,9 @@ pub enum DebridError {
     /// The request could not be sent or the response could not be read.
     #[error("{0}")]
     Transport(#[source] reqwest::Error),
+    /// A torrent's include or exclude expression is invalid.
+    #[error(transparent)]
+    Filter(#[from] rdc_model::FilterError),
 }
 
 impl DebridError {
