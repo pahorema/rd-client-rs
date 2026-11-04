@@ -222,3 +222,17 @@ async fn direct_lookup_falls_back_to_searching() {
     let (result, _) = link(request).await;
     assert_eq!(result, Ok(source.display().to_string()));
 }
+
+#[tokio::test]
+async fn existing_file_or_link_at_the_destination_is_replaced() {
+    let layout = Layout::new();
+    let source = layout.mount_file("Movie/Movie.mkv");
+    let request = layout.request("Movie/Movie.mkv");
+    std::fs::write(&request.destination, b"old").expect("old file");
+    let (result, destination) = link(request.clone()).await;
+    assert!(result.is_ok(), "{result:?}");
+    assert_links_to(&destination, &source);
+    let (again, destination) = link(request).await;
+    assert!(again.is_ok(), "{again:?}");
+    assert_links_to(&destination, &source);
+}

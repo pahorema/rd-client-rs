@@ -39,7 +39,7 @@ pub struct SymlinkRequest {
     pub mount_path: String,
     /// Path of the file relative to the mount (usually `<torrent>/<sub dirs>/<file>`).
     pub relative_path: String,
-    /// The link to create.
+    /// The link to create; an existing file or link there is replaced.
     pub destination: PathBuf,
     /// How the source file is located.
     pub lookup: SourceLookup,
@@ -358,8 +358,13 @@ async fn log_mount_contents(mount: &Path) {
     );
 }
 
-/// Creates a symbolic link at `link` to `source`.
+/// Replaces whatever non-directory exists at `link` with a symbolic link to `source`.
 async fn create_link(source: &Path, link: &Path) -> io::Result<()> {
+    if let Ok(metadata) = tokio::fs::symlink_metadata(link).await
+        && !metadata.is_dir()
+    {
+        tokio::fs::remove_file(link).await?;
+    }
     #[cfg(unix)]
     tokio::fs::symlink(source, link).await?;
     #[cfg(windows)]
