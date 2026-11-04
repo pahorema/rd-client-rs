@@ -85,6 +85,13 @@ fn assert_downloaded(run: &Run, data: &[u8]) {
     assert!(!run.partial().exists(), "partial file removed");
 }
 
+fn single_chunk() -> InternalConfig {
+    InternalConfig {
+        chunk_count: 1,
+        ..config()
+    }
+}
+
 fn slow_options() -> FileOptions {
     FileOptions {
         write_size: 2048,
@@ -598,4 +605,107 @@ async fn speed_limit_changes_apply_to_a_running_download() {
         "took {:?}",
         started.elapsed()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropped_connection_resumes_from_the_received_offset() {
+    let data = test_data(64 * 1024);
+    let transfers = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let data = Arc::clone(&data);
+        let transfers = Arc::clone(&transfers);
+        TestServer::start(move |request| {
+            let mut reply = file_reply(&data, request, &FileOptions::default());
+            if request.range() != Some((0, Some(0)))
+                && transfers.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                reply.abort_after = Some(10_000);
+            }
+            reply
+        })
+        .await
+    };
+    let (run, outcome) = download(&server.url("/file.bin"), single_chunk()).await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+    let requests = server.transfer_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].header("range"), None);
+    let (start, end) = requests[1].range().expect("resumed with a range");
+    assert!(start > 0 && start <= 10_000, "resumed at {start}");
+    assert_eq!(end, Some(65_535));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stalled_reads_time_out_and_retry() {
+    let data = test_data(32 * 1024);
+    let transfers = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let data = Arc::clone(&data);
+        let transfers = Arc::clone(&transfers);
+        TestServer::start(move |request| {
+            let mut reply = file_reply(&data, request, &FileOptions::default());
+            if request.range() != Some((0, Some(0)))
+                && transfers.fetch_add(1, Ordering::SeqCst) == 0
+            {
+                reply.stall_after = Some((4096, Duration::from_secs(5)));
+            }
+            reply
+        })
+        .await
+    };
+    let fast_timeout = InternalConfig {
+        timeout_ms: 150,
+        ..single_chunk()
+    };
+    let started = Instant::now();
+    let (run, outcome) = download(&server.url("/file.bin"), fast_timeout).await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(server.transfer_requests().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unknown_size_downloads_resume_with_an_open_range() {
+    let data = test_data(32 * 1024);
+    let transfers = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let data = Arc::clone(&data);
+        let transfers = Arc::clone(&transfers);
+        TestServer::start(move |request| {
+            if request.range() == Some((0, Some(0))) {
+                let mut probe = Reply::status(206).header("Content-Range", "bytes 0-0/*");
+                probe.body = data[..1].to_vec();
+                return probe;
+            }
+            let options = FileOptions {
+                framing: Framing::CloseDelimited,
+                ..FileOptions::default()
+            };
+            let mut reply = file_reply(&data, request, &options);
+            if transfers.fetch_add(1, Ordering::SeqCst) == 0 {
+                reply.stall_after = Some((8192, Duration::from_secs(5)));
+            }
+            reply
+        })
+        .await
+    };
+    let fast_timeout = InternalConfig {
+        timeout_ms: 150,
+        ..config()
+    };
+    let (run, outcome) = download(&server.url("/file.bin"), fast_timeout).await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+    let requests = server.transfer_requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].header("range"), None);
+    let (start, end) = requests[1].range().expect("resumed with a range");
+    assert!(start > 0, "resumed at {start}");
+    assert_eq!(end, None);
 }

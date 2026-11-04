@@ -5,7 +5,11 @@
 //! `<file>.download` — removing a stale one first — split into chunks fetched over up to
 //! [`InternalConfig::parallel_connections`] connections, and renames the partial file to
 //! `<file>` on success, replacing an existing file. On failure or cancellation the partial file
-//! is removed. Each read waits at most the configured timeout.
+//! is removed.
+//!
+//! Each read waits at most the configured timeout. When the server serves ranges, a chunk that
+//! fails with a passing error resumes from where it stopped, up to five times, after a random
+//! exponential backoff of at most 10 s; its read timeout grows after each retry.
 //!
 //! Progress reports bytes written, the expected size (`0` while unknown) and the speed averaged
 //! over the last two seconds. An optional speed limit is shared by all connections of a

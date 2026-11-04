@@ -18,6 +18,12 @@ use super::error::TransferError;
 use super::plan::{ChunkRange, plan_chunks};
 use super::probe::RemoteFile;
 
+/// Retries of one chunk after a passing failure.
+const MAX_CHUNK_RETRIES: u32 = 5;
+/// Longest wait before retrying a chunk.
+const MAX_BACKOFF: Duration = Duration::from_secs(10);
+/// The per-read timeout grows by at least this much after each retry.
+const MIN_TIMEOUT_INCREMENT: Duration = Duration::from_secs(1);
 /// Suffix of the file a download is written to until it completes.
 const PARTIAL_SUFFIX: &str = ".download";
 
@@ -97,6 +103,7 @@ async fn fetch_chunks(
         .map(|range| Chunk {
             range,
             position: 0,
+            failures: 0,
             timeout,
             ranged,
         })
@@ -145,6 +152,7 @@ struct Chunk {
     range: ChunkRange,
     /// Bytes of the range written so far.
     position: u64,
+    failures: u32,
     /// Current per-read timeout.
     timeout: Duration,
     /// Whether the chunk is one of several, so even its first request names its range.
@@ -167,15 +175,39 @@ struct ChunkWorker {
 }
 
 impl ChunkWorker {
-    /// Fetches the chunk; a stream ending before the range is complete is an error.
+    /// Fetches the chunk, retrying passing failures when the server serves ranges.
     async fn run(self, mut chunk: Chunk) -> Result<(), TransferError> {
-        self.fetch(&mut chunk).await?;
-        match chunk.remaining() {
-            Some(remaining) if remaining > 0 => Err(TransferError::Incomplete {
-                received: chunk.position,
-                expected: chunk.position + remaining,
-            }),
-            _ => Ok(()),
+        let base_timeout = chunk.timeout;
+        let increment = base_timeout.max(MIN_TIMEOUT_INCREMENT);
+        loop {
+            let error = match self.fetch(&mut chunk).await {
+                Ok(()) => match chunk.remaining() {
+                    Some(remaining) if remaining > 0 => TransferError::Incomplete {
+                        received: chunk.position,
+                        expected: chunk.position + remaining,
+                    },
+                    _ => return Ok(()),
+                },
+                Err(error) => error,
+            };
+            if self.cancel.is_cancelled() {
+                return Err(TransferError::Cancelled);
+            }
+            if !(error.is_retryable()
+                && self.remote.supports_ranges
+                && chunk.failures < MAX_CHUNK_RETRIES)
+            {
+                return Err(error);
+            }
+            chunk.failures += 1;
+            let delay = backoff(base_timeout, chunk.failures);
+            tracing::debug!(
+                "Chunk at {} failed ({error}), retry {} in {delay:?}",
+                chunk.range.start,
+                chunk.failures
+            );
+            Context::sleep(&self.cancel, delay).await?;
+            chunk.timeout += increment;
         }
     }
 
@@ -251,6 +283,14 @@ impl ChunkWorker {
     }
 }
 
+/// A random delay in `[0, min(10 s, base · 2^(failures − 1))]`.
+fn backoff(base: Duration, failures: u32) -> Duration {
+    let exponent = failures.saturating_sub(1).min(16);
+    let window = base.saturating_mul(1 << exponent).min(MAX_BACKOFF);
+    let window_ms = u64::try_from(window.as_millis()).unwrap_or(u64::MAX);
+    Duration::from_millis(fastrand::u64(0..=window_ms))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +305,16 @@ mod tests {
             partial_path(Path::new("noext")),
             PathBuf::from("noext.download")
         );
+    }
+
+    #[test]
+    fn backoff_window_doubles_and_is_capped() {
+        let base = Duration::from_millis(100);
+        for _ in 0..200 {
+            assert!(backoff(base, 1) <= Duration::from_millis(100));
+            assert!(backoff(base, 3) <= Duration::from_millis(400));
+            assert!(backoff(Duration::from_secs(5), 5) <= MAX_BACKOFF);
+        }
     }
 
     #[tokio::test]

@@ -48,6 +48,27 @@ impl TransferError {
             source,
         }
     }
+
+    /// Whether the failure is a passing transport or server condition worth another try.
+    pub(crate) fn is_transient(&self) -> bool {
+        match self {
+            Self::Status(status) => is_transient_status(*status),
+            Self::Http(error) => {
+                !error.is_builder() && error.status().is_none_or(is_transient_status)
+            }
+            Self::ReadTimeout(_) | Self::HeaderTimeout(_) => true,
+            Self::Incomplete { .. }
+            | Self::RangeIgnored
+            | Self::Io { .. }
+            | Self::Interrupted(_)
+            | Self::Cancelled => false,
+        }
+    }
+
+    /// Whether a chunk may retry after this failure (given the server serves ranges).
+    pub(crate) fn is_retryable(&self) -> bool {
+        self.is_transient() || matches!(self, Self::Incomplete { .. })
+    }
 }
 
 /// Statuses that signal overload, throttling or a redirect rather than a permanent refusal.
@@ -92,6 +113,20 @@ mod tests {
             let status = StatusCode::from_u16(code).expect("status");
             assert!(!is_transient_status(status), "code {code}");
         }
+    }
+
+    #[test]
+    fn incomplete_chunks_are_retried_but_not_transient() {
+        let error = TransferError::Incomplete {
+            received: 1,
+            expected: 2,
+        };
+        assert!(error.is_retryable());
+        assert!(!error.is_transient());
+        assert!(TransferError::ReadTimeout(Duration::from_secs(1)).is_retryable());
+        assert!(TransferError::Status(StatusCode::SERVICE_UNAVAILABLE).is_transient());
+        assert!(!TransferError::Status(StatusCode::NOT_FOUND).is_retryable());
+        assert!(!TransferError::Cancelled.is_retryable());
     }
 
     #[test]
