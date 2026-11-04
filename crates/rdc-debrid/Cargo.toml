@@ -9,6 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+jiff = { workspace = true, features = ["std"] }
 reqwest = { workspace = true, features = ["charset", "form", "json", "multipart", "query", "rustls"] }
 thiserror.workspace = true
 

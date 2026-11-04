@@ -2,5 +2,7 @@
 //! the HTTP and rate-limit plumbing they share.
 
 pub mod error;
+pub mod rate_limit;
 
 pub use error::DebridError;
+pub use rate_limit::RateLimitCoordinator;
