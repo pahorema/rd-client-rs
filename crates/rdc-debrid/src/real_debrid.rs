@@ -1,7 +1,11 @@
 //! Client of the Real-Debrid REST API.
 
+use async_trait::async_trait;
 use jiff::{SignedDuration, Timestamp};
-use rdc_model::{Provider, RemoteFile, Torrent, TorrentDownloadAction, TorrentStatus};
+use rdc_model::{
+    Download, DownloadInfo, Provider, RemoteFile, Torrent, TorrentDownloadAction, TorrentStatus,
+    paths,
+};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -11,7 +15,7 @@ use crate::endpoint::Endpoint;
 use crate::error::DebridError;
 use crate::http::ProviderHttp;
 use crate::json;
-use crate::provider::{DebridUser, ProviderConfig, RemoteTorrent};
+use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
 use crate::text_rate_limit::classify_add_error;
 
 /// API host used when no alternative hostname is configured.
@@ -25,6 +29,9 @@ const PAGE_SIZE: usize = 5000;
 
 /// Raw status given to torrents Real-Debrid no longer knows.
 const DELETED_STATUS: &str = "deleted";
+
+/// How long a finished torrent with a single link may still get more links.
+const SINGLE_LINK_GRACE: SignedDuration = SignedDuration::from_secs(60);
 
 /// Real-Debrid account access.
 ///
@@ -210,6 +217,77 @@ impl RealDebrid {
         Ok(())
     }
 
+    /// The restricted links to download, without file names.
+    ///
+    /// The links are only complete once their count equals the number of
+    /// selected files or of manual entries; a single link is also accepted
+    /// once the torrent ended more than a minute ago (Real-Debrid may join
+    /// all files into one archive). Otherwise, and while the torrent has no
+    /// provider id or links, returns `None` to try again later.
+    pub async fn download_infos(
+        &self,
+        torrent: &Torrent,
+    ) -> Result<Option<Vec<DownloadInfo>>, DebridError> {
+        let Some(id) = torrent.rd_id.as_deref() else {
+            return Ok(None);
+        };
+        let Some(links) = self.info(id).await?.links else {
+            return Ok(None);
+        };
+        let infos: Vec<DownloadInfo> = links
+            .into_iter()
+            .filter(|link| !link.trim().is_empty())
+            .map(|restricted_link| DownloadInfo {
+                file_name: None,
+                restricted_link,
+            })
+            .collect();
+        let selected = torrent.files().iter().filter(|file| file.selected).count();
+        let complete = selected == infos.len()
+            || torrent.manual_files().len() == infos.len()
+            || (infos.len() == 1
+                && torrent.rd_ended.is_some_and(|ended| {
+                    Timestamp::now().duration_since(ended) > SINGLE_LINK_GRACE
+                }));
+        tracing::debug!(%id, selected, links = infos.len(), complete, "Real-Debrid download links");
+        Ok(complete.then_some(infos))
+    }
+
+    /// Turns a restricted link into a direct download URL.
+    pub async fn unrestrict(&self, link: &str) -> Result<String, DebridError> {
+        let request = self.request(Method::POST, "unrestrict/link")?.form(&[
+            ("link", link),
+            ("password", ""),
+            ("remote", "0"),
+        ]);
+        let unrestricted: Unrestricted = self.call(request).await?;
+        unrestricted
+            .download
+            .filter(|download| !download.trim().is_empty())
+            .ok_or_else(|| {
+                DebridError::InvalidResponse("Unrestrict returned an invalid download".to_owned())
+            })
+    }
+
+    /// Name of the file behind a download: the URL-decoded last segment of
+    /// its unrestricted link, empty while there is no link.
+    ///
+    /// # Errors
+    ///
+    /// [`DebridError::InvalidResponse`] when the link is not an absolute URL.
+    pub fn file_name(&self, download: &Download) -> Result<String, DebridError> {
+        let Some(link) = download
+            .link
+            .as_deref()
+            .filter(|link| !link.trim().is_empty())
+        else {
+            return Ok(String::new());
+        };
+        paths::file_name(download).ok_or_else(|| {
+            DebridError::InvalidResponse(format!("The download link {link} is not a valid URL"))
+        })
+    }
+
     /// Details of one torrent, including its files and links.
     async fn info(&self, id: &str) -> Result<RemoteTorrent, DebridError> {
         let server_offset = self.server_offset().await?;
@@ -270,6 +348,65 @@ impl RealDebrid {
     }
 }
 
+#[async_trait]
+impl DebridProvider for RealDebrid {
+    fn kind(&self) -> Provider {
+        Provider::RealDebrid
+    }
+
+    async fn list_torrents(&self) -> Result<Vec<RemoteTorrent>, DebridError> {
+        RealDebrid::list_torrents(self).await
+    }
+
+    async fn user(&self) -> Result<DebridUser, DebridError> {
+        RealDebrid::user(self).await
+    }
+
+    async fn add_magnet(&self, magnet: &str) -> Result<String, DebridError> {
+        RealDebrid::add_magnet(self, magnet).await
+    }
+
+    async fn add_torrent_file(&self, bytes: &[u8]) -> Result<String, DebridError> {
+        RealDebrid::add_torrent_file(self, bytes).await
+    }
+
+    /// Real-Debrid has no cache lookup, so nothing is known in advance.
+    async fn available_files(&self, _hash: &str) -> Result<Vec<AvailableFile>, DebridError> {
+        Ok(Vec::new())
+    }
+
+    async fn select_files(&self, torrent: &Torrent) -> Result<Option<usize>, DebridError> {
+        RealDebrid::select_files(self, torrent).await
+    }
+
+    async fn delete(&self, torrent: &Torrent) -> Result<(), DebridError> {
+        RealDebrid::delete(self, torrent).await
+    }
+
+    async fn unrestrict(&self, _torrent: &Torrent, link: &str) -> Result<String, DebridError> {
+        RealDebrid::unrestrict(self, link).await
+    }
+
+    async fn refresh(
+        &self,
+        torrent: &mut Torrent,
+        remote: Option<&RemoteTorrent>,
+    ) -> Result<(), DebridError> {
+        RealDebrid::refresh(self, torrent, remote).await
+    }
+
+    async fn download_infos(
+        &self,
+        torrent: &Torrent,
+    ) -> Result<Option<Vec<DownloadInfo>>, DebridError> {
+        RealDebrid::download_infos(self, torrent).await
+    }
+
+    async fn file_name(&self, download: &Download) -> Result<String, DebridError> {
+        RealDebrid::file_name(self, download)
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct User {
     username: Option<String>,
@@ -283,6 +420,12 @@ struct User {
 struct AddResult {
     #[serde(default)]
     id: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Unrestricted {
+    /// Direct download URL.
+    download: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

@@ -4,10 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rdc_debrid::{
-    DebridError, ProviderConfig, ProviderHttp, RateLimitCoordinator, RealDebrid, RemoteTorrent,
-    RetryPolicy,
+    DebridError, DebridProvider, ProviderConfig, ProviderHttp, RateLimitCoordinator, RealDebrid,
+    RemoteTorrent, RetryPolicy,
 };
-use rdc_model::{Provider, RemoteFile, Torrent, TorrentDownloadAction, TorrentStatus};
+use rdc_model::{Download, Provider, RemoteFile, Torrent, TorrentDownloadAction, TorrentStatus};
 use serde_json::json;
 use wiremock::matchers::{
     bearer_token, body_bytes, body_string, method, path, query_param, query_param_is_missing,
@@ -725,4 +725,200 @@ async fn deleting_a_torrent_sends_a_delete_request() {
         .delete(&torrent_with_id("ID"))
         .await
         .expect("deleted");
+}
+
+async fn mock_links(server: &MockServer, links: Option<serde_json::Value>) {
+    mock_server_time(server, "2024-05-01T12:00:00+00:00").await;
+    let mut body = json!({"id": "ID", "filename": "Name", "status": "downloaded"});
+    if let Some(links) = links {
+        body["links"] = links;
+    }
+    mock_info(server, ResponseTemplate::new(200).set_body_json(body), 1).await;
+}
+
+fn selected_torrent(selected: usize) -> Torrent {
+    let files: Vec<RemoteFile> = (0..3)
+        .map(|index| RemoteFile {
+            id: index,
+            path: format!("/Name/{index}.mkv"),
+            bytes: 1,
+            selected: usize::try_from(index).expect("small index") < selected,
+            download_link: None,
+        })
+        .collect();
+    let mut torrent = torrent_with_id("ID");
+    torrent.set_files(&files);
+    torrent
+}
+
+fn links(infos: Option<Vec<rdc_model::DownloadInfo>>) -> Option<Vec<String>> {
+    infos.map(|infos| {
+        infos
+            .into_iter()
+            .inspect(|info| assert_eq!(info.file_name, None))
+            .map(|info| info.restricted_link)
+            .collect()
+    })
+}
+
+#[tokio::test]
+async fn download_infos_need_a_provider_id() {
+    let server = MockServer::start().await;
+
+    let infos = client(&server)
+        .download_infos(&Torrent::default())
+        .await
+        .expect("no id");
+
+    assert_eq!(infos, None);
+}
+
+#[tokio::test]
+async fn download_infos_wait_for_links() {
+    let server = MockServer::start().await;
+    mock_links(&server, None).await;
+
+    let infos = client(&server)
+        .download_infos(&selected_torrent(1))
+        .await
+        .expect("infos");
+
+    assert_eq!(infos, None);
+}
+
+#[tokio::test]
+async fn download_infos_are_complete_with_one_link_per_selected_file() {
+    let server = MockServer::start().await;
+    mock_links(
+        &server,
+        Some(json!(["https://rd/d/1", " ", "https://rd/d/2"])),
+    )
+    .await;
+
+    let infos = client(&server)
+        .download_infos(&selected_torrent(2))
+        .await
+        .expect("infos");
+
+    assert_eq!(
+        links(infos),
+        Some(vec![
+            "https://rd/d/1".to_owned(),
+            "https://rd/d/2".to_owned()
+        ])
+    );
+}
+
+#[tokio::test]
+async fn download_infos_are_complete_with_one_link_per_manual_file() {
+    let server = MockServer::start().await;
+    mock_links(&server, Some(json!(["https://rd/d/1", "https://rd/d/2"]))).await;
+    let mut torrent = selected_torrent(3);
+    torrent.download_manual_files = Some("0.mkv,2.mkv".to_owned());
+
+    let infos = client(&server)
+        .download_infos(&torrent)
+        .await
+        .expect("infos");
+
+    assert_eq!(links(infos).map(|links| links.len()), Some(2));
+}
+
+#[tokio::test]
+async fn a_single_link_is_accepted_a_minute_after_the_torrent_ended() {
+    let server = MockServer::start().await;
+    mock_links(&server, Some(json!(["https://rd/d/archive"]))).await;
+    let mut torrent = selected_torrent(3);
+    torrent.rd_ended = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(61));
+
+    let infos = client(&server)
+        .download_infos(&torrent)
+        .await
+        .expect("infos");
+
+    assert_eq!(links(infos), Some(vec!["https://rd/d/archive".to_owned()]));
+}
+
+#[tokio::test]
+async fn a_single_link_of_a_just_ended_torrent_is_not_ready() {
+    let server = MockServer::start().await;
+    mock_links(&server, Some(json!(["https://rd/d/archive"]))).await;
+    let mut torrent = selected_torrent(3);
+    torrent.rd_ended = Some(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(10));
+
+    let infos = client(&server)
+        .download_infos(&torrent)
+        .await
+        .expect("infos");
+
+    assert_eq!(infos, None);
+}
+
+#[tokio::test]
+async fn unrestricting_posts_the_link_and_returns_the_download_url() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rest/1.0/unrestrict/link"))
+        .and(body_string(
+            "link=https%3A%2F%2Frd%2Fd%2F1&password=&remote=0",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"id": "X", "filename": "a.mkv", "download": "https://cdn.rd/d/X/a.mkv"}),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let url = client(&server)
+        .unrestrict("https://rd/d/1")
+        .await
+        .expect("unrestricted");
+
+    assert_eq!(url, "https://cdn.rd/d/X/a.mkv");
+}
+
+#[tokio::test]
+async fn unrestricting_without_download_url_fails() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rest/1.0/unrestrict/link"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "X"})))
+        .mount(&server)
+        .await;
+
+    let error = client(&server)
+        .unrestrict("https://rd/d/1")
+        .await
+        .expect_err("no download");
+
+    assert_eq!(error.to_string(), "Unrestrict returned an invalid download");
+}
+
+#[tokio::test]
+async fn file_names_come_from_the_unrestricted_link() {
+    let server = MockServer::start().await;
+    let client = client(&server);
+    let download = Download {
+        link: Some("https://cdn.rd/d/X/My%20Show%20E01.mkv".to_owned()),
+        ..Download::default()
+    };
+
+    assert_eq!(
+        client.file_name(&download).expect("name"),
+        "My Show E01.mkv"
+    );
+    assert_eq!(client.file_name(&Download::default()).expect("no link"), "");
+}
+
+#[tokio::test]
+async fn the_provider_trait_reports_real_debrid_without_cached_files() {
+    let server = MockServer::start().await;
+    let client = client(&server);
+    let provider: &dyn DebridProvider = &client;
+
+    assert_eq!(provider.kind(), Provider::RealDebrid);
+    assert_eq!(
+        provider.available_files("abc").await.expect("files"),
+        Vec::new()
+    );
 }
