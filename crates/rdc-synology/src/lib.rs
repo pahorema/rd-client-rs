@@ -4,6 +4,7 @@
 //! configuration, and File Station folder creation. It only speaks the protocol and knows
 //! nothing about torrents.
 
+mod codes;
 mod error;
 
-pub use error::Error;
+pub use error::{ApiError, Error, ErrorDetail, SESSION_ERROR_CODES};
