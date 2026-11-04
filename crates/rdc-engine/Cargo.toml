@@ -9,6 +9,25 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+fs4.workspace = true
+jiff = { workspace = true, features = ["std", "serde"] }
+rdc-model.workspace = true
+rdc-torrent = { path = "../rdc-torrent" }
+reqwest = { workspace = true, features = ["rustls", "json"] }
+semver.workspace = true
+serde = { workspace = true, features = ["derive"] }
+shell-words.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+tracing-subscriber = { workspace = true, features = ["fmt", "registry"] }
+wiremock.workspace = true
 
 [lints]
 workspace = true
