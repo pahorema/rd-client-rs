@@ -12,6 +12,7 @@
 	import ListIcon from '@lucide/svelte/icons/list';
 	import MenuIcon from '@lucide/svelte/icons/menu';
 	import PlusIcon from '@lucide/svelte/icons/plus';
+	import SettingsIcon from '@lucide/svelte/icons/settings';
 	import { onMount } from 'svelte';
 
 	/** Primary navigation; `routes` are the route ids that mark the link as current. */
@@ -22,7 +23,13 @@
 			label: 'Torrents',
 			icon: ListIcon
 		},
-		{ href: resolve('add'), routes: ['/(app)/add'], label: 'Add torrent', icon: PlusIcon }
+		{ href: resolve('add'), routes: ['/(app)/add'], label: 'Add torrent', icon: PlusIcon },
+		{
+			href: resolve('settings'),
+			routes: ['/(app)/settings'],
+			label: 'Settings',
+			icon: SettingsIcon
+		}
 	];
 
 	let version = $state<string | null>(null);
