@@ -47,6 +47,13 @@ pub enum Error {
 }
 
 impl Error {
+    /// The message shown to the user when unpacking the download `link` of the torrent
+    /// `torrent_name` failed with this error.
+    pub fn unpack_failure_message(&self, link: Option<&str>, torrent_name: &str) -> String {
+        let link = link.unwrap_or_default();
+        format!("An unexpected error occurred unpacking {link} for torrent {torrent_name}: {self}")
+    }
+
     /// Builds a closure mapping an [`io::Error`] to [`Error::Io`] for `path`.
     pub(crate) fn io(action: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Self {
         move |source| Self::Io {
