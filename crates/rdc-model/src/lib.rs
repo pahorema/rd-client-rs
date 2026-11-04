@@ -6,6 +6,7 @@ mod download;
 mod enums;
 mod filter;
 mod remote_file;
+mod size;
 mod torrent;
 
 pub use download::{Download, DownloadInfo};
@@ -16,4 +17,5 @@ pub use enums::{
 };
 pub use filter::{FileFilter, FilterError};
 pub use remote_file::RemoteFile;
+pub use size::format_size;
 pub use torrent::Torrent;
