@@ -1,5 +1,13 @@
 //! Configuration of the internal HTTP engine.
 
+use std::time::Duration;
+
+/// Per-read timeout used when the configured timeout is `0` or negative.
+const DEFAULT_TIMEOUT_MS: u64 = 1000;
+/// Shortest accepted per-read timeout.
+const MIN_TIMEOUT_MS: u64 = 100;
+/// Shortest wait for response headers.
+const MIN_HEADER_TIMEOUT_MS: u64 = 1000;
 /// Buffer size used when the configured size is `0` or negative.
 const DEFAULT_BUFFER_SIZE: usize = 64 * 1024;
 /// Smallest buffer used for reads and writes.
@@ -10,10 +18,12 @@ const MAX_BUFFER_SIZE: usize = 64 * 1024 * 1024;
 /// Settings of the internal HTTP engine, re-read live while a download runs.
 ///
 /// Integer fields take the raw values of the settings they come from; out-of-range values
-/// are normalised as documented on each field. The buffer size applies to connections opened
-/// afterwards.
+/// are normalised as documented on each field. The timeout and buffer size apply to
+/// connections opened afterwards.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InternalConfig {
+    /// Per-read timeout in milliseconds; `0` or less means 1000, at least 100.
+    pub timeout_ms: i32,
     /// Read/write buffer of each connection in bytes; `0` or less means 64 KiB.
     pub buffer_size: i32,
 }
@@ -22,6 +32,21 @@ impl InternalConfig {
     /// Creates the configuration with every value at its normalised default.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn read_timeout(&self) -> Duration {
+        let millis = u64::try_from(self.timeout_ms)
+            .ok()
+            .filter(|millis| *millis > 0)
+            .unwrap_or(DEFAULT_TIMEOUT_MS)
+            .max(MIN_TIMEOUT_MS);
+        Duration::from_millis(millis)
+    }
+
+    /// How long to wait for response headers.
+    pub(crate) fn header_timeout(&self) -> Duration {
+        self.read_timeout()
+            .max(Duration::from_millis(MIN_HEADER_TIMEOUT_MS))
     }
 
     pub(crate) fn effective_buffer_size(&self) -> usize {
@@ -38,8 +63,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn timeout_defaults_to_one_second_and_is_at_least_100_ms() {
+        let timeout = |timeout_ms| {
+            InternalConfig {
+                timeout_ms,
+                ..InternalConfig::new()
+            }
+            .read_timeout()
+        };
+        assert_eq!(timeout(0), Duration::from_millis(1000));
+        assert_eq!(timeout(-5), Duration::from_millis(1000));
+        assert_eq!(timeout(20), Duration::from_millis(100));
+        assert_eq!(timeout(5000), Duration::from_millis(5000));
+    }
+
+    #[test]
+    fn header_timeout_is_at_least_one_second() {
+        let mut config = InternalConfig {
+            timeout_ms: 200,
+            ..InternalConfig::new()
+        };
+        assert_eq!(config.header_timeout(), Duration::from_millis(1000));
+        config.timeout_ms = 3000;
+        assert_eq!(config.header_timeout(), Duration::from_millis(3000));
+    }
+
+    #[test]
     fn buffer_size_is_defaulted_and_bounded() {
-        let buffer = |buffer_size| InternalConfig { buffer_size }.effective_buffer_size();
+        let buffer = |buffer_size| {
+            InternalConfig {
+                buffer_size,
+                ..InternalConfig::new()
+            }
+            .effective_buffer_size()
+        };
         assert_eq!(buffer(0), 64 * 1024);
         assert_eq!(buffer(10), 4 * 1024);
         assert_eq!(buffer(4 * 1024 * 1024), 4 * 1024 * 1024);

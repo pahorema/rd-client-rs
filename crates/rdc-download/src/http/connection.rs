@@ -72,9 +72,12 @@ impl Context {
             .header(ACCEPT, "*/*")
             .header(ACCEPT_ENCODING, "identity")
             .header(CACHE_CONTROL, "no-cache");
-        let response = Self::cancellable(cancel, request.send())
-            .await?
-            .map_err(TransferError::Http)?;
+        let limit = self.config.borrow().header_timeout();
+        let response =
+            match Self::cancellable(cancel, tokio::time::timeout(limit, request.send())).await? {
+                Ok(result) => result.map_err(TransferError::Http)?,
+                Err(_) => return Err(TransferError::HeaderTimeout(limit)),
+            };
         if !response.status().is_success() {
             return Err(TransferError::Status(response.status()));
         }

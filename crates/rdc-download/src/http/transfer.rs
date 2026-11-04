@@ -41,12 +41,16 @@ pub(crate) async fn fetch_file(
     let io_error = |error| TransferError::io(partial, error);
     let mut response = context.get(url, &context.cancel).await?;
     let file = File::create(partial).await.map_err(io_error)?;
-    let mut writer = BufWriter::with_capacity(context.config().effective_buffer_size(), file);
+    let config = context.config();
+    let timeout = config.read_timeout();
+    let mut writer = BufWriter::with_capacity(config.effective_buffer_size(), file);
     loop {
-        let bytes = match Context::cancellable(&context.cancel, response.chunk()).await? {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => break,
-            Err(error) => return Err(TransferError::Http(error)),
+        let read = tokio::time::timeout(timeout, response.chunk());
+        let bytes = match Context::cancellable(&context.cancel, read).await? {
+            Err(_) => return Err(TransferError::ReadTimeout(timeout)),
+            Ok(Ok(Some(bytes))) => bytes,
+            Ok(Ok(None)) => break,
+            Ok(Err(error)) => return Err(TransferError::Http(error)),
         };
         writer.write_all(&bytes).await.map_err(io_error)?;
         context.add_received(u64::try_from(bytes.len()).unwrap_or(u64::MAX));

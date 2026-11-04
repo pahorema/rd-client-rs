@@ -3,6 +3,7 @@
 use std::error::Error as _;
 use std::io;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use reqwest::StatusCode;
 
@@ -20,6 +21,10 @@ pub(crate) enum TransferError {
     // The message already carries the causes, so they are not repeated as a source.
     #[error("{}", describe(.0))]
     Http(reqwest::Error),
+    #[error("No data was received for {} ms.", .0.as_millis())]
+    ReadTimeout(Duration),
+    #[error("The server did not respond within {} ms.", .0.as_millis())]
+    HeaderTimeout(Duration),
     #[error("Unable to write {}: {source}", .path.display())]
     Io {
         path: PathBuf,

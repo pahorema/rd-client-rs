@@ -9,7 +9,7 @@ use std::time::Duration;
 use rdc_download::{
     CANCELLED_MESSAGE, DownloadEngine, HttpDownload, InternalConfig, Outcome, Progress,
 };
-use support::{FileOptions, Reply, TestServer, test_data};
+use support::{FileOptions, Reply, TestServer, file_reply, test_data};
 use tokio::sync::watch;
 
 const WAIT_LIMIT: Duration = Duration::from_secs(15);
@@ -204,4 +204,30 @@ async fn cancel_stops_the_download_and_removes_the_partial_file() {
     assert!(!run.target.exists());
     run.download.cancel().await;
     assert_eq!(run.finish().await, Err(CANCELLED_MESSAGE.to_owned()));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stalled_reads_fail_with_a_timeout() {
+    let data = test_data(32 * 1024);
+    let server = {
+        let data = Arc::clone(&data);
+        TestServer::start(move |request| {
+            let options = FileOptions {
+                ranges: false,
+                ..FileOptions::default()
+            };
+            let mut reply = file_reply(&data, request, &options);
+            reply.stall_after = Some((4096, Duration::from_secs(5)));
+            reply
+        })
+        .await
+    };
+    let fast_timeout = InternalConfig {
+        timeout_ms: 150,
+        ..config()
+    };
+    let (run, outcome) = download(&server.url("/file.bin"), fast_timeout).await;
+    assert_eq!(outcome, Err("No data was received for 150 ms.".to_owned()));
+    assert!(!run.target.exists());
+    assert!(!run.partial().exists());
 }
