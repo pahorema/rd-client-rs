@@ -1,7 +1,7 @@
 //! The `DownloadClient` settings group.
 
 use super::field::section;
-use crate::DownloadClient;
+use crate::{DownloadClient, DownloadClientLogLevel};
 
 /// How finished files reach the host (`DownloadClient:*` keys).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +31,29 @@ pub struct DownloadClientSettings {
     pub bind_to_specific_ip: bool,
     /// Local address the internal downloader binds to.
     pub bind_ip_address: Option<String>,
+    /// aria2 JSON-RPC endpoint.
+    pub aria2c_url: String,
+    /// aria2 RPC secret.
+    pub aria2c_secret: String,
+    /// Download root on the aria2 host; the download path when unset.
+    pub aria2c_download_path: Option<String>,
+    /// rclone mount searched by the symlink downloader (a trailing `*`
+    /// also searches sub-directories).
+    pub rclone_mount_path: String,
+    /// Synology Download Station URL.
+    pub download_station_url: String,
+    /// Synology account name.
+    pub download_station_username: Option<String>,
+    /// Synology account password.
+    pub download_station_password: Option<String>,
+    /// Download root on the Synology; its default destination when unset.
+    pub download_station_download_path: Option<String>,
+    /// Free space in GB below which internal downloads pause; 0 disables.
+    pub minimum_free_space_gb: i32,
+    /// Minutes between free space checks.
+    pub disk_space_check_interval_minutes: i32,
+    /// Verbosity of the download client log.
+    pub log_level: DownloadClientLogLevel,
 }
 
 impl Default for DownloadClientSettings {
@@ -48,6 +71,17 @@ impl Default for DownloadClientSettings {
             proxy_server: None,
             bind_to_specific_ip: false,
             bind_ip_address: None,
+            aria2c_url: "http://127.0.0.1:6800/jsonrpc".to_owned(),
+            aria2c_secret: "mysecret123".to_owned(),
+            aria2c_download_path: None,
+            rclone_mount_path: "/mnt/rd/".to_owned(),
+            download_station_url: "http://127.0.0.1:5000".to_owned(),
+            download_station_username: None,
+            download_station_password: None,
+            download_station_download_path: None,
+            minimum_free_space_gb: 0,
+            disk_space_check_interval_minutes: 5,
+            log_level: DownloadClientLogLevel::None,
         }
     }
 }
@@ -113,6 +147,58 @@ section! {
             display_name: "Bind IP address (Internal downloader only)",
             description: "Local IP address the Internal downloader binds its downloads to. \
                 Must be assigned to an active network adapter on this host.",
+        },
+        "Aria2cUrl" => aria2c_url: String {
+            display_name: "Aria2c URL (only used for the Aria2c Downloader)",
+            description: "This is the URL to your Aria2c instance. It must end in /jsonrpc. A common URL is\n\
+                http://127.0.0.1:6800/jsonrpc.",
+        },
+        "Aria2cSecret" => aria2c_secret: String {
+            display_name: "Aria2c Secret (only used for the Aria2c Downloader)",
+            description: "The secret of your Aria2c instance. Optional.",
+        },
+        "Aria2cDownloadPath" => aria2c_download_path: Option<String> {
+            display_name: "Aria2c Download Path",
+            description: "The root path to download the file to on the Aria2c host, \
+                if empty use the Download path setting.",
+        },
+        "RcloneMountPath" => rclone_mount_path: String {
+            display_name: "Rclone mount path (only used for the Symlink Downloader)",
+            description: "Path where Rclone is mounted. Required for Symlink Downloader. \
+                Suffix this path with a * to search subdirectories too.",
+        },
+        "DownloadStationUrl" => download_station_url: String {
+            display_name: "Synology DownloadStation URL",
+            description: "The URL to the Synology DownloadStation. A common URL is http://127.0.0.1:5000",
+        },
+        "DownloadStationUsername" => download_station_username: Option<String> {
+            display_name: "Synology DownloadStation Username",
+            description: "The username to use when connecting to the Synology DownloadStation. \
+                The account needs Download Station and File Station permissions \
+                (so the per-download destination folder can be created).",
+        },
+        "DownloadStationPassword" => download_station_password: Option<String> {
+            display_name: "Synology DownloadStation Password",
+            description: "The password to use when connecting to the Synology DownloadStation.",
+        },
+        "DownloadStationDownloadPath" => download_station_download_path: Option<String> {
+            display_name: "Synology DownloadStation Download Path",
+            description: "The root path to download the file on the Synology DownloadStation host, \
+                if empty the default DownloadStation path is used.",
+        },
+        "MinimumFreeSpaceGB" => minimum_free_space_gb: i32 {
+            display_name: "Minimum free disk space (GB) (Internal downloader only)",
+            description: "Minimum free disk space in GB. Internal downloader downloads will pause \
+                when space falls below this value and will resume only when double this space is available. \
+                Set to 0 to disable.",
+        },
+        "DiskSpaceCheckIntervalMinutes" => disk_space_check_interval_minutes: i32 {
+            display_name: "Disk space check interval (minutes)",
+            description: "How often to check available disk space, in minutes.",
+        },
+        "LogLevel" => log_level: DownloadClientLogLevel {
+            display_name: "Log level",
+            description: "Only set when trying to debug a download client, can generate a lot of logs.",
         },
     }
 }

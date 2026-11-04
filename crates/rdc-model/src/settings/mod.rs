@@ -132,7 +132,7 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AuthenticationType, DownloadClient, LogLevel};
+    use crate::{AuthenticationType, DownloadClient, DownloadClientLogLevel, LogLevel};
 
     /// The default stored rows whose key starts with `prefix`.
     fn default_rows(prefix: &str) -> Vec<(&'static str, Option<String>)> {
@@ -183,6 +183,23 @@ mod tests {
             ("DownloadClient:ProxyServer", None),
             ("DownloadClient:BindToSpecificIp", Some("False")),
             ("DownloadClient:BindIpAddress", None),
+            (
+                "DownloadClient:Aria2cUrl",
+                Some("http://127.0.0.1:6800/jsonrpc"),
+            ),
+            ("DownloadClient:Aria2cSecret", Some("mysecret123")),
+            ("DownloadClient:Aria2cDownloadPath", None),
+            ("DownloadClient:RcloneMountPath", Some("/mnt/rd/")),
+            (
+                "DownloadClient:DownloadStationUrl",
+                Some("http://127.0.0.1:5000"),
+            ),
+            ("DownloadClient:DownloadStationUsername", None),
+            ("DownloadClient:DownloadStationPassword", None),
+            ("DownloadClient:DownloadStationDownloadPath", None),
+            ("DownloadClient:MinimumFreeSpaceGB", Some("0")),
+            ("DownloadClient:DiskSpaceCheckIntervalMinutes", Some("5")),
+            ("DownloadClient:LogLevel", Some("5")),
         ]);
         assert_eq!(default_rows("DownloadClient:"), expected);
     }
@@ -197,12 +214,16 @@ mod tests {
         settings
             .apply("DownloadClient:Client", Some("Symlink"))
             .unwrap();
+        settings
+            .apply("DownloadClient:LogLevel", Some("Debug"))
+            .unwrap();
         settings.apply("DownloadClient:DownloadPath", None).unwrap();
         settings
             .apply("DownloadClient:BindToSpecificIp", Some("TRUE"))
             .unwrap();
         let group = &settings.download_client;
         assert_eq!(group.client, DownloadClient::Symlink);
+        assert_eq!(group.log_level, DownloadClientLogLevel::Debug);
         assert_eq!(group.download_path, "");
         assert!(group.bind_to_specific_ip);
         assert_eq!(
