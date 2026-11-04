@@ -2,8 +2,9 @@
 
 use std::time::Duration;
 
+use async_trait::async_trait;
 use jiff::Timestamp;
-use rdc_model::{Provider, RemoteFile, Torrent, TorrentStatus};
+use rdc_model::{Download, DownloadInfo, Provider, RemoteFile, Torrent, TorrentStatus, paths};
 use reqwest::multipart::{Form, Part};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
@@ -15,7 +16,7 @@ use crate::endpoint::Endpoint;
 use crate::error::DebridError;
 use crate::http::ProviderHttp;
 use crate::json;
-use crate::provider::{DebridUser, ProviderConfig, RemoteTorrent};
+use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
 use crate::text_rate_limit::classify_add_error;
 
 /// Root of the AllDebrid API.
@@ -251,6 +252,94 @@ impl AllDebrid {
         Ok(())
     }
 
+    /// Counts the files to download; AllDebrid downloads every file, so
+    /// nothing is sent. Without stored files they are loaded from
+    /// `magnet/files`; `None` while none are known yet.
+    pub async fn select_files(&self, torrent: &Torrent) -> Result<Option<usize>, DebridError> {
+        let stored = torrent.files().len();
+        if stored > 0 {
+            return Ok(Some(stored));
+        }
+        let Some(id) = torrent.rd_id.as_deref() else {
+            return Ok(None);
+        };
+        let count = self.files(id).await?.len();
+        Ok((count > 0).then_some(count))
+    }
+
+    /// The links of the files that pass the torrent's file filter, named
+    /// after the files; `None` while the torrent has no provider id.
+    pub async fn download_infos(
+        &self,
+        torrent: &Torrent,
+    ) -> Result<Option<Vec<DownloadInfo>>, DebridError> {
+        let Some(id) = torrent.rd_id.as_deref() else {
+            return Ok(None);
+        };
+        let filter = torrent.file_filter()?;
+        let mut infos = Vec::new();
+        for file in self.files(id).await? {
+            if !filter.is_downloadable(&file.path, file.bytes)? {
+                continue;
+            }
+            let Some(restricted_link) = file.download_link else {
+                continue;
+            };
+            let name = file.path.rsplit('/').next().unwrap_or(&file.path);
+            infos.push(DownloadInfo {
+                file_name: Some(name.to_owned()),
+                restricted_link,
+            });
+        }
+        Ok(Some(infos))
+    }
+
+    /// Name of the file behind a download: the name stored with the
+    /// download, else the last segment of its link, else empty.
+    pub fn file_name(&self, download: &Download) -> String {
+        download
+            .file_name
+            .clone()
+            .or_else(|| paths::file_name(download))
+            .unwrap_or_default()
+    }
+
+    /// Path of a download inside the rclone mount: the matching provider
+    /// file path, below the torrent folder unless the torrent has a single
+    /// file. `None` without file or torrent name.
+    ///
+    /// # Errors
+    ///
+    /// [`DebridError::Provider`] when no provider file ends with the name.
+    pub fn symlink_path(
+        &self,
+        torrent: &Torrent,
+        download: &Download,
+    ) -> Result<Option<String>, DebridError> {
+        let (Some(file_name), Some(rd_name)) =
+            (paths::file_name(download), torrent.rd_name.as_deref())
+        else {
+            return Ok(None);
+        };
+        let files = torrent.files();
+        let found = files.iter().find(|file| {
+            !file_name.is_empty() && !file.path.trim().is_empty() && file.path.ends_with(&file_name)
+        });
+        let Some(found) = found else {
+            return Err(DebridError::Provider(format!(
+                "Could not find file {file_name} in {rd_name}"
+            )));
+        };
+        if files.len() == 1 {
+            return Ok(Some(found.path.clone()));
+        }
+        Ok(Some(format!(
+            "{}/{}",
+            paths::remove_invalid_path_chars(rd_name),
+            found.path
+        )))
+    }
+
     /// Status of one magnet, including its files once ready.
     async fn status(&self, id: &str) -> Result<RemoteTorrent, DebridError> {
         let request = self
@@ -418,6 +507,73 @@ struct MagnetFiles {
     #[serde(default, deserialize_with = "json::one_or_many")]
     files: Option<Vec<FileNode>>,
     error: Option<ApiError>,
+}
+
+#[async_trait]
+impl DebridProvider for AllDebrid {
+    fn kind(&self) -> Provider {
+        Provider::AllDebrid
+    }
+
+    async fn list_torrents(&self) -> Result<Vec<RemoteTorrent>, DebridError> {
+        AllDebrid::list_torrents(self).await
+    }
+
+    async fn user(&self) -> Result<DebridUser, DebridError> {
+        AllDebrid::user(self).await
+    }
+
+    async fn add_magnet(&self, magnet: &str) -> Result<String, DebridError> {
+        AllDebrid::add_magnet(self, magnet).await
+    }
+
+    async fn add_torrent_file(&self, bytes: &[u8]) -> Result<String, DebridError> {
+        AllDebrid::add_torrent_file(self, bytes).await
+    }
+
+    /// AllDebrid has no cache lookup, so nothing is known in advance.
+    async fn available_files(&self, _hash: &str) -> Result<Vec<AvailableFile>, DebridError> {
+        Ok(Vec::new())
+    }
+
+    async fn select_files(&self, torrent: &Torrent) -> Result<Option<usize>, DebridError> {
+        AllDebrid::select_files(self, torrent).await
+    }
+
+    async fn delete(&self, torrent: &Torrent) -> Result<(), DebridError> {
+        AllDebrid::delete(self, torrent).await
+    }
+
+    async fn unrestrict(&self, _torrent: &Torrent, link: &str) -> Result<String, DebridError> {
+        AllDebrid::unrestrict(self, link).await
+    }
+
+    async fn refresh(
+        &self,
+        torrent: &mut Torrent,
+        remote: Option<&RemoteTorrent>,
+    ) -> Result<(), DebridError> {
+        AllDebrid::refresh(self, torrent, remote).await
+    }
+
+    async fn download_infos(
+        &self,
+        torrent: &Torrent,
+    ) -> Result<Option<Vec<DownloadInfo>>, DebridError> {
+        AllDebrid::download_infos(self, torrent).await
+    }
+
+    async fn file_name(&self, download: &Download) -> Result<String, DebridError> {
+        Ok(AllDebrid::file_name(self, download))
+    }
+
+    fn symlink_path(
+        &self,
+        torrent: &Torrent,
+        download: &Download,
+    ) -> Result<Option<String>, DebridError> {
+        AllDebrid::symlink_path(self, torrent, download)
+    }
 }
 
 /// Copies `remote` into the torrent's `rd_*` fields; `files` replace the

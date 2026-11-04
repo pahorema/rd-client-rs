@@ -6,7 +6,7 @@ use std::time::Duration;
 use rdc_debrid::{
     AllDebrid, DebridError, ProviderConfig, ProviderHttp, RateLimitCoordinator, RetryPolicy,
 };
-use rdc_model::{Provider, Torrent, TorrentStatus};
+use rdc_model::{Download, Provider, RemoteFile, Torrent, TorrentStatus};
 use serde_json::json;
 use wiremock::matchers::{bearer_token, body_string_contains, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -682,4 +682,97 @@ async fn refreshing_a_ready_magnet_without_files_loads_them() {
         .expect("refreshed");
 
     assert_eq!(torrent.files().len(), 2);
+}
+
+#[tokio::test]
+async fn selecting_files_counts_the_known_files() {
+    let server = MockServer::start().await;
+    mock_files(&server, tree(), 1).await;
+    let client = client(&server);
+    let mut stored = torrent_with_id("1");
+    stored.set_files(&[RemoteFile::default()]);
+
+    assert_eq!(client.select_files(&stored).await.expect("stored"), Some(1));
+    assert_eq!(
+        client
+            .select_files(&torrent_with_id("1"))
+            .await
+            .expect("loaded"),
+        Some(2)
+    );
+}
+
+#[tokio::test]
+async fn download_infos_need_a_provider_id() {
+    let server = MockServer::start().await;
+
+    let infos = client(&server)
+        .download_infos(&Torrent::default())
+        .await
+        .expect("no id");
+
+    assert_eq!(infos, None);
+}
+
+#[tokio::test]
+async fn download_infos_keep_the_files_passing_the_filter() {
+    let server = MockServer::start().await;
+    mock_files(&server, tree(), 1).await;
+    let mut torrent = torrent_with_id("1");
+    torrent.exclude_regex = Some("^folder/file2".to_owned());
+
+    let infos = client(&server)
+        .download_infos(&torrent)
+        .await
+        .expect("infos")
+        .expect("ready");
+
+    assert_eq!(infos.len(), 1);
+    assert_eq!(infos[0].file_name.as_deref(), Some("file1.txt"));
+    assert_eq!(infos[0].restricted_link, "https://fake.url/file1.txt");
+}
+
+#[tokio::test]
+async fn download_infos_are_empty_when_every_file_is_excluded() {
+    let server = MockServer::start().await;
+    mock_files(&server, tree(), 1).await;
+    let mut torrent = torrent_with_id("1");
+    torrent.include_regex = Some(r"\.mkv$".to_owned());
+
+    let infos = client(&server)
+        .download_infos(&torrent)
+        .await
+        .expect("infos");
+
+    assert_eq!(infos, Some(Vec::new()));
+}
+
+#[tokio::test]
+async fn symlink_paths_use_the_provider_file_path() {
+    let server = MockServer::start().await;
+    let client = client(&server);
+    let download = Download {
+        link: Some("https://cdn/dl/file2.txt".to_owned()),
+        file_name: Some("file2.txt".to_owned()),
+        ..Download::default()
+    };
+    let file = |path: &str| RemoteFile {
+        path: path.to_owned(),
+        ..RemoteFile::default()
+    };
+    let mut torrent = torrent_with_id("1");
+    torrent.rd_name = Some("Name".to_owned());
+
+    torrent.set_files(&[file("folder/file2.txt")]);
+    assert_eq!(
+        client.symlink_path(&torrent, &download).expect("single"),
+        Some("folder/file2.txt".to_owned())
+    );
+    torrent.set_files(&[file("file1.txt"), file("folder/file2.txt")]);
+    assert_eq!(
+        client.symlink_path(&torrent, &download).expect("several"),
+        Some("Name/folder/file2.txt".to_owned())
+    );
+    torrent.set_files(&[file("file1.txt")]);
+    assert!(client.symlink_path(&torrent, &download).is_err());
 }
