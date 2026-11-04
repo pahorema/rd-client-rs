@@ -195,3 +195,72 @@ impl<'src> Parser<'src> {
         Ok(bytes)
     }
 }
+
+/// Encodes canonical bencode, sorting dictionary keys by their bytes.
+#[must_use]
+pub fn encode(node: &Node<'_>) -> Vec<u8> {
+    let mut out = Vec::new();
+    encode_into(node, &mut out);
+    out
+}
+fn encode_into(node: &Node<'_>, out: &mut Vec<u8>) {
+    match &node.value {
+        Value::Integer(n) => {
+            out.push(b'i');
+            out.extend_from_slice(n.to_string().as_bytes());
+            out.push(b'e');
+        }
+        Value::Bytes(s) => encode_bytes(s, out),
+        Value::List(items) => {
+            out.push(b'l');
+            for item in items {
+                encode_into(item, out);
+            }
+            out.push(b'e');
+        }
+        Value::Dictionary(items) => {
+            out.push(b'd');
+            for (key, item) in items {
+                encode_bytes(key, out);
+                encode_into(item, out);
+            }
+            out.push(b'e');
+        }
+    }
+}
+fn encode_bytes(bytes: &[u8], out: &mut Vec<u8>) {
+    out.extend_from_slice(bytes.len().to_string().as_bytes());
+    out.push(b':');
+    out.extend_from_slice(bytes);
+}
+
+impl<'src> Node<'src> {
+    /// Returns byte-string contents when this node is a string.
+    pub fn bytes(&self) -> Option<&'src [u8]> {
+        if let Value::Bytes(s) = self.value {
+            Some(s)
+        } else {
+            None
+        }
+    }
+    /// Returns list contents when this node is a list.
+    pub fn list(&self) -> Option<&[Self]> {
+        if let Value::List(s) = &self.value {
+            Some(s)
+        } else {
+            None
+        }
+    }
+    /// Looks up a dictionary entry by its raw key.
+    pub fn get(&self, key: &[u8]) -> Option<&Self> {
+        if let Value::Dictionary(s) = &self.value {
+            s.get(key)
+        } else {
+            None
+        }
+    }
+    /// Constructs a node without a source span.
+    pub fn new(value: Value<'src>) -> Self {
+        Self { value, span: 0..0 }
+    }
+}

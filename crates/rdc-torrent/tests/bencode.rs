@@ -1,6 +1,19 @@
 use rdc_torrent::bencode::{self, Limits, Value};
 
 #[test]
+fn preserves_raw_spans_and_sorts_keys() {
+    let input = b"d1:zi-23e1:al0:3:\x00\xffxee";
+    let node = bencode::decode(input).unwrap();
+    assert_eq!(&input[node.get(b"z").unwrap().span.clone()], b"i-23e");
+    let canonical = bencode::encode(&node);
+    assert_eq!(canonical, b"d1:al0:3:\x00\xffxe1:zi-23ee");
+    assert_eq!(
+        bencode::encode(&bencode::decode(&canonical).unwrap()),
+        canonical
+    );
+}
+
+#[test]
 fn rejects_malformed_tokens_with_offsets() {
     for input in [
         b"".as_slice(),
@@ -46,4 +59,22 @@ fn bounds_depth_size_and_node_count() {
     }
     let nested = [vec![b'l'; 1000], vec![b'e'; 1000]].concat();
     assert!(bencode::decode(&nested).is_err());
+}
+
+#[test]
+fn random_bytes_never_panic() {
+    let mut state = 17u64;
+    for length in 0..512 {
+        let mut bytes = vec![0; length];
+        for byte in &mut bytes {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *byte = state.to_le_bytes()[0];
+        }
+        if let Ok(node) = bencode::decode(&bytes) {
+            let encoded = bencode::encode(&node);
+            assert!(bencode::decode(&encoded).is_ok());
+        }
+    }
 }
