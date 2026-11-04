@@ -8,13 +8,14 @@ use std::fmt;
 use std::time::Duration;
 
 use jiff::Timestamp;
+use reqwest::multipart::{Form, Part};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, IgnoredAny};
 
 use crate::error::DebridError;
 use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp};
-use crate::provider::{DebridUser, ProviderConfig};
+use crate::provider::{DebridUser, ProviderConfig, RemoteTorrent};
 
 /// Address of the Premiumize API.
 pub const DEFAULT_BASE_URL: &str = "https://www.premiumize.me/api/";
@@ -98,6 +99,52 @@ impl Premiumize {
         })
     }
 
+    /// Lists every transfer of the account.
+    pub async fn list_torrents(&self) -> Result<Vec<RemoteTorrent>, DebridError> {
+        Ok(self
+            .transfers()
+            .await?
+            .iter()
+            .map(Transfer::to_remote)
+            .collect())
+    }
+
+    /// Adds a magnet link and returns the id of the new transfer.
+    pub async fn add_magnet(&self, magnet: &str) -> Result<String, DebridError> {
+        let request = self
+            .request(Method::POST, "transfer/create", &[])?
+            .form(&[("src", magnet), ("folder_id", "")]);
+        created_id(self.call(request).await?, "magnet link")
+    }
+
+    /// Uploads a `.torrent` file and returns the id of the new transfer.
+    pub async fn add_torrent_file(&self, bytes: &[u8]) -> Result<String, DebridError> {
+        let file = Part::bytes(bytes.to_vec())
+            .file_name("1.torrent")
+            .mime_str("application/x-bittorrent")?;
+        let form = Form::new().part("file", file).text("folder_id", "");
+        let request = self
+            .request(Method::POST, "transfer/create", &[])?
+            .multipart(form);
+        created_id(self.call(request).await?, "torrent file")
+    }
+
+    /// Removes the transfer `id`.
+    pub async fn delete_transfer(&self, id: &str) -> Result<(), DebridError> {
+        let request = self
+            .request(Method::POST, "transfer/delete", &[])?
+            .form(&[("id", id)]);
+        let _: IgnoredAny = self.call(request).await?;
+        Ok(())
+    }
+
+    async fn transfers(&self) -> Result<Vec<Transfer>, DebridError> {
+        let list: TransferList = self
+            .call(self.request(Method::POST, "transfer/list", &[])?)
+            .await?;
+        Ok(list.transfers.unwrap_or_default())
+    }
+
     fn api_key(&self) -> Result<&str, DebridError> {
         if self.api_key.trim().is_empty() {
             return Err(DebridError::NotConfigured(
@@ -145,6 +192,67 @@ struct Account {
     customer_id: IdValue,
     /// A unix time, or `false`/`null` for accounts without premium.
     premium_until: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransferList {
+    transfers: Option<Vec<Transfer>>,
+}
+
+/// A transfer (torrent) of the account.
+#[derive(Debug, Deserialize)]
+struct Transfer {
+    id: String,
+    name: Option<String>,
+    message: Option<String>,
+    status: Option<String>,
+    /// Completion as a fraction between 0 and 1.
+    progress: Option<f64>,
+    folder_id: Option<String>,
+    /// The magnet link or URL the transfer was created from.
+    src: Option<String>,
+}
+
+impl Transfer {
+    /// Converts to the common form; the listing reports neither sizes nor
+    /// files, and the folder holding the result is the only link.
+    fn to_remote(&self) -> RemoteTorrent {
+        let name = self.name.clone().unwrap_or_default();
+        RemoteTorrent {
+            id: self.id.clone(),
+            original_filename: Some(name.clone()),
+            filename: name,
+            hash: self.src.clone().unwrap_or_default(),
+            progress: percent(self.progress.unwrap_or(1.0)),
+            status: self.status.clone(),
+            message: self.message.clone(),
+            files: Some(Vec::new()),
+            links: Some(self.folder_id.iter().cloned().collect()),
+            speed: Some(0),
+            seeders: Some(0),
+            ..RemoteTorrent::default()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct Created {
+    id: Option<String>,
+}
+
+fn created_id(created: Created, what: &str) -> Result<String, DebridError> {
+    created
+        .id
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| DebridError::Provider(format!("Unable to add {what}")))
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "a fraction of 1 times 100 always fits; NaN and overflow saturate"
+)]
+fn percent(fraction: f64) -> i64 {
+    (fraction * 100.0) as i64
 }
 
 /// An identifier Premiumize sends either as a number or as a string.

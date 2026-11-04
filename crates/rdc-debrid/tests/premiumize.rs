@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use rdc_debrid::{DebridError, Premiumize};
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{body_string, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::API_KEY;
@@ -179,4 +179,125 @@ async fn empty_and_unreadable_responses_are_invalid() {
             "{error:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn transfers_are_listed_without_sizes_or_files() {
+    let (server, client) = client().await;
+    Mock::given(method("POST"))
+        .and(path("/transfer/list"))
+        .and(query_param("apikey", API_KEY))
+        .respond_with(json(
+            r#"{"status":"success","transfers":[
+                {"id":"t1","name":"Some.Release","message":"Downloading","status":"running",
+                 "progress":0.257,"folder_id":"f1","file_id":null,"src":"magnet:?xt=urn:btih:abc"},
+                {"id":"t2","name":"Other","status":"finished","progress":null,"folder_id":null}
+            ]}"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let torrents = client.list_torrents().await.expect("list");
+
+    assert_eq!(torrents.len(), 2);
+    let first = &torrents[0];
+    assert_eq!(first.id, "t1");
+    assert_eq!(first.filename, "Some.Release");
+    assert_eq!(first.original_filename.as_deref(), Some("Some.Release"));
+    assert_eq!(first.hash, "magnet:?xt=urn:btih:abc");
+    assert_eq!(first.progress, 25);
+    assert_eq!(first.status.as_deref(), Some("running"));
+    assert_eq!(first.message.as_deref(), Some("Downloading"));
+    assert_eq!((first.bytes, first.original_bytes), (0, 0));
+    assert_eq!(first.files, Some(Vec::new()));
+    assert_eq!(first.links, Some(vec!["f1".to_owned()]));
+    assert_eq!((first.speed, first.seeders), (Some(0), Some(0)));
+    assert_eq!(torrents[1].progress, 100, "missing progress counts as done");
+    assert_eq!(torrents[1].links, Some(Vec::new()));
+}
+
+#[tokio::test]
+async fn add_magnet_posts_the_source_form_and_returns_the_transfer_id() {
+    let (server, client) = client().await;
+    Mock::given(method("POST"))
+        .and(path("/transfer/create"))
+        .respond_with(json(
+            r#"{"status":"success","id":"magnet-transfer-id","name":"test"}"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let id = client
+        .add_magnet("magnet:?xt=urn:btih:test")
+        .await
+        .expect("added");
+
+    assert_eq!(id, "magnet-transfer-id");
+    let requests = server.received_requests().await.expect("recorded");
+    assert_eq!(requests[0].url.query(), Some("apikey=test-api-key"));
+    assert!(!requests[0].headers.contains_key("authorization"));
+    assert_eq!(
+        String::from_utf8_lossy(&requests[0].body),
+        "src=magnet%3A%3Fxt%3Durn%3Abtih%3Atest&folder_id="
+    );
+}
+
+#[tokio::test]
+async fn add_torrent_file_uploads_a_multipart_torrent() {
+    let (server, client) = client().await;
+    Mock::given(method("POST"))
+        .and(path("/transfer/create"))
+        .respond_with(json(
+            r#"{"status":"success","id":"torrent-transfer-id","name":"test"}"#,
+        ))
+        .mount(&server)
+        .await;
+
+    let id = client
+        .add_torrent_file(b"torrent body")
+        .await
+        .expect("added");
+
+    assert_eq!(id, "torrent-transfer-id");
+    let requests = server.received_requests().await.expect("recorded");
+    assert_eq!(requests[0].url.query(), Some("apikey=test-api-key"));
+    let body = String::from_utf8_lossy(&requests[0].body);
+    assert!(
+        body.contains(r#"name="file"; filename="1.torrent""#),
+        "{body}"
+    );
+    assert!(body.contains("application/x-bittorrent"), "{body}");
+    assert!(body.contains("torrent body"), "{body}");
+    assert!(body.contains(r#"name="folder_id""#), "{body}");
+}
+
+#[tokio::test]
+async fn add_without_a_transfer_id_fails() {
+    let (server, client) = client().await;
+    Mock::given(path("/transfer/create"))
+        .respond_with(json(r#"{"status":"success","id":""}"#))
+        .mount(&server)
+        .await;
+
+    let error = client
+        .add_magnet("magnet:?xt=urn:btih:test")
+        .await
+        .expect_err("no id");
+
+    assert_eq!(error.to_string(), "Unable to add magnet link");
+}
+
+#[tokio::test]
+async fn delete_posts_the_transfer_id() {
+    let (server, client) = client().await;
+    Mock::given(method("POST"))
+        .and(path("/transfer/delete"))
+        .and(query_param("apikey", API_KEY))
+        .and(body_string("id=t1"))
+        .respond_with(json(r#"{"status":"success"}"#))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client.delete_transfer("t1").await.expect("deleted");
 }
