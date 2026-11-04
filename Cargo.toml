@@ -24,7 +24,7 @@ getrandom = "0.4"
 if-addrs = "0.15"
 jiff = { version = "0.2", default-features = false }
 mime_guess = "2"
-pbkdf2 = { version = "0.12", default-features = false }
+pbkdf2 = { version = "0.13", default-features = false }
 rdc-aria2 = { path = "crates/rdc-aria2" }
 rdc-model = { path = "crates/rdc-model" }
 rdc-synology = { path = "crates/rdc-synology" }
@@ -34,8 +34,8 @@ semver = "1"
 serde = { version = "1", default-features = false }
 serde_json = "1"
 serde_repr = "0.1"
-sha1 = "0.10"
-sha2 = "0.10"
+sha1 = "0.11"
+sha2 = "0.11"
 shell-words = "1"
 sqlx = { version = "0.9", default-features = false }
 subtle = { version = "2.6", default-features = false }
