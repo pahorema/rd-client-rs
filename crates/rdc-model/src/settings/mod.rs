@@ -7,6 +7,7 @@
 //! catalogue but never stored.
 
 mod catalogue;
+mod defaults;
 mod download_client;
 mod field;
 mod general;
@@ -18,6 +19,7 @@ use thiserror::Error;
 use self::field::LeafError;
 
 pub use self::catalogue::{SettingDescriptor, catalogue};
+pub use self::defaults::TorrentDefaults;
 pub use self::download_client::DownloadClientSettings;
 pub use self::general::GeneralSettings;
 pub use self::provider::ProviderSettings;
@@ -31,7 +33,7 @@ pub struct Settings {
     pub general: GeneralSettings,
     /// `DownloadClient:*`.
     pub download_client: DownloadClientSettings,
-    /// `Provider:*`.
+    /// `Provider:*`, including `Provider:Default:*`.
     pub provider: ProviderSettings,
 }
 
@@ -60,6 +62,7 @@ enum Target<'key> {
     General(&'key str),
     DownloadClient(&'key str),
     Provider(&'key str),
+    ProviderDefault(&'key str),
 }
 
 impl<'key> Target<'key> {
@@ -68,7 +71,10 @@ impl<'key> Target<'key> {
         match group {
             "General" => Some(Self::General(name)),
             "DownloadClient" => Some(Self::DownloadClient(name)),
-            "Provider" => Some(Self::Provider(name)),
+            "Provider" => Some(match name.strip_prefix("Default:") {
+                Some(name) => Self::ProviderDefault(name),
+                None => Self::Provider(name),
+            }),
             _ => None,
         }
     }
@@ -99,6 +105,7 @@ impl Settings {
             Some(Target::General(name)) => self.general.apply_leaf(name, raw),
             Some(Target::DownloadClient(name)) => self.download_client.apply_leaf(name, raw),
             Some(Target::Provider(name)) => self.provider.apply_leaf(name, raw),
+            Some(Target::ProviderDefault(name)) => self.provider.default.apply_leaf(name, raw),
             None => Err(LeafError::Unknown),
         };
         result.map_err(|error| match error {
@@ -119,6 +126,7 @@ impl Settings {
             Target::General(name) => self.general.leaf_value(name),
             Target::DownloadClient(name) => self.download_client.leaf_value(name),
             Target::Provider(name) => self.provider.leaf_value(name),
+            Target::ProviderDefault(name) => self.provider.default.leaf_value(name),
         }
     }
 
@@ -140,37 +148,37 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AuthenticationType, DownloadClient, DownloadClientLogLevel, LogLevel, Provider};
+    use crate::{
+        AuthenticationType, DownloadClient, DownloadClientLogLevel, LogLevel, Provider,
+        TorrentFinishedAction, TorrentHostDownloadAction,
+    };
 
-    #[test]
-    fn provider_defaults() {
-        let expected = rows(&[
-            ("Provider:Provider", Some("0")),
-            ("Provider:ApiKey", Some("")),
-            ("Provider:ApiHostname", None),
-            ("Provider:AutoImport", Some("False")),
-            ("Provider:AutoDelete", Some("False")),
-            ("Provider:Timeout", Some("10")),
-            ("Provider:CheckInterval", Some("10")),
-            ("Provider:MaxParallelDownloads", Some("0")),
-            ("Provider:PreferZippedDownloads", Some("False")),
-        ]);
-        assert_eq!(default_rows("Provider:"), expected);
+    /// The expected default rows of a `<group>:Default` group.
+    fn torrent_default_rows(group: &str) -> Vec<(String, Option<String>)> {
+        [
+            ("HostDownloadAction", Some("0")),
+            ("Category", None),
+            ("FinishedAction", Some("1")),
+            ("FinishedActionDelay", Some("0")),
+            ("OnlyDownloadAvailableFiles", Some("True")),
+            ("MinFileSize", Some("0")),
+            ("IncludeRegex", None),
+            ("ExcludeRegex", None),
+            ("TorrentRetryAttempts", Some("1")),
+            ("DownloadRetryAttempts", Some("3")),
+            ("DeleteOnError", Some("0")),
+            ("TorrentLifetime", Some("0")),
+            ("Priority", Some("0")),
+        ]
+        .into_iter()
+        .map(|(name, value)| (format!("{group}:Default:{name}"), value.map(str::to_owned)))
+        .collect()
     }
 
-    #[test]
-    fn provider_group_applies_stored_rows() {
-        let mut settings = Settings::new();
-        settings
-            .apply("Provider:Provider", Some("HIGHWAY"))
-            .unwrap();
-        settings.apply("Provider:ApiKey", Some("secret")).unwrap();
-        assert_eq!(settings.provider.provider, Provider::Highway);
-        assert_eq!(settings.provider.api_key, "secret");
-        assert!(matches!(
-            settings.apply("Provider:Default", Some("1")),
-            Err(ApplySettingError::UnknownKey { .. })
-        ));
+    fn owned(rows: Vec<(&str, Option<String>)>) -> Vec<(String, Option<String>)> {
+        rows.into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect()
     }
 
     /// The default stored rows whose key starts with `prefix`.
@@ -241,6 +249,72 @@ mod tests {
             ("DownloadClient:LogLevel", Some("5")),
         ]);
         assert_eq!(default_rows("DownloadClient:"), expected);
+    }
+
+    #[test]
+    fn provider_defaults() {
+        let expected = rows(&[
+            ("Provider:Provider", Some("0")),
+            ("Provider:ApiKey", Some("")),
+            ("Provider:ApiHostname", None),
+            ("Provider:AutoImport", Some("False")),
+            ("Provider:AutoDelete", Some("False")),
+            ("Provider:Timeout", Some("10")),
+            ("Provider:CheckInterval", Some("10")),
+            ("Provider:MaxParallelDownloads", Some("0")),
+            ("Provider:PreferZippedDownloads", Some("False")),
+        ]);
+        let mut all = default_rows("Provider:");
+        let defaults = all.split_off(expected.len());
+        assert_eq!(all, expected);
+        assert_eq!(owned(defaults), torrent_default_rows("Provider"));
+    }
+
+    #[test]
+    fn provider_groups_apply_stored_rows() {
+        let mut settings = Settings::new();
+        settings
+            .apply("Provider:Provider", Some("HIGHWAY"))
+            .unwrap();
+        settings.apply("Provider:ApiKey", Some("secret")).unwrap();
+        settings
+            .apply("Provider:Default:Category", Some("tv"))
+            .unwrap();
+        settings
+            .apply("Provider:Default:FinishedAction", Some("RemoveRealDebrid"))
+            .unwrap();
+        settings
+            .apply("Provider:Default:HostDownloadAction", Some("1"))
+            .unwrap();
+        settings
+            .apply("Provider:Default:OnlyDownloadAvailableFiles", Some("False"))
+            .unwrap();
+        let provider = &settings.provider;
+        assert_eq!(provider.provider, Provider::Highway);
+        assert_eq!(provider.api_key, "secret");
+        assert_eq!(provider.default.category.as_deref(), Some("tv"));
+        assert_eq!(
+            provider.default.finished_action,
+            TorrentFinishedAction::RemoveProvider
+        );
+        assert_eq!(
+            provider.default.host_download_action,
+            TorrentHostDownloadAction::DownloadNone
+        );
+        assert!(!provider.default.only_download_available_files);
+        assert_eq!(
+            settings.value("Provider:Default:FinishedAction"),
+            Some(SettingValue::Enum(2))
+        );
+        assert_eq!(settings.value("Provider:Default"), None);
+        assert!(matches!(
+            settings.apply("Provider:Default", Some("1")),
+            Err(ApplySettingError::UnknownKey { .. })
+        ));
+        assert!(matches!(
+            settings.apply("Provider:Default:Provider", Some("1")),
+            Err(ApplySettingError::UnknownKey { .. })
+        ));
     }
 
     #[test]

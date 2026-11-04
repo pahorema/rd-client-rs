@@ -1,5 +1,6 @@
 //! The `Provider` settings group.
 
+use super::TorrentDefaults;
 use super::field::section;
 use crate::Provider;
 
@@ -24,6 +25,8 @@ pub struct ProviderSettings {
     pub max_parallel_downloads: i32,
     /// Download whole torbox.app torrents as one zip archive.
     pub prefer_zipped_downloads: bool,
+    /// Configuration of auto-imported torrents (`Provider:Default:*`).
+    pub default: TorrentDefaults,
 }
 
 impl Default for ProviderSettings {
@@ -38,6 +41,7 @@ impl Default for ProviderSettings {
             check_interval: 10,
             max_parallel_downloads: 0,
             prefer_zipped_downloads: false,
+            default: TorrentDefaults::default(),
         }
     }
 }

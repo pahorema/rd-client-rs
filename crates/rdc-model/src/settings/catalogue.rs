@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 
 use super::field::Leaf;
 use super::value::SettingKind;
-use super::{DownloadClientSettings, GeneralSettings, ProviderSettings};
+use super::{DownloadClientSettings, GeneralSettings, ProviderSettings, TorrentDefaults};
 
 /// One entry of the settings catalogue: a group node or a stored setting.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +79,12 @@ const GROUPS: &[Group] = &[
         display_name: Some("Provider"),
         description: Some(""),
         leaves: ProviderSettings::LEAVES,
+    },
+    Group {
+        key: "Provider:Default",
+        display_name: Some("Auto Import Defaults"),
+        description: None,
+        leaves: TorrentDefaults::LEAVES,
     },
 ];
 
