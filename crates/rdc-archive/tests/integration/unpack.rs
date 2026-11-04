@@ -121,6 +121,32 @@ async fn the_archive_is_deleted_after_a_successful_unpack() {
 }
 
 #[tokio::test]
+async fn every_volume_of_an_unpacked_set_is_deleted() {
+    let downloads = Downloads::new();
+    let archive = copy_fixtures(&downloads.torrent, &MULTI);
+
+    run(downloads.request(&archive)).await.unwrap();
+
+    assert_eq!(files_below(&downloads.torrent), ["big.txt"]);
+    assert_eq!(
+        fs::read_to_string(downloads.torrent.join("big.txt")).unwrap(),
+        big_text()
+    );
+}
+
+#[tokio::test]
+async fn a_later_volume_is_left_for_its_first_volume() {
+    let downloads = Downloads::new();
+    copy_fixtures(&downloads.torrent, &MULTI);
+
+    run(downloads.request(&downloads.torrent.join(MULTI[1])))
+        .await
+        .unwrap();
+
+    assert_eq!(files_below(&downloads.torrent), MULTI);
+}
+
+#[tokio::test]
 async fn a_failed_extraction_keeps_the_archive() {
     let downloads = Downloads::new();
     let archive = copy_fixtures(&downloads.torrent, &MULTI[..2]);

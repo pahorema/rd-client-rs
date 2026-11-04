@@ -13,10 +13,12 @@ use std::thread;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
-use unrar_ng::{Archive, CursorBeforeFile, CursorBeforeHeader, OpenArchive, Process, UnrarResult};
+use unrar_ng::{
+    Archive, CursorBeforeFile, CursorBeforeHeader, OpenArchive, Process, UnrarResult, VolumeInfo,
+};
 
 use crate::Error;
-use crate::extract::Entry;
+use crate::extract::{Entry, Inspection, VolumeRole};
 use crate::path::{create_entry_directory, entry_destination, prepare_file_target};
 use crate::progress::Progress;
 
@@ -38,12 +40,18 @@ fn ensure_no_nul(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Lists the file entries of `archive` (and of its following volumes), skipping directories.
-pub(crate) fn list(archive: &Path) -> Result<Vec<Entry>, Error> {
+/// Lists the file entries of `archive` (and of its following volumes), skipping directories,
+/// and tells which volume of a set `archive` is.
+pub(crate) fn inspect(archive: &Path) -> Result<Inspection, Error> {
     ensure_no_nul(archive)?;
     let listing = Archive::new(archive)
         .open_for_listing()
         .map_err(Error::read(archive))?;
+    let volume = match listing.volume_info() {
+        VolumeInfo::None => VolumeRole::Single,
+        VolumeInfo::First => VolumeRole::First,
+        VolumeInfo::Subsequent => VolumeRole::Subsequent,
+    };
     let mut entries = Vec::new();
     for header in listing {
         let header = header.map_err(Error::read(archive))?;
@@ -54,7 +62,7 @@ pub(crate) fn list(archive: &Path) -> Result<Vec<Entry>, Error> {
             });
         }
     }
-    Ok(entries)
+    Ok(Inspection { entries, volume })
 }
 
 /// Validates every entry name against `destination` and returns the total uncompressed size.

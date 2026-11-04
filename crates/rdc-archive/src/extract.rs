@@ -18,6 +18,24 @@ pub struct Entry {
     pub size: u64,
 }
 
+/// Position of an opened archive in a multi-volume set, as recorded in its headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VolumeRole {
+    /// A complete archive on its own.
+    Single,
+    /// The first volume of a set.
+    First,
+    /// A volume of a set other than the first.
+    Subsequent,
+}
+
+/// File entries of an archive and its position in a volume set.
+#[derive(Debug)]
+pub(crate) struct Inspection {
+    pub(crate) entries: Vec<Entry>,
+    pub(crate) volume: VolumeRole,
+}
+
 /// Archive formats recognised by their signature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Format {
@@ -49,9 +67,17 @@ fn detect(archive: &Path) -> Result<Format, Error> {
 /// the entries of the volumes following it too. This call blocks; run it on a blocking thread
 /// from async code.
 pub fn list_entries(archive: &Path) -> Result<Vec<Entry>, Error> {
+    inspect(archive).map(|inspection| inspection.entries)
+}
+
+/// Lists the file entries of `archive` and tells which volume of a set it is.
+pub(crate) fn inspect(archive: &Path) -> Result<Inspection, Error> {
     match detect(archive)? {
-        Format::Zip => zip_format::list(archive),
-        Format::Rar => rar_format::list(archive),
+        Format::Zip => Ok(Inspection {
+            entries: zip_format::list(archive)?,
+            volume: VolumeRole::Single,
+        }),
+        Format::Rar => rar_format::inspect(archive),
     }
 }
 

@@ -7,11 +7,12 @@ use std::thread;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::extract::{VolumeRole, extract, inspect};
 use crate::path::join_name;
-use crate::{Error, extract, list_entries};
+use crate::{Error, volume_paths};
 
 /// Delays before the retries of a failed delete. A freshly written file may still be held
 /// open for a moment by another process (an indexer, an antivirus).
@@ -40,7 +41,8 @@ pub struct UnpackRequest {
 ///
 /// The steps, in order:
 /// 1. A missing archive file is not an error: there is nothing to do (it was most likely
-///    unpacked and deleted before a restart).
+///    unpacked and deleted before a restart). The same holds for a RAR volume other than the
+///    first one of its set, which is unpacked together with the first volume.
 /// 2. When some entry already sits below a folder named like the torrent (`<name>/…` or
 ///    `<name>\…`), the archive is extracted into `destination`; otherwise into
 ///    `destination/<name>`.
@@ -49,7 +51,8 @@ pub struct UnpackRequest {
 ///    each wrapped set (found through its `.r00` volume at the top of that folder) is
 ///    extracted from its `.rar` volume, and the temporary folder is removed. Without any
 ///    top-level `.r00` volume the temporary folder is kept, so its content is not lost.
-/// 4. Otherwise the archive is extracted and deleted.
+/// 4. Otherwise the archive is extracted and deleted. For a multi-volume set, its other
+///    volumes are deleted as well.
 ///
 /// `on_progress` receives an increasing percentage of the whole procedure, ending with 100 on
 /// success. Deletes are retried a few times over several seconds before failing. The work runs
@@ -101,9 +104,16 @@ where
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
     }
-    let entries = list_entries(archive)?;
+    let inspection = inspect(archive)?;
+    if inspection.volume == VolumeRole::Subsequent {
+        info!(
+            archive = %archive.display(),
+            "not the first volume of its set, unpacked with the first volume"
+        );
+        return Ok(());
+    }
 
-    let rooted = entries.iter().any(|entry| {
+    let rooted = inspection.entries.iter().any(|entry| {
         entry
             .name
             .strip_prefix(torrent_name.as_str())
@@ -116,7 +126,8 @@ where
     };
 
     let mut progress = Monotonic::new(on_progress);
-    let wraps_set = entries
+    let wraps_set = inspection
+        .entries
         .iter()
         .any(|entry| entry.name.contains(WRAPPED_SET_MARKER));
     if wraps_set {
@@ -128,7 +139,7 @@ where
             |percent| progress.report(percent / 2),
             cancel,
         )?;
-        remove_with_retry(archive, |path| fs::remove_file(path), "delete")?;
+        delete_archive(archive, inspection.volume)?;
         let wrapped = wrapped_sets(&temp)?;
         for second_volume in &wrapped {
             let first_volume = second_volume.with_extension("rar");
@@ -151,7 +162,7 @@ where
             |percent| progress.report(percent),
             cancel,
         )?;
-        remove_with_retry(archive, |path| fs::remove_file(path), "delete")?;
+        delete_archive(archive, inspection.volume)?;
     }
     progress.report(100);
     Ok(())
@@ -170,6 +181,22 @@ fn wrapped_sets(dir: &Path) -> Result<Vec<PathBuf>, Error> {
     }
     found.sort();
     Ok(found)
+}
+
+/// Deletes the processed archive and, for the first volume of a set, the set's other volumes.
+fn delete_archive(archive: &Path, volume: VolumeRole) -> Result<(), Error> {
+    let mut paths = if volume == VolumeRole::First {
+        volume_paths(archive)
+    } else {
+        Vec::new()
+    };
+    if !paths.iter().any(|path| path == archive) {
+        paths.push(archive.to_path_buf());
+    }
+    for path in &paths {
+        remove_with_retry(path, |path| fs::remove_file(path), "delete")?;
+    }
+    Ok(())
 }
 
 /// Runs `remove` on `path`, retrying after [`DELETE_RETRY_DELAYS`]; a missing path counts as
