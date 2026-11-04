@@ -121,6 +121,27 @@ struct Request<'a> {
 #[derive(Deserialize)]
 struct Response<T> {
     result: Option<T>,
+    error: Option<RpcErrorBody>,
+}
+
+#[derive(Deserialize)]
+struct ErrorResponse {
+    error: Option<RpcErrorBody>,
+}
+
+#[derive(Deserialize)]
+struct RpcErrorBody {
+    code: i64,
+    message: Option<String>,
+}
+
+impl From<RpcErrorBody> for Error {
+    fn from(body: RpcErrorBody) -> Self {
+        Self::Rpc {
+            code: body.code,
+            message: body.message.unwrap_or_else(|| "Unknown error".to_owned()),
+        }
+    }
 }
 
 impl Client {
@@ -147,6 +168,9 @@ impl Client {
     async fn call<T: DeserializeOwned>(&self, method: &str, args: Vec<Value>) -> Result<T, Error> {
         let body = self.post(method, &self.with_token(args)).await?;
         let response: Response<T> = decode(&body)?;
+        if let Some(error) = response.error {
+            return Err(error.into());
+        }
         response.result.ok_or(Error::EmptyResponse)
     }
 
@@ -171,6 +195,15 @@ impl Client {
             params,
         };
         let (status, body) = self.send(&request).await.map_err(Error::Transport)?;
+        if !status.is_success() {
+            if let Ok(ErrorResponse { error: Some(error) }) = serde_json::from_str(&body) {
+                return Err(error.into());
+            }
+            return Err(Error::Status {
+                status: status.as_u16(),
+                body,
+            });
+        }
         if status == StatusCode::NO_CONTENT || body.is_empty() {
             return Err(Error::EmptyResponse);
         }

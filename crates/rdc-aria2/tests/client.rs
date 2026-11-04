@@ -114,6 +114,82 @@ async fn requests_carry_the_rd_client_user_agent() {
     client(&server, "secret").version().await.unwrap();
 }
 
+#[tokio::test]
+async fn rpc_error_with_success_status_is_typed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0", "id": "rd-client", "error": {"code": 1, "message": "GID 2089b05ecca3d829 is not found"}
+        })))
+        .mount(&server)
+        .await;
+
+    let error = client(&server, "secret").version().await.unwrap_err();
+
+    assert!(matches!(error, Error::Rpc { code: 1, .. }), "{error:?}");
+}
+
+#[tokio::test]
+async fn error_status_without_rpc_error_reports_status_and_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(502).set_body_string("bad gateway"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let error = client(&server, "secret").version().await.unwrap_err();
+
+    assert!(
+        matches!(&error, Error::Status { status: 502, body } if body == "bad gateway"),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn empty_body_is_reported_as_empty_response() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let error = client(&server, "secret").version().await.unwrap_err();
+
+    assert!(matches!(error, Error::EmptyResponse), "{error:?}");
+}
+
+#[tokio::test]
+async fn response_without_result_is_reported_as_empty_response() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"jsonrpc": "2.0", "id": "rd-client"})),
+        )
+        .mount(&server)
+        .await;
+
+    let error = client(&server, "secret").version().await.unwrap_err();
+
+    assert!(matches!(error, Error::EmptyResponse), "{error:?}");
+}
+
+#[tokio::test]
+async fn malformed_body_is_reported_with_the_raw_text() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>"))
+        .mount(&server)
+        .await;
+
+    let error = client(&server, "secret").version().await.unwrap_err();
+
+    assert!(
+        matches!(&error, Error::Decode { body, .. } if body == "<html>"),
+        "{error:?}"
+    );
+}
+
 #[test]
 fn debug_output_redacts_the_secret() {
     let client = Client::builder("http://127.0.0.1:6800/jsonrpc")
