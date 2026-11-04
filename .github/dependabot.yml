@@ -8,6 +8,9 @@ updates:
       cargo:
         patterns: ["*"]
         update-types: [minor, patch]
+      # These share the digest traits, so a major bump only builds when they move together.
+      rustcrypto:
+        patterns: [digest, hmac, pbkdf2, sha1, sha2]
 
   - package-ecosystem: github-actions
     directory: /
@@ -25,6 +28,10 @@ updates:
       web:
         patterns: ["*"]
         update-types: [minor, patch]
+    ignore:
+      # The linter and the Svelte checker do not support the next major yet.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: docker
     directory: /
