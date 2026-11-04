@@ -12,16 +12,21 @@ repository = "https://github.com/pahorema/rd-client-rs"
 publish = false
 
 [workspace.dependencies]
+anyhow = "1"
 async-trait = "0.1"
+axum = { version = "0.8", default-features = false }
+clap = { version = "4", default-features = false }
 data-encoding = "2"
 fancy-regex = "0.20"
 fastrand = "2"
 if-addrs = "0.15"
 jiff = { version = "0.2", default-features = false }
+mime_guess = "2"
 rdc-aria2 = { path = "crates/rdc-aria2" }
 rdc-model = { path = "crates/rdc-model" }
 rdc-synology = { path = "crates/rdc-synology" }
 reqwest = { version = "0.13", default-features = false }
+rust-embed = "8"
 serde = { version = "1", default-features = false }
 serde_json = "1"
 serde_repr = "0.1"
@@ -31,7 +36,10 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1.54", default-features = false }
 tokio-util = { version = "0.7", default-features = false }
+tower = { version = "0.5", default-features = false }
+tower-http = { version = "0.7", default-features = false }
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false }
 unrar-ng = "0.7"
 url = "2"
 uuid = { version = "1", default-features = false }
