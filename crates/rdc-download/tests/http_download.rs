@@ -449,3 +449,91 @@ async fn downloads_a_file_in_ranged_chunks() {
         ]
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn downloads_a_file_over_parallel_ranged_chunks() {
+    let data = test_data(64 * 1024);
+    let server = TestServer::file(Arc::clone(&data), FileOptions::default()).await;
+    let (run, outcome) = download(
+        &server.url("/file.bin"),
+        InternalConfig {
+            chunk_count: 4,
+            parallel_connections: 4,
+            ..config()
+        },
+    )
+    .await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+    let mut ranges: Vec<_> = server
+        .transfer_requests()
+        .iter()
+        .filter_map(support::Request::range)
+        .collect();
+    ranges.sort_unstable();
+    assert_eq!(
+        ranges,
+        vec![
+            (0, Some(16_383)),
+            (16_384, Some(32_767)),
+            (32_768, Some(49_151)),
+            (49_152, Some(65_535))
+        ]
+    );
+    assert_eq!(
+        *run.download.progress().borrow(),
+        Progress {
+            bytes_done: 65_536,
+            bytes_total: 65_536,
+            speed: 0
+        }
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_connections_never_exceed_the_limit() {
+    let data = test_data(64 * 1024);
+    let options = FileOptions {
+        write_size: 2048,
+        write_delay: Duration::from_millis(10),
+        ..FileOptions::default()
+    };
+    let server = TestServer::file(Arc::clone(&data), options).await;
+    let (run, outcome) = download(
+        &server.url("/file.bin"),
+        InternalConfig {
+            chunk_count: 8,
+            parallel_connections: 2,
+            ..config()
+        },
+    )
+    .await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+    assert_eq!(server.transfer_requests().len(), 8);
+    assert_eq!(server.max_concurrent(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn zero_parallel_connections_use_a_single_connection() {
+    let data = test_data(32 * 1024);
+    let options = FileOptions {
+        write_size: 4096,
+        write_delay: Duration::from_millis(5),
+        ..FileOptions::default()
+    };
+    let server = TestServer::file(Arc::clone(&data), options).await;
+    let (run, outcome) = download(
+        &server.url("/file.bin"),
+        InternalConfig {
+            chunk_count: 4,
+            parallel_connections: 0,
+            ..config()
+        },
+    )
+    .await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+    assert_eq!(server.transfer_requests().len(), 4);
+    assert_eq!(server.max_concurrent(), 1);
+}

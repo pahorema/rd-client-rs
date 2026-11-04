@@ -29,6 +29,8 @@ pub(crate) enum TransferError {
     Incomplete { received: u64, expected: u64 },
     #[error("The server ignored the requested byte range.")]
     RangeIgnored,
+    #[error("The download was interrupted: {0}")]
+    Interrupted(String),
     #[error("Unable to write {}: {source}", .path.display())]
     Io {
         path: PathBuf,

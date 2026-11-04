@@ -1,5 +1,6 @@
 //! Fetching the chunks of a file into its partial file.
 
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{self, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -9,6 +10,7 @@ use std::time::Duration;
 use reqwest::{Response, StatusCode};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use super::connection::{ByteRange, Context};
@@ -42,12 +44,8 @@ pub(crate) async fn fetch_file(
     remote: &RemoteFile,
     partial: &Path,
 ) -> Result<u64, TransferError> {
-    let config = context.config();
-    let chunks = plan_chunks(
-        remote.size,
-        remote.supports_ranges,
-        config.effective_chunk_count(),
-    );
+    let chunk_count = context.config().effective_chunk_count();
+    let chunks = plan_chunks(remote.size, remote.supports_ranges, chunk_count);
     prepare_file(partial, remote.size).await?;
     tracing::debug!(
         "Downloading {} ({:?} bytes, ranges: {}) in {} chunk(s)",
@@ -56,22 +54,7 @@ pub(crate) async fn fetch_file(
         remote.supports_ranges,
         chunks.len()
     );
-    let ranged = chunks.len() > 1;
-    for range in chunks {
-        let worker = ChunkWorker {
-            context: Arc::clone(context),
-            remote: remote.clone(),
-            partial: partial.to_owned(),
-            cancel: context.cancel.clone(),
-        };
-        let chunk = Chunk {
-            range,
-            position: 0,
-            timeout: config.read_timeout(),
-            ranged,
-        };
-        worker.run(chunk).await?;
-    }
+    fetch_chunks(context, remote, partial, chunks).await?;
     let received = context.received();
     if remote.size.is_none() {
         let file = OpenOptions::new()
@@ -97,6 +80,63 @@ async fn prepare_file(partial: &Path, size: Option<u64>) -> Result<(), TransferE
             .map_err(|error| TransferError::io(partial, error))?;
     }
     Ok(())
+}
+
+/// Fetches `chunks` with bounded concurrency; the first failure stops the others.
+async fn fetch_chunks(
+    context: &Arc<Context>,
+    remote: &RemoteFile,
+    partial: &Path,
+    chunks: Vec<ChunkRange>,
+) -> Result<(), TransferError> {
+    let attempt = context.cancel.child_token();
+    let ranged = chunks.len() > 1;
+    let timeout = context.config().read_timeout();
+    let mut pending: VecDeque<Chunk> = chunks
+        .into_iter()
+        .map(|range| Chunk {
+            range,
+            position: 0,
+            timeout,
+            ranged,
+        })
+        .collect();
+    let mut running = JoinSet::new();
+    let mut config = context.config.clone();
+    let mut config_open = true;
+    let mut failure = None;
+    loop {
+        if failure.is_none() {
+            let limit = config.borrow().effective_parallel_connections();
+            while running.len() < limit
+                && let Some(chunk) = pending.pop_front()
+            {
+                let worker = ChunkWorker {
+                    context: Arc::clone(context),
+                    remote: remote.clone(),
+                    partial: partial.to_owned(),
+                    cancel: attempt.clone(),
+                };
+                running.spawn(worker.run(chunk));
+            }
+        }
+        if running.is_empty() {
+            break;
+        }
+        tokio::select! {
+            Some(joined) = running.join_next() => {
+                let result = joined.unwrap_or_else(|error| Err(TransferError::Interrupted(error.to_string())));
+                if let Err(error) = result
+                    && failure.is_none()
+                {
+                    failure = Some(error);
+                    attempt.cancel();
+                }
+            }
+            changed = config.changed(), if config_open => config_open = changed.is_ok(),
+        }
+    }
+    failure.map_or(Ok(()), Err)
 }
 
 /// Progress of one chunk.

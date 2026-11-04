@@ -20,10 +20,13 @@ const MAX_BUFFER_SIZE: usize = 64 * 1024 * 1024;
 /// Settings of the internal HTTP engine, re-read live while a download runs.
 ///
 /// Integer fields take the raw values of the settings they come from; out-of-range values
-/// are normalised as documented on each field. The chunk count, timeout and buffer size apply
-/// to downloads and connections started afterwards.
+/// are normalised as documented on each field. The connection limit applies to running
+/// downloads immediately; the chunk count, timeout and buffer size apply to downloads and
+/// connections started afterwards.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InternalConfig {
+    /// Maximum concurrent connections per download; `1` or less means one connection.
+    pub parallel_connections: i32,
     /// Number of chunks a file is split into; `0` or less means 8. Files that are small, of
     /// unknown size or served without range support are fetched as one chunk.
     pub chunk_count: i32,
@@ -37,6 +40,12 @@ impl InternalConfig {
     /// Creates the configuration with every value at its normalised default.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn effective_parallel_connections(&self) -> usize {
+        usize::try_from(self.parallel_connections)
+            .unwrap_or(1)
+            .max(1)
     }
 
     pub(crate) fn effective_chunk_count(&self) -> u64 {
@@ -73,6 +82,22 @@ impl InternalConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_or_one_parallel_connections_mean_one_connection() {
+        for value in [-3, 0, 1] {
+            let config = InternalConfig {
+                parallel_connections: value,
+                ..InternalConfig::new()
+            };
+            assert_eq!(config.effective_parallel_connections(), 1, "value {value}");
+        }
+        let config = InternalConfig {
+            parallel_connections: 6,
+            ..InternalConfig::new()
+        };
+        assert_eq!(config.effective_parallel_connections(), 6);
+    }
 
     #[test]
     fn non_positive_chunk_count_means_eight() {
