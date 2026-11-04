@@ -2,9 +2,11 @@
 //! provider files, the settings catalogue and the rules that decide which
 //! files get downloaded.
 
+mod download;
 mod enums;
 mod remote_file;
 
+pub use download::{Download, DownloadInfo};
 pub use enums::{
     AuthenticationType, DownloadClient, DownloadClientLogLevel, LogLevel, ParseEnumError, Provider,
     TorrentDownloadAction, TorrentFinishedAction, TorrentHostDownloadAction, TorrentStatus,
