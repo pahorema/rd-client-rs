@@ -8,6 +8,11 @@ mod error;
     expect(dead_code, reason = "used by archive extraction, added next")
 )]
 mod path;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by archive extraction, added next")
+)]
+mod progress;
 mod volume;
 
 pub use error::Error;
