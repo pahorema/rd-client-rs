@@ -1,6 +1,8 @@
 //! Where downloads land on disk and how provider names become safe file
 //! and directory names.
 
+use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use url::Url;
@@ -61,18 +63,57 @@ pub fn file_name(download: &Download) -> Option<String> {
     Some(remove_invalid_file_name_chars(&name))
 }
 
-/// Path of the download relative to the download directory:
-/// `<torrent name>/<provider sub-directories>/<file>`.
+/// Absolute path the download is written to, creating its directory.
 ///
-/// The torrent name is [`Torrent::rd_name`] without the characters the
+/// The layout is `base/<torrent name>/<provider sub-directories>/<file>`:
+/// the torrent name is [`Torrent::rd_name`] without the characters the
 /// platform forbids in paths; the sub-directories are those of the first
-/// provider file whose path ends with the file name, without a leading
+/// provider file whose path ends with the [`file_name`], without a leading
 /// directory equal to the torrent name (compared case-insensitively). A
-/// blank file name matches no provider file. Only plain components are
-/// used, so `..`, `.` and absolute names are dropped. The file name is not
-/// sanitized (the raw [`Download::file_name`] or URL-decoded link segment
-/// is used). This is the path a download has below the root of a remote
-/// downloader or an rclone mount.
+/// blank file name matches no provider file and yields the torrent
+/// directory itself. Only plain components are used, so `..`, `.` and
+/// absolute names never leave `base`.
+///
+/// Returns `Ok(None)` when the torrent has no name, the download has no
+/// unrestricted link or no file name can be derived.
+///
+/// # Errors
+///
+/// Returns the I/O error raised while creating the directory.
+pub fn download_path(
+    base: &Path,
+    torrent: &Torrent,
+    download: &Download,
+) -> io::Result<Option<PathBuf>> {
+    let (Some(rd_name), Some(_)) = (
+        torrent.rd_name.as_deref(),
+        non_blank(download.link.as_deref()),
+    ) else {
+        return Ok(None);
+    };
+    let Some(file_name) = file_name(download) else {
+        return Ok(None);
+    };
+    let directory = remove_invalid_path_chars(rd_name);
+    let mut path = base.to_path_buf();
+    push_components(&mut path, &directory);
+    if let Some(sub_directory) = sub_directory(torrent, &file_name, &directory) {
+        push_components(&mut path, &sub_directory);
+    }
+    fs::create_dir_all(&path)?;
+    if !file_name.is_empty() {
+        path.push(file_name);
+    }
+    Ok(Some(path))
+}
+
+/// Path of the download relative to the download directory, the layout of
+/// [`download_path`] without the base directory.
+///
+/// Unlike [`download_path`] the file name is not sanitized (the raw
+/// [`Download::file_name`] or URL-decoded link segment is used) and no
+/// directory is created. This is the path a download has below the root of
+/// a remote downloader or an rclone mount.
 ///
 /// Returns `None` when the torrent has no name, the download has no
 /// unrestricted link or no file name can be derived.
@@ -344,11 +385,30 @@ mod tests {
         }
 
         #[test]
+        fn with_base_returns_none_without_torrent_name() {
+            let base = tempfile::tempdir().unwrap();
+            let path = download_path(base.path(), &torrent(None, &[]), &file_download()).unwrap();
+            assert_eq!(path, None);
+        }
+
+        #[test]
         fn relative_returns_none_without_torrent_name() {
             assert_eq!(
                 relative_download_path(&torrent(None, &[]), &file_download()),
                 None
             );
+        }
+
+        #[test]
+        fn with_base_returns_none_without_link() {
+            let base = tempfile::tempdir().unwrap();
+            let download = download(None, Some("file.txt"));
+            let torrent = torrent(Some(TORRENT_NAME), &[]);
+            assert_eq!(
+                download_path(base.path(), &torrent, &download).unwrap(),
+                None
+            );
+            assert!(!base.path().join(TORRENT_NAME).exists());
         }
 
         #[test]
@@ -361,12 +421,54 @@ mod tests {
         }
 
         #[test]
+        fn with_base_guesses_the_file_name_from_the_link() {
+            let base = tempfile::tempdir().unwrap();
+            let download = download(Some("https://fake.url/filename-from-link.txt"), None);
+            let path = download_path(base.path(), &torrent(Some(TORRENT_NAME), &[]), &download);
+            assert_eq!(
+                path.unwrap(),
+                Some(
+                    base.path()
+                        .join(TORRENT_NAME)
+                        .join("filename-from-link.txt")
+                )
+            );
+        }
+
+        #[test]
         fn relative_guesses_the_file_name_from_the_link() {
             let download = download(Some("https://fake.url/filename-from-link.txt"), None);
             assert_eq!(
                 relative_download_path(&torrent(Some(TORRENT_NAME), &[]), &download),
                 Some(joined(&[TORRENT_NAME, "filename-from-link.txt"]))
             );
+        }
+
+        #[test]
+        fn with_base_creates_the_torrent_directory() {
+            let base = tempfile::tempdir().unwrap();
+            let path = download_path(
+                base.path(),
+                &torrent(Some(TORRENT_NAME), &[]),
+                &file_download(),
+            );
+            let directory = base.path().join(TORRENT_NAME);
+            assert!(directory.is_dir());
+            assert_eq!(path.unwrap(), Some(directory.join("file.txt")));
+        }
+
+        #[test]
+        fn with_base_keeps_provider_sub_directories() {
+            let base = tempfile::tempdir().unwrap();
+            let file = ["inside", "lots", "of", "subdirectories", "file.txt"];
+            let torrent = torrent(Some(TORRENT_NAME), &[&file]);
+            let path = download_path(base.path(), &torrent, &file_download()).unwrap();
+            let expected: PathBuf = [base.path(), Path::new(TORRENT_NAME)]
+                .into_iter()
+                .chain(file.iter().map(Path::new))
+                .collect();
+            assert_eq!(path, Some(expected.clone()));
+            assert!(expected.parent().unwrap().is_dir());
         }
 
         #[test]
@@ -387,6 +489,25 @@ mod tests {
         }
 
         #[test]
+        fn with_base_strips_the_torrent_name_prefix() {
+            let base = tempfile::tempdir().unwrap();
+            let torrent = torrent(
+                Some(TORRENT_NAME),
+                &[&[TORRENT_NAME, "Saison 1", "file.txt"]],
+            );
+            let path = download_path(base.path(), &torrent, &file_download()).unwrap();
+            assert_eq!(
+                path,
+                Some(
+                    base.path()
+                        .join(TORRENT_NAME)
+                        .join("Saison 1")
+                        .join("file.txt")
+                )
+            );
+        }
+
+        #[test]
         fn relative_strips_the_torrent_name_prefix() {
             let torrent = torrent(
                 Some(TORRENT_NAME),
@@ -396,6 +517,15 @@ mod tests {
                 relative_download_path(&torrent, &file_download()),
                 Some(joined(&[TORRENT_NAME, "Saison 1", "file.txt"]))
             );
+        }
+
+        #[test]
+        fn with_base_returns_the_torrent_directory_when_no_file_name_is_known() {
+            let base = tempfile::tempdir().unwrap();
+            let torrent = torrent(Some(TORRENT_NAME), &[&["Other", "file.txt"]]);
+            let download = download(Some("https://fake.url"), None);
+            let path = download_path(base.path(), &torrent, &download).unwrap();
+            assert_eq!(path, Some(base.path().join(TORRENT_NAME)));
         }
 
         #[test]
@@ -413,6 +543,19 @@ mod tests {
             assert_eq!(
                 relative_download_path(&torrent, &file_download()),
                 Some(joined(&[TORRENT_NAME, "Season 1", "file.txt"]))
+            );
+        }
+
+        #[test]
+        fn names_cannot_escape_the_base_directory() {
+            let base = tempfile::tempdir().unwrap();
+            let torrent = torrent(Some(".."), &[&["..", "..", "file.txt"]]);
+            let path = download_path(base.path(), &torrent, &file_download()).unwrap();
+            assert_eq!(path, Some(base.path().join("file.txt")));
+            let download = download(Some("https://fake.url/x"), Some("../../etc/passwd"));
+            assert_eq!(
+                relative_download_path(&torrent, &download),
+                Some(joined(&["etc", "passwd"]))
             );
         }
 
