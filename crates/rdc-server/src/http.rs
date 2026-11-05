@@ -289,7 +289,7 @@ fn should_log(path: &str) -> bool {
 fn sensitive(key: &str) -> bool {
     matches!(
         key.to_ascii_lowercase().as_str(),
-        "password" | "passwd" | "secret" | "apikey" | "token"
+        "password" | "passwd" | "secret" | "apikey" | "token" | "username" | "user_name"
     )
 }
 

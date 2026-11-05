@@ -48,9 +48,9 @@ async fn requests_redact_query_form_json_and_dynamic_secrets_without_changing_bo
         .build(());
     for (uri, content_type, body) in [
         (
-            "/base/API/V2/AUTH/LOGIN?password=query-password&token=query-token&name=visible",
+            "/base/API/V2/AUTH/LOGIN?password=query-password&token=query-token&username=query-user&user_name=query-alias&name=visible",
             "application/x-www-form-urlencoded",
-            "username=visible-user&PaSsWoRd=form-password&passwd=form-passwd&secret=form-secret&apiKey=form-apikey&token=form-token&other=provider%2Bsecret",
+            "username=visible-user&user_name=form-alias&PaSsWoRd=form-password&passwd=form-passwd&secret=form-secret&apiKey=form-apikey&token=form-token&other=provider%2Bsecret",
         ),
         (
             "/api/torrents",
@@ -94,6 +94,10 @@ async fn requests_redact_query_form_json_and_dynamic_secrets_without_changing_bo
     let output = String::from_utf8(buffer.lock().unwrap().clone()).unwrap();
     for secret in [
         "query-password",
+        "query-user",
+        "query-alias",
+        "visible-user",
+        "form-alias",
         "query-token",
         "form-password",
         "form-passwd",
@@ -113,7 +117,6 @@ async fn requests_redact_query_form_json_and_dynamic_secrets_without_changing_bo
         assert!(!output.contains(secret), "leaked {secret}: {output}");
     }
     for visible in [
-        "visible-user",
         "visible-json",
         "visible-multipart",
         "visible",
