@@ -1733,7 +1733,9 @@ dependencies = [
  "data-encoding",
  "getrandom 0.4.3",
  "hmac",
+ "jiff",
  "mime_guess",
+ "rdc-engine",
  "rdc-model",
  "rdc-store",
  "reqwest",
@@ -1749,6 +1751,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
+ "wiremock",
 ]
 
 [[package]]
