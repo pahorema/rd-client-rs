@@ -1684,6 +1684,7 @@ dependencies = [
  "fastrand",
  "fs4",
  "jiff",
+ "rdc-archive",
  "rdc-aria2",
  "rdc-debrid",
  "rdc-download",
@@ -1705,6 +1706,7 @@ dependencies = [
  "url",
  "uuid",
  "wiremock",
+ "zip",
 ]
 
 [[package]]

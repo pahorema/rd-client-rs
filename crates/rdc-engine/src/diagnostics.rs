@@ -1,10 +1,7 @@
 //! Explicit filesystem, downloader and RPC diagnostics.
 
-use crate::{DownloadRequest, Engine, EngineError};
-use rdc_download::{
-    Aria2Config, Aria2Download, Aria2Request, DownloadEngine, DownloadStationConfig,
-    DownloadStationDownload, DownloadStationRequest, HttpDownload,
-};
+use crate::{Engine, EngineError};
+use rdc_download::DownloadEngine;
 use rdc_model::{Download, DownloadClient, Torrent};
 use std::{
     path::{Path, PathBuf},
@@ -126,48 +123,9 @@ impl Engine {
             .ok_or_else(|| EngineError::Message("Invalid download path".to_owned()))?
             .to_string_lossy()
             .into_owned();
-        let transfer: Arc<dyn DownloadEngine> = if let Some(factory) = self.download_factory() {
-            tokio::select! {
-                () = cancel.cancelled() => return Err(EngineError::Message("The download was cancelled".to_owned())),
-                result = factory.create(DownloadRequest { download, torrent, settings: settings.clone(), local_path: output.clone(), relative_path: relative, internal_config: self.internal_download_config() }) => result?,
-            }
-        } else {
-            let d = &settings.download_client;
-            match torrent.download_client {
-                DownloadClient::Internal | DownloadClient::Symlink => Arc::new(HttpDownload::new(
-                    SPEED_TEST_URL,
-                    &output,
-                    self.internal_download_config(),
-                )),
-                DownloadClient::Aria2c => Arc::new(Aria2Download::new(
-                    Aria2Request {
-                        url: SPEED_TEST_URL.to_owned(),
-                        file_path: output.clone(),
-                        relative_path: relative,
-                        ..Aria2Request::default()
-                    },
-                    Aria2Config {
-                        url: d.aria2c_url.clone(),
-                        secret: Some(d.aria2c_secret.clone()),
-                        download_path: d.aria2c_download_path.clone(),
-                    },
-                )),
-                DownloadClient::DownloadStation => Arc::new(DownloadStationDownload::new(
-                    DownloadStationRequest {
-                        url: SPEED_TEST_URL.to_owned(),
-                        file_path: output.clone(),
-                        relative_path: relative,
-                        ..DownloadStationRequest::default()
-                    },
-                    DownloadStationConfig {
-                        url: Some(d.download_station_url.clone()),
-                        username: d.download_station_username.clone(),
-                        password: d.download_station_password.clone(),
-                        download_path: d.download_station_download_path.clone(),
-                    },
-                    self.inner.synology_sessions.clone(),
-                )),
-            }
+        let transfer = tokio::select! {
+            () = cancel.cancelled() => return Err(EngineError::Message("The download was cancelled".to_owned())),
+            result = self.configured_download(&torrent, &download, output.clone(), relative) => result?,
         };
         let result = run_speed_probe(&transfer, cancel).await;
         transfer.cancel().await;
@@ -248,7 +206,7 @@ async fn write_speed(directory: &Path, cancel: &CancellationToken) -> Result<f64
 mod tests {
     use super::*;
     use crate::{
-        DownloadFactory,
+        DownloadFactory, DownloadRequest,
         test_download::TestDownload,
         testing::{FakeDebridProvider, TestEngine},
     };

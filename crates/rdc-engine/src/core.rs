@@ -48,6 +48,8 @@ pub(crate) struct Inner {
     pub provider: RwLock<Arc<dyn DebridProvider>>,
     pub provider_lock: Mutex<()>,
     pub reset_lock: Mutex<()>,
+    pub tick_lock: Mutex<()>,
+    pub completion_jobs: std::sync::Mutex<Vec<JoinHandle<()>>>,
     pub coordinator: Arc<RateLimitCoordinator>,
     pub cancel: CancellationToken,
     pub trackers: TrackerList,
@@ -88,6 +90,8 @@ impl Engine {
                 settings: RwLock::new(settings.clone()),
                 provider: RwLock::new(provider),
                 provider_lock: Mutex::new(()),
+                tick_lock: Mutex::new(()),
+                completion_jobs: std::sync::Mutex::new(Vec::new()),
                 reset_lock: Mutex::new(()),
                 coordinator,
                 cancel: CancellationToken::new(),
@@ -126,7 +130,19 @@ impl Engine {
                 tracing::error!(%error, "engine background job stopped unexpectedly");
             }
         }
+        let _tick = self.inner.tick_lock.lock().await;
         self.inner.registry.cancel_all().await;
+        let completion_jobs: Vec<_> = self
+            .inner
+            .completion_jobs
+            .lock()
+            .expect("completion jobs lock poisoned")
+            .drain(..)
+            .collect();
+        for job in completion_jobs {
+            job.abort();
+            let _ = job.await;
+        }
     }
 
     /// Returns a coherent immutable settings snapshot without database I/O.

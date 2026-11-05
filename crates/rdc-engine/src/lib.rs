@@ -3,20 +3,24 @@
 //! completing, retrying and cleaning up, plus the background jobs that keep
 //! it running.
 //!
-//! [`Engine::start`] loads settings and starts independent monitoring jobs.
-//! Provider queue dispatch is shared by adds and polling; host transfer orchestration
-//! and startup repair are intentionally owned by the lifecycle runner.
+//! [`Engine::start`] repairs interrupted work, starts the serialized lifecycle tick and
+//! independent monitoring jobs. Provider queue dispatch is shared by adds, polling and
+//! the tick, so provider limits and cooldowns have one mutation path.
 
 mod background;
 mod core;
 mod diagnostics;
+mod download_runtime;
 mod error;
+mod finished;
 mod operations;
 mod options;
 mod registry;
 mod startup;
 mod sync;
+mod tick;
 mod types;
+mod unpack_runtime;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;

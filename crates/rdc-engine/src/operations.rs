@@ -77,6 +77,16 @@ impl Engine {
         magnet: &str,
         template: TorrentTemplate,
     ) -> Result<Torrent, EngineError> {
+        self.add_magnet_with_retry_count(magnet, template, None)
+            .await
+    }
+
+    async fn add_magnet_with_retry_count(
+        &self,
+        magnet: &str,
+        template: TorrentTemplate,
+        retry_count: Option<i32>,
+    ) -> Result<Torrent, EngineError> {
         let parsed = MagnetLink::parse(magnet)
             .map_err(|error| EngineError::Message(format!("{error}, trying to parse {magnet}")))?;
         let settings = self.settings();
@@ -95,8 +105,14 @@ impl Engine {
         let mut template = template.into_torrent();
         template.rd_name = parsed.display_name.clone();
         template.rd_status = Some(TorrentStatus::Queued);
-        self.add_queued(&parsed.info_hash_hex(), &enriched, false, &template)
-            .await
+        self.add_queued(
+            &parsed.info_hash_hex(),
+            &enriched,
+            false,
+            &template,
+            retry_count,
+        )
+        .await
     }
 
     /// Validates and enqueues torrent metadata, storing and copying the enriched payload.
@@ -110,6 +126,15 @@ impl Engine {
         &self,
         bytes: &[u8],
         template: TorrentTemplate,
+    ) -> Result<Torrent, EngineError> {
+        self.add_file_with_retry_count(bytes, template, None).await
+    }
+
+    async fn add_file_with_retry_count(
+        &self,
+        bytes: &[u8],
+        template: TorrentTemplate,
+        retry_count: Option<i32>,
     ) -> Result<Torrent, EngineError> {
         let parsed = TorrentFile::parse(bytes).map_err(|error| {
             EngineError::Message(format!("{error}, trying to parse {}", BASE64.encode(bytes)))
@@ -131,8 +156,14 @@ impl Engine {
         let mut template = template.into_torrent();
         template.rd_name = Some(parsed.name.clone());
         template.rd_status = Some(TorrentStatus::Queued);
-        self.add_queued(&parsed.info_hash_hex(), &payload, true, &template)
-            .await
+        self.add_queued(
+            &parsed.info_hash_hex(),
+            &payload,
+            true,
+            &template,
+            retry_count,
+        )
+        .await
     }
 
     async fn enrichment_trackers(&self) -> Arc<[String]> {
@@ -161,29 +192,41 @@ impl Engine {
         payload: &str,
         is_file: bool,
         template: &Torrent,
+        retry_count: Option<i32>,
     ) -> Result<Torrent, EngineError> {
         let (torrent, inserted) = {
             // Share the provider lock with sync/import so the duplicate check and insertion
             // cannot race another addition or a provider-side import.
             let _guard = self.inner.provider_lock.lock().await;
-            if let Some(existing) = self.inner.store.torrents().find_by_hash(hash).await? {
-                (existing, false)
-            } else {
-                let torrent = self
-                    .inner
+            let (mut torrent, inserted) =
+                if let Some(existing) = self.inner.store.torrents().find_by_hash(hash).await? {
+                    (existing, false)
+                } else {
+                    let torrent = self
+                        .inner
+                        .store
+                        .torrents()
+                        .add(&NewTorrent {
+                            rd_id: None,
+                            hash,
+                            payload: Some(payload),
+                            is_file,
+                            download_client: template.download_client,
+                            template,
+                        })
+                        .await?;
+                    (torrent, true)
+                };
+            if let Some(count) = retry_count {
+                self.inner
                     .store
                     .torrents()
-                    .add(&NewTorrent {
-                        rd_id: None,
-                        hash,
-                        payload: Some(payload),
-                        is_file,
-                        download_client: template.download_client,
-                        template,
-                    })
+                    .update_retry(torrent.torrent_id, None, count)
                     .await?;
-                (torrent, true)
+                torrent.retry_count = count;
+                torrent.retry = None;
             }
+            (torrent, inserted)
         };
         self.copy_added_torrent(&torrent).await;
         if !inserted {
@@ -474,17 +517,14 @@ impl Engine {
                 )
             })?;
         let template = TorrentTemplate::from(&torrent);
-        let added = if torrent.is_file {
+        if torrent.is_file {
             let bytes = BASE64.decode(payload.as_bytes()).map_err(message)?;
-            self.add_torrent_file(&bytes, template).await?
+            self.add_file_with_retry_count(&bytes, template, Some(retry_count))
+                .await?;
         } else {
-            self.add_magnet(payload, template).await?
-        };
-        self.inner
-            .store
-            .torrents()
-            .update_retry(added.torrent_id, None, retry_count)
-            .await?;
+            self.add_magnet_with_retry_count(payload, template, Some(retry_count))
+                .await?;
+        }
         Ok(())
     }
 
@@ -497,6 +537,7 @@ impl Engine {
     /// Returns persistence or local cleanup errors. Missing downloads are ignored.
     pub async fn retry_download(&self, download_id: Uuid) -> Result<(), EngineError> {
         let _reset = self.inner.reset_lock.lock().await;
+        let _provider = self.inner.provider_lock.lock().await;
         let Some(record) = self.inner.store.downloads().get(download_id).await? else {
             return Ok(());
         };

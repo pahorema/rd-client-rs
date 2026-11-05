@@ -83,7 +83,35 @@ pub(crate) fn spawn(engine: &Engine) -> Vec<JoinHandle<()>> {
     let rate_job = tokio::spawn(async move {
         rate_expiry_loop(rate).await;
     });
-    vec![provider, watch, disk_job, update_job, rate_job]
+    let runner = engine.clone();
+    let tick = tokio::spawn(async move {
+        tick_loop(runner).await;
+    });
+    vec![provider, watch, disk_job, update_job, rate_job, tick]
+}
+
+async fn tick_loop(engine: Engine) {
+    let mut failures = 0_u32;
+    loop {
+        if engine.inner.cancel.is_cancelled() {
+            return;
+        }
+        let delay = match engine.tick_once().await {
+            Ok(()) => {
+                failures = 0;
+                Duration::from_secs(1)
+            }
+            Err(error) => {
+                failures = failures.saturating_add(1);
+                tracing::error!(%error, "lifecycle tick failed");
+                Duration::from_secs(1_u64 << failures.min(6))
+            }
+        };
+        tokio::select! {
+            () = engine.inner.cancel.cancelled() => return,
+            () = tokio::time::sleep(delay) => {},
+        }
+    }
 }
 
 async fn provider_loop(engine: Engine) {
