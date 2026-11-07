@@ -87,8 +87,15 @@ Images are published for `linux/amd64` and `linux/arm64`. Tags: `latest` and
 | `PUID`, `PGID` | `1000` | User and group the server runs as. |
 | `UMASK` | unset | File creation mask, for example `002`. |
 | `TZ` | `UTC` | Time zone, for example `Europe/Rome`. |
-| `SKIP_CHOWN` | `false` | Set to `true` to skip the ownership fix of `/data` at startup (useful for large download folders). |
+| `SKIP_CHOWN` | `false` | Set to `true` to skip the ownership fixes at startup. |
 | `FILE__<NAME>` | – | Set `<NAME>` to the contents of a file, for Docker secrets. |
+
+At startup the container gives `PUID:PGID` the database folder (the folder of
+`DATABASE_PATH`, `/data/db` by default) when anything in it belongs to someone
+else. It never changes the contents of
+`/data/downloads`; it only takes over that folder itself when `PUID` cannot
+write to it, and carries on with a warning if that fails (read-only binds,
+network shares).
 
 ## Configuration
 

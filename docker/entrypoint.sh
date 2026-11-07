@@ -31,9 +31,22 @@ if ! getent passwd "$PUID" >/dev/null 2>&1; then
     adduser -D -H -h /data -s /sbin/nologin -u "$PUID" -G "$group" rdclient
 fi
 
-mkdir -p /data/db /data/downloads "$(dirname "${DATABASE_PATH:-/data/db/rd-client.db}")"
+database_dir="$(dirname "${DATABASE_PATH:-/data/db/rd-client.db}")"
+mkdir -p "$database_dir"
+mkdir -p /data/downloads || true
+
 if [ "${SKIP_CHOWN:-false}" != "true" ]; then
-    chown -R "$PUID:$PGID" /data
+    # Only the database folder holds rd-client's own files; fix it when anything in it
+    # belongs to someone else.
+    if [ -n "$(find "$database_dir" ! -user "$PUID" -o ! -group "$PGID" | head -n 1)" ]; then
+        chown -R "$PUID:$PGID" "$database_dir"
+    fi
+    # The download folder is often a media library, a read-only bind or a network share:
+    # never walk it, and only take over the folder itself when the user cannot write to it.
+    if ! su-exec "$PUID:$PGID" test -w /data/downloads; then
+        chown "$PUID:$PGID" /data/downloads 2>/dev/null \
+            || echo "User $PUID cannot write to /data/downloads; fix its permissions on the host" >&2
+    fi
 fi
 
 exec su-exec "$PUID:$PGID" /app/rd-client "$@"
