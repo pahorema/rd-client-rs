@@ -77,6 +77,41 @@ async fn free_plan_has_no_expiration() {
 }
 
 #[tokio::test]
+async fn speed_test_uses_the_closest_server() {
+    let (server, client) = client().await;
+    Mock::given(method("GET"))
+        .and(path("/speedtest"))
+        .respond_with(json(
+            r#"{"success":true,"data":[
+                {"url":"https://far.example/dld/100MB.bin","closest":false},
+                {"url":"https://near.example/dld/100MB.bin","closest":true}]}"#,
+        ))
+        .mount(&server)
+        .await;
+
+    assert_eq!(
+        client.speed_test_url().await.expect("url").as_deref(),
+        Some("https://near.example/dld/100MB.bin")
+    );
+}
+
+#[tokio::test]
+async fn speed_test_without_a_closest_server_uses_the_first() {
+    let (server, client) = client().await;
+    Mock::given(path("/speedtest"))
+        .respond_with(json(
+            r#"{"success":true,"data":[{"url":"https://a.example/f"},{"url":"https://b.example/f"}]}"#,
+        ))
+        .mount(&server)
+        .await;
+
+    assert_eq!(
+        client.speed_test_url().await.expect("url").as_deref(),
+        Some("https://a.example/f")
+    );
+}
+
+#[tokio::test]
 async fn blank_api_key_is_not_configured() {
     let server = MockServer::start().await;
     let mut config = common::config();

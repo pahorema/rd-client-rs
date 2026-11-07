@@ -148,6 +148,20 @@ impl TorBox {
             .ok_or_else(|| DebridError::InvalidResponse("TorBox returned no user".to_owned()))
     }
 
+    /// Returns the test file of the download server TorBox reports as closest, or the
+    /// first one listed.
+    pub async fn speed_test_url(&self) -> Result<Option<String>, DebridError> {
+        let servers: Option<Vec<SpeedTestServer>> = self
+            .call(|| self.request(Method::GET, "speedtest", &[]))
+            .await?;
+        let servers = servers.unwrap_or_default();
+        let closest = servers.iter().position(|server| server.closest);
+        Ok(servers
+            .into_iter()
+            .nth(closest.unwrap_or(0))
+            .map(|server| server.url))
+    }
+
     /// Lists the torrents of the account followed by its queued torrents
     /// (at most 1000 of each; queued torrents have their own ids).
     pub async fn list_torrents(&self) -> Result<Vec<RemoteTorrent>, DebridError> {
@@ -950,6 +964,14 @@ struct CachedFile {
     size: Option<i64>,
 }
 
+/// A download server of a `speedtest` answer.
+#[derive(Debug, Deserialize)]
+struct SpeedTestServer {
+    url: String,
+    #[serde(default)]
+    closest: bool,
+}
+
 #[async_trait]
 impl DebridProvider for TorBox {
     fn kind(&self) -> Provider {
@@ -962,6 +984,10 @@ impl DebridProvider for TorBox {
 
     async fn user(&self) -> Result<DebridUser, DebridError> {
         self.user().await
+    }
+
+    async fn speed_test_url(&self) -> Result<Option<String>, DebridError> {
+        self.speed_test_url().await
     }
 
     async fn add_magnet(&self, magnet: &str) -> Result<String, DebridError> {

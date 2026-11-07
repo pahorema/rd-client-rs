@@ -152,4 +152,10 @@ pub trait DebridProvider: Send + Sync + std::fmt::Debug {
     ) -> Result<Option<String>, DebridError> {
         Ok(rdc_model::paths::relative_download_path(torrent, download))
     }
+
+    /// URL of a test file served by the provider's download servers, for measuring the
+    /// download speed; `None` when the provider publishes no such file.
+    async fn speed_test_url(&self) -> Result<Option<String>, DebridError> {
+        Ok(None)
+    }
 }
