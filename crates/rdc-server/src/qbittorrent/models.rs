@@ -21,36 +21,43 @@ pub(super) fn save_path(settings: &Settings) -> String {
     )
 }
 
+/// Directory of the torrent's category as the media manager sees it, the layout the engine
+/// writes to below the download directory.
 fn torrent_path(torrent: &Torrent, settings: &Settings) -> String {
     let root = save_path(settings);
-    torrent
-        .category
-        .as_deref()
-        .filter(|v| !v.trim().is_empty())
-        .map_or_else(
-            || root.clone(),
-            |category| {
-                Path::new(&root)
-                    .join(category)
-                    .to_string_lossy()
-                    .into_owned()
-            },
-        )
+    let category = paths::category_directory(torrent);
+    if category.as_os_str().is_empty() {
+        root
+    } else {
+        Path::new(&root)
+            .join(category)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// Plain components of a provider file path; `None` when it has none or any other kind.
+fn plain_relative(path: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(path.trim_matches(['/', '\\']).replace('\\', "/"));
+    (path
+        .components()
+        .all(|part| matches!(part, Component::Normal(_)))
+        && !path.as_os_str().is_empty())
+    .then_some(path)
 }
 
 fn content_path(torrent: &Torrent, settings: &Settings) -> String {
     let path = torrent_path(torrent, settings);
-    let Some(name) = torrent
-        .rd_name
-        .as_deref()
-        .filter(|name| !name.trim().is_empty())
-    else {
+    let Some(name) = torrent.rd_name.as_deref().and_then(paths::safe_component) else {
         return path;
     };
     let files = torrent.files();
-    if torrent.client_kind == Some(rdc_model::Provider::AllDebrid) && files.len() == 1 {
+    if torrent.client_kind == Some(rdc_model::Provider::AllDebrid)
+        && let [file] = files.as_slice()
+        && let Some(relative) = plain_relative(&file.path)
+    {
         return Path::new(&path)
-            .join(&files[0].path)
+            .join(relative)
             .to_string_lossy()
             .into_owned();
     }
@@ -62,16 +69,14 @@ fn content_path(torrent: &Torrent, settings: &Settings) -> String {
         .filter(|file| file.selected)
         .collect::<Vec<_>>();
     let file_name = if torrent.client_kind != Some(rdc_model::Provider::TorBox)
-        && selected.len() == 1
-        && !selected[0]
-            .path
-            .trim_matches(['/', '\\'])
-            .contains(['/', '\\'])
-        && Path::new(&selected[0].path)
+        && let [file] = selected.as_slice()
+        && !file.path.trim_matches(['/', '\\']).contains(['/', '\\'])
+        && Path::new(&file.path)
             .file_stem()
-            .is_some_and(|stem| stem.to_string_lossy().eq_ignore_ascii_case(name))
+            .is_some_and(|stem| stem.to_string_lossy().eq_ignore_ascii_case(&name))
+        && let Some(file_name) = paths::safe_component(file.path.trim_matches(['/', '\\']))
     {
-        selected[0].path.trim_matches(['/', '\\'])
+        file_name
     } else {
         name
     };
@@ -90,15 +95,7 @@ fn existing_content_path(torrent: &Torrent, root: &Path) -> Option<String> {
         .files()
         .iter()
         .filter(|file| file.selected)
-        .filter_map(|file| {
-            let path = file.path.trim_matches(['/', '\\']).replace('\\', "/");
-            let path = PathBuf::from(path);
-            (path
-                .components()
-                .all(|part| matches!(part, Component::Normal(_)))
-                && !path.as_os_str().is_empty())
-            .then_some(path)
-        })
+        .filter_map(|file| plain_relative(&file.path))
         .collect();
     let downloaded: Vec<&str> = torrent
         .downloads
@@ -111,7 +108,7 @@ fn existing_content_path(torrent: &Torrent, root: &Path) -> Option<String> {
         return None;
     }
     let mut candidates = Vec::new();
-    if let Some(name) = torrent.rd_name.as_deref() {
+    if let Some(name) = torrent.rd_name.as_deref().and_then(paths::safe_component) {
         candidates.push(root.join(name));
     }
     candidates.extend(downloaded.iter().map(|name| root.join(name)));
@@ -502,6 +499,57 @@ mod tests {
         assert_eq!(
             content_path(&torrent, &settings),
             format!("{}{}", nested.display(), std::path::MAIN_SEPARATOR)
+        );
+    }
+
+    #[tokio::test]
+    async fn content_paths_stay_below_the_download_root_like_the_files() {
+        let fixture = TestEngine::new().await.unwrap();
+        let settings = fixture.engine.settings();
+        let root = save_path(&settings);
+        let sep = std::path::MAIN_SEPARATOR;
+        for (category, name, directory) in [
+            (
+                Some("../x"),
+                "../../media/tv/Show",
+                format!("x{sep}mediatvShow"),
+            ),
+            (Some("/abs"), "/etc", format!("abs{sep}etc")),
+            (Some("a/b"), "Film", format!("ab{sep}Film")),
+            (Some(".."), "Film", "Film".to_owned()),
+        ] {
+            let torrent = Torrent {
+                category: category.map(str::to_owned),
+                rd_name: Some(name.to_owned()),
+                ..Torrent::default()
+            };
+            let expected = paths::torrent_directory(&torrent).unwrap();
+            assert_eq!(expected, Path::new(&directory), "{category:?} {name}");
+            assert_eq!(
+                content_path(&torrent, &settings),
+                format!("{}{sep}", Path::new(&root).join(&expected).display()),
+                "{category:?} {name}"
+            );
+            assert!(
+                torrent_path(&torrent, &settings).starts_with(root.trim_end_matches(sep)),
+                "{category:?}"
+            );
+        }
+        let mut torrent = Torrent {
+            rd_name: Some("Film".to_owned()),
+            client_kind: Some(Provider::AllDebrid),
+            ..Torrent::default()
+        };
+        torrent.set_files(&[RemoteFile {
+            id: 1,
+            path: "../../etc/passwd".to_owned(),
+            bytes: 1,
+            selected: true,
+            download_link: None,
+        }]);
+        assert_eq!(
+            content_path(&torrent, &settings),
+            format!("{root}Film{sep}")
         );
     }
     #[test]

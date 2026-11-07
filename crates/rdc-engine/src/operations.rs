@@ -2,7 +2,7 @@
 
 use std::{
     io,
-    path::{Component, Path, PathBuf},
+    path::{Component, Path},
     sync::Arc,
     time::Duration,
 };
@@ -10,6 +10,7 @@ use std::{
 use data_encoding::BASE64;
 use jiff::Timestamp;
 use rdc_debrid::AvailableFile;
+use rdc_model::paths::{category_directory, safe_component, torrent_directory};
 use rdc_model::{Torrent, TorrentStatus, paths};
 use rdc_store::{NewTorrent, RetryOnError};
 use rdc_torrent::{MagnetLink, TorrentFile};
@@ -825,24 +826,6 @@ fn is_queued(torrent: &Torrent) -> bool {
 
 fn message(error: impl std::fmt::Display) -> EngineError {
     EngineError::Message(error.to_string())
-}
-
-fn safe_component(value: &str) -> Option<String> {
-    let value = paths::remove_invalid_file_name_chars(value);
-    (!value.trim().is_empty() && value != ".").then_some(value)
-}
-
-fn category_directory(torrent: &Torrent) -> PathBuf {
-    torrent
-        .category
-        .as_deref()
-        .and_then(safe_component)
-        .map_or_else(PathBuf::new, PathBuf::from)
-}
-
-fn torrent_directory(torrent: &Torrent) -> Option<PathBuf> {
-    let name = safe_component(torrent.rd_name.as_deref()?)?;
-    Some(category_directory(torrent).join(name))
 }
 
 /// Never follow parent symlinks during cleanup, and unlink a final symlink itself.

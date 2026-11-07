@@ -352,6 +352,32 @@ pub(crate) fn eq_ignore_case(left: &str, right: &str) -> bool {
         .eq(right.chars().flat_map(char::to_uppercase))
 }
 
+/// `value` as one plain path component, sanitized with
+/// [`remove_invalid_file_name_chars`], or `None` when nothing usable remains
+/// (blank or `.`).
+pub fn safe_component(value: &str) -> Option<String> {
+    let value = remove_invalid_file_name_chars(value);
+    (!value.trim().is_empty() && value != ".").then_some(value)
+}
+
+/// Directory of the torrent's category below the download directory: its
+/// [`safe_component`], or an empty path without a usable category.
+pub fn category_directory(torrent: &Torrent) -> PathBuf {
+    torrent
+        .category
+        .as_deref()
+        .and_then(safe_component)
+        .map_or_else(PathBuf::new, PathBuf::from)
+}
+
+/// Directory the torrent's files are written to below the download
+/// directory: [`category_directory`] joined with the [`safe_component`] of
+/// [`Torrent::rd_name`], or `None` without a usable name.
+pub fn torrent_directory(torrent: &Torrent) -> Option<PathBuf> {
+    let name = safe_component(torrent.rd_name.as_deref()?)?;
+    Some(category_directory(torrent).join(name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
