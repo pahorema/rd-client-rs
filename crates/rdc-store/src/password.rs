@@ -45,6 +45,11 @@ const PRF_SHA1: u32 = 0;
 const PRF_SHA256: u32 = 1;
 const PRF_SHA512: u32 = 2;
 
+/// A current-format hash of random bytes with a random salt, which no
+/// password is expected to match.
+const DUMMY_HASH: &str =
+    "AQAAAAIAAYagAAAAEDN30OkWU3fIjPLo2TJgU0Ja5xxZL5Vsai3++gF+H87UuhzKoC2emvaHN+CPQXc7Aw==";
+
 /// Outcome of [`verify`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Verification {
@@ -67,6 +72,12 @@ pub(crate) async fn hash(password: &str) -> String {
 pub(crate) async fn verify(hashed: &str, password: &str) -> Verification {
     let (hashed, password) = (hashed.to_owned(), password.to_owned());
     off_thread(move || verify_now(&hashed, &password)).await
+}
+
+/// Spends the time of a [`verify`] against a current hash, so a login for
+/// an unknown name takes as long as one for a known name.
+pub(crate) async fn verify_dummy(password: &str) {
+    verify(DUMMY_HASH, password).await;
 }
 
 async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
@@ -179,6 +190,15 @@ mod tests {
         let salt: [u8; SALT_LENGTH] =
             core::array::from_fn(|index| u8::try_from(index).expect("small"));
         assert_eq!(hash_with_salt("Passw0rd!", &salt), V3_SHA512);
+    }
+
+    #[test]
+    fn the_dummy_hash_costs_a_full_current_derivation() {
+        let dummy = BASE64.decode(DUMMY_HASH.as_bytes()).expect("base64");
+        let fresh = BASE64.decode(hash_now("x").as_bytes()).expect("base64");
+        assert_eq!(dummy.len(), fresh.len());
+        assert_eq!(dummy[..HEADER_LENGTH], fresh[..HEADER_LENGTH]);
+        assert_eq!(verify_now(DUMMY_HASH, "Passw0rd!"), Verification::Failed);
     }
 
     #[tokio::test]

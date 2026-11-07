@@ -176,8 +176,10 @@ impl<'store> Users<'store> {
 
     /// Checks a login attempt. Failures never count towards a lockout.
     ///
-    /// A match against a weaker stored hash upgrades the hash (rotating the
-    /// security stamp); a match resets the failed-attempt counter.
+    /// An unknown name costs as much as a wrong password, so timing does not
+    /// reveal which names exist. A match against a weaker stored hash
+    /// upgrades the hash (rotating the security stamp); a match resets the
+    /// failed-attempt counter.
     ///
     /// # Errors
     ///
@@ -187,6 +189,7 @@ impl<'store> Users<'store> {
             return Ok(LoginOutcome::Failed);
         }
         let Some(mut account) = self.find_by_name(user_name).await? else {
+            password::verify_dummy(password).await;
             return Ok(LoginOutcome::Failed);
         };
         let locked = account.user.lockout_enabled
@@ -199,7 +202,10 @@ impl<'store> Users<'store> {
         }
         let verification = match account.password_hash.as_deref() {
             Some(hash) => password::verify(hash, password).await,
-            None => Verification::Failed,
+            None => {
+                password::verify_dummy(password).await;
+                Verification::Failed
+            }
         };
         match verification {
             Verification::Failed => return Ok(LoginOutcome::Failed),
