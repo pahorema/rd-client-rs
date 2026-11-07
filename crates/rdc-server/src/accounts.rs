@@ -160,10 +160,13 @@ async fn login(
     Ok(([(header::SET_COOKIE, cookie)], StatusCode::OK).into_response())
 }
 
+/// Signs out everywhere: a cookie copied elsewhere stops working along with this browser's.
 async fn logout(
     State(state): State<AppState>,
     scope: CookieScope,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    state.sessions.revoke(&headers).await.map_err(internal)?;
     let cookie = state.sessions.logout(&scope).map_err(internal)?;
     Ok(([(header::SET_COOKIE, cookie)], StatusCode::OK).into_response())
 }
@@ -438,6 +441,16 @@ mod tests {
                 .status(),
             StatusCode::FORBIDDEN
         );
+        let other_device = cookie(
+            &fixture
+                .send(
+                    "POST",
+                    &format!("{root}Login"),
+                    Some(json!({"userName":"alice","password":"Passw0rd!"})),
+                    None,
+                )
+                .await,
+        );
         let signed_out = fixture
             .send("POST", &format!("{root}Logout"), None, Some(&sid))
             .await;
@@ -448,13 +461,21 @@ mod tests {
                 .expect("cookie")
                 .contains("Max-Age=0")
         );
-        assert_eq!(
-            fixture
-                .send("GET", &format!("{root}IsLoggedIn"), None, None)
-                .await
-                .status(),
-            StatusCode::FORBIDDEN
-        );
+        for session in [None, Some(&sid), Some(&other_device)] {
+            assert_eq!(
+                fixture
+                    .send(
+                        "GET",
+                        &format!("{root}IsLoggedIn"),
+                        None,
+                        session.map(String::as_str)
+                    )
+                    .await
+                    .status(),
+                StatusCode::FORBIDDEN,
+                "logout ends every session of the account"
+            );
+        }
         let invalid = fixture
             .send(
                 "POST",

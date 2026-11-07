@@ -71,7 +71,9 @@ services:
 
 Open `http://<host>:6500`, create the account (the password needs at least 8
 characters, including a digit), then enter the API key of your debrid
-provider. Everything else is configured on the Settings page.
+provider. Everything else is configured on the Settings page. Logging out ends
+every session of the account, in all browsers; changing the credentials on the
+Profile page needs the current password.
 
 Images are published for `linux/amd64` and `linux/arm64`. Tags: `latest` and
 `X.Y.Z` / `X.Y` for releases, `edge` for the main branch.

@@ -180,11 +180,28 @@ impl Sessions {
 
     /// Returns an expiring `SID` Set-Cookie header at this request's mount path.
     ///
-    /// Logout removes the browser cookie, not other sessions of the account.
+    /// This removes the browser cookie only; [`Self::revoke`] ends the account's other sessions.
     /// # Errors
     /// Fails if the base path cannot be represented safely in a cookie.
     pub fn logout(&self, scope: &CookieScope) -> Result<HeaderValue, AuthError> {
         cookie_header("", 0, scope)
+    }
+
+    /// Ends every session of the account the request's valid cookie belongs to,
+    /// by rotating its security stamp; requests without a valid cookie change nothing.
+    ///
+    /// # Errors
+    /// Fails on user-store errors.
+    pub async fn revoke(&self, headers: &HeaderMap) -> Result<(), AuthError> {
+        if let Some(session) = self.authenticate(headers, now()).await {
+            self.0
+                .store
+                .users()
+                .rotate_security_stamp(&session.user_id)
+                .await?;
+            self.invalidate(&session.user_id).await;
+        }
+        Ok(())
     }
 
     /// Checks the cookie only; malformed cookies and store failures fail closed.
