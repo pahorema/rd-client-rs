@@ -2,12 +2,15 @@ import { auth, torrents as torrentsApi } from './api/index.js';
 import type { DiskSpaceStatus, RateLimitStatus, Torrent } from './api/types.js';
 import { connectEvents } from './events.js';
 
-/** Live server state pushed over the event stream. */
+/**
+ * Live server state pushed over the event stream. Every update replaces a value whole, so
+ * the values are kept raw instead of being proxied deeply on each push.
+ */
 class LiveState {
 	/** Latest torrent list with download statistics; `null` until the first update. */
-	torrents = $state<Torrent[] | null>(null);
-	diskSpace = $state<DiskSpaceStatus | null>(null);
-	rateLimit = $state<RateLimitStatus | null>(null);
+	torrents = $state.raw<Torrent[] | null>(null);
+	diskSpace = $state.raw<DiskSpaceStatus | null>(null);
+	rateLimit = $state.raw<RateLimitStatus | null>(null);
 	connected = $state(false);
 }
 

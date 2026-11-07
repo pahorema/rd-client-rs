@@ -39,7 +39,7 @@
 	import { untrack } from 'svelte';
 	import { SvelteSet } from 'svelte/reactivity';
 
-	let detail = $state<Torrent | null>(null);
+	let detail = $state.raw<Torrent | null>(null);
 	let loadError = $state<string | null>(null);
 	let copied = $state(false);
 	// Without clipboard access (plain HTTP) the magnet link is shown selected for manual copying.
