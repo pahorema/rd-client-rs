@@ -79,7 +79,9 @@ section! {
         },
         "RunOnTorrentCompleteArguments" => run_on_torrent_complete_arguments: Option<String> {
             display_name: "External program arguments",
-            description: "When the executable above is executed, use these parameters.\n\
+            description: "When the executable above is executed, use these parameters. \
+                They are split into arguments like a shell command line before the parameters \
+                are replaced, so a replaced value always stays within its own argument.\n\
                 Supports the following parameters:\n\
                 %N: Torrent name\n\
                 %L: Category\n\

@@ -19,7 +19,7 @@ const COMPLETION_TIMEOUT: Duration = Duration::from_mins(10);
 pub struct CompletionSettings {
     /// Executable path, used directly without a shell; missing or blank disables execution.
     pub program: Option<String>,
-    /// Argument template, parsed as shell-style words without executing shell expressions.
+    /// Argument template, split into shell-style words without executing shell expressions.
     pub arguments: Option<String>,
     /// Local download root, before the optional category component.
     pub download_path: PathBuf,
@@ -59,14 +59,15 @@ pub fn run_torrent_complete(
     run_with_timeout(settings, torrent, download_count, COMPLETION_TIMEOUT)
 }
 
-/// Renders completion tokens once, leaving tokens inside substituted values untouched.
+/// Splits the argument template into shell-style words, then renders completion tokens
+/// inside each word once, leaving tokens inside substituted values untouched.
 ///
-/// `%N` (torrent name), `%L` (category), `%F` (single top-level file, otherwise torrent
-/// directory), `%R` (download root including category), and `%D` (torrent directory) are
-/// wrapped in literal double quotes without escaping their values. `%C` (download count),
-/// `%Z` (byte size), and `%I` (hash) are unquoted. Missing
-/// names and categories render as empty quoted strings, a missing size renders empty,
-/// and unknown tokens remain unchanged. Tokens already supply their own quotes.
+/// Values are substituted after splitting, so a value never adds, splits or ends an argument
+/// whatever quotes, spaces or backslashes it contains. `%N` (torrent name), `%L` (category),
+/// `%F` (single top-level file, otherwise torrent directory), `%R` (download root including
+/// category), `%D` (torrent directory), `%C` (download count), `%Z` (byte size) and `%I`
+/// (hash) are replaced by their plain values. Missing names, categories and sizes render
+/// empty, and unknown tokens remain unchanged.
 ///
 /// Paths use sanitized category/name components, with `Unknown` for a missing name.
 /// Missing torrent directories are allowed. File discovery is non-recursive and is only
@@ -74,13 +75,14 @@ pub fn run_torrent_complete(
 ///
 /// # Errors
 ///
-/// Returns an I/O error if an existing torrent directory cannot be inspected.
+/// Returns an argument error for an unterminated quote or escape in the template, and an
+/// I/O error if an existing torrent directory cannot be inspected.
 pub async fn render_completion_arguments(
     template: &str,
     download_path: &Path,
     torrent: &Torrent,
     download_count: usize,
-) -> Result<String, CompletionError> {
+) -> Result<Vec<String>, CompletionError> {
     Values::new(download_path, torrent, download_count)
         .render(template)
         .await
@@ -117,25 +119,33 @@ impl Values {
         }
     }
 
-    async fn render(&self, template: &str) -> Result<String, CompletionError> {
-        let file_path = if template.contains("%F") {
+    async fn render(&self, template: &str) -> Result<Vec<String>, CompletionError> {
+        let words = shell_words::split(template)?;
+        let file_path = if words.iter().any(|word| word.contains("%F")) {
             single_file_or_directory(&self.torrent_path).await?
         } else {
             self.torrent_path.clone()
         };
-        let mut rendered = String::with_capacity(template.len());
-        let mut chars = template.chars();
+        Ok(words
+            .iter()
+            .map(|word| self.substitute(word, &file_path))
+            .collect())
+    }
+
+    fn substitute(&self, word: &str, file_path: &Path) -> String {
+        let mut rendered = String::with_capacity(word.len());
+        let mut chars = word.chars();
         while let Some(character) = chars.next() {
             if character != '%' {
                 rendered.push(character);
                 continue;
             }
             match chars.next() {
-                Some('N') => push_quoted(&mut rendered, &self.name),
-                Some('L') => push_quoted(&mut rendered, &self.category),
-                Some('F') => push_quoted(&mut rendered, &file_path.to_string_lossy()),
-                Some('R') => push_quoted(&mut rendered, &self.download_path.to_string_lossy()),
-                Some('D') => push_quoted(&mut rendered, &self.torrent_path.to_string_lossy()),
+                Some('N') => rendered.push_str(&self.name),
+                Some('L') => rendered.push_str(&self.category),
+                Some('F') => rendered.push_str(&file_path.to_string_lossy()),
+                Some('R') => rendered.push_str(&self.download_path.to_string_lossy()),
+                Some('D') => rendered.push_str(&self.torrent_path.to_string_lossy()),
                 Some('C') => rendered.push_str(&self.download_count.to_string()),
                 Some('Z') => {
                     if let Some(size) = self.size {
@@ -150,14 +160,8 @@ impl Values {
                 None => rendered.push('%'),
             }
         }
-        Ok(rendered)
+        rendered
     }
-}
-
-fn push_quoted(destination: &mut String, value: &str) {
-    destination.push('"');
-    destination.push_str(value);
-    destination.push('"');
 }
 
 async fn single_file_or_directory(directory: &Path) -> io::Result<PathBuf> {
@@ -196,7 +200,7 @@ fn run_with_timeout(
         async move {
             let result = async {
                 let arguments = values.render(&template).await?;
-                execute(&program, &arguments, timeout).await
+                execute(&program, arguments, timeout).await
             }
             .await;
             if let Err(error) = result {
@@ -207,8 +211,11 @@ fn run_with_timeout(
     ))
 }
 
-async fn execute(program: &str, arguments: &str, timeout: Duration) -> Result<(), CompletionError> {
-    let arguments = shell_words::split(arguments)?;
+async fn execute(
+    program: &str,
+    arguments: Vec<String>,
+    timeout: Duration,
+) -> Result<(), CompletionError> {
     let mut child = Command::new(program)
         .args(arguments)
         .stdin(Stdio::null())
@@ -383,12 +390,16 @@ mod tests {
             .expect("write torrent file");
         let template = "%N %L %F %R %D %C %Z %I";
         let download_path = directory.path().join("Movies");
-        let expected = format!(
-            "\"TestTorrent\" \"Movies\" \"{}\" \"{}\" \"{}\" 1 100 123ABC",
-            file_path.display(),
-            download_path.display(),
-            torrent_path.display(),
-        );
+        let expected = [
+            "TestTorrent".to_owned(),
+            "Movies".to_owned(),
+            file_path.display().to_string(),
+            download_path.display().to_string(),
+            torrent_path.display().to_string(),
+            "1".to_owned(),
+            "100".to_owned(),
+            "123ABC".to_owned(),
+        ];
         assert_eq!(
             render_completion_arguments(
                 template,
@@ -464,7 +475,10 @@ mod tests {
             render_completion_arguments("%N %L %I %C %Z %Q %", directory.path(), &torrent, 7)
                 .await
                 .expect("render completion arguments");
-        assert_eq!(arguments, "\"Name %L %I\" \"Category %N %Z\" %C 7 123 %Q %");
+        assert_eq!(
+            arguments,
+            ["Name %L %I", "Category %N %Z", "%C", "7", "123", "%Q", "%"]
+        );
     }
 
     #[tokio::test]
@@ -478,11 +492,7 @@ mod tests {
         let path = directory.path().join("Unknown");
         assert_eq!(
             rendered,
-            format!(
-                "\"\"|\"\"|\"{}\"|\"{}\"|0||",
-                path.display(),
-                path.display()
-            )
+            [format!("||{}|{}|0||", path.display(), path.display())]
         );
         assert!(
             !path.exists(),
@@ -505,7 +515,7 @@ mod tests {
             render_completion_arguments("%F", directory.path(), &torrent, 1)
                 .await
                 .expect("render file token for nested-only files"),
-            format!("\"{}\"", path.display())
+            [path.display().to_string()]
         );
         fs::write(path.join("one.txt"), b"one")
             .await
@@ -514,7 +524,7 @@ mod tests {
             render_completion_arguments("%F", directory.path(), &torrent, 1)
                 .await
                 .expect("render file token for single top-level file"),
-            format!("\"{}\"", path.join("one.txt").display())
+            [path.join("one.txt").display().to_string()]
         );
         fs::write(path.join("two.txt"), b"two")
             .await
@@ -523,12 +533,12 @@ mod tests {
             render_completion_arguments("%F", directory.path(), &torrent, 1)
                 .await
                 .expect("render file token for multiple top-level files"),
-            format!("\"{}\"", path.display())
+            [path.display().to_string()]
         );
     }
 
     #[tokio::test]
-    async fn ordinary_quoted_values_remain_single_literal_arguments() {
+    async fn values_with_spaces_and_shell_syntax_remain_single_literal_arguments() {
         let directory = tempfile::tempdir().expect("create temporary download directory");
         let torrent = Torrent {
             rd_name: Some("a torrent name $(touch ignored)".to_owned()),
@@ -539,8 +549,7 @@ mod tests {
             .await
             .expect("render completion arguments");
         assert_eq!(
-            shell_words::split(&rendered)
-                .expect("rendered ordinary arguments have balanced quotes"),
+            rendered,
             vec![
                 torrent.rd_name.expect("test torrent has a name"),
                 torrent.category.expect("test torrent has a category")
@@ -549,16 +558,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quoting_wraps_values_without_escaping_quotes_or_backslashes() {
+    async fn values_never_cross_argument_boundaries() {
         let directory = tempfile::tempdir().expect("create temporary download directory");
         let torrent = Torrent {
-            rd_name: Some("a \"quoted\" \\ name".to_owned()),
+            rd_name: Some("x\" \"--delete-after".to_owned()),
+            category: Some("trailing \\".to_owned()),
             ..Torrent::default()
         };
-        let rendered = render_completion_arguments("%N", directory.path(), &torrent, 0)
-            .await
-            .expect("render completion arguments");
-        assert_eq!(rendered, "\"a \"quoted\" \\ name\"");
+        let rendered = render_completion_arguments(
+            "--name=%N \"%L\" 'literal %I'",
+            directory.path(),
+            &torrent,
+            0,
+        )
+        .await
+        .expect("render completion arguments");
+        assert_eq!(
+            rendered,
+            ["--name=x\" \"--delete-after", "trailing \\", "literal "]
+        );
     }
 
     #[tokio::test]
