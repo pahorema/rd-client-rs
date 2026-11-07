@@ -175,6 +175,25 @@ impl Settings {
     }
 }
 
+/// Shown by `Debug` in place of a secret.
+const REDACTED: &str = "*****";
+
+/// A proxy address with any `user:password@` credentials replaced.
+fn redacted_proxy(proxy: &str) -> String {
+    let authority = proxy.find("://").map_or(0, |scheme| scheme + 3);
+    let end = proxy[authority..]
+        .find(['/', '?', '#'])
+        .map_or(proxy.len(), |end| authority + end);
+    match proxy[authority..end].rfind('@') {
+        Some(at) => format!(
+            "{}{REDACTED}{}",
+            &proxy[..authority],
+            &proxy[authority + at..]
+        ),
+        None => proxy.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +201,32 @@ mod tests {
         AuthenticationType, DownloadClient, DownloadClientLogLevel, LogLevel, Provider,
         TorrentFinishedAction, TorrentHostDownloadAction,
     };
+
+    #[test]
+    fn debug_output_hides_secrets() {
+        let mut settings = Settings::new();
+        "api-key-value".clone_into(&mut settings.provider.api_key);
+        "aria2-secret-value".clone_into(&mut settings.download_client.aria2c_secret);
+        settings.download_client.download_station_password = Some("ds-password-value".to_owned());
+        settings.download_client.proxy_server =
+            Some("http://proxy-user:proxy-pass@proxy.local:8080/path".to_owned());
+        let debug = format!("{settings:?}");
+        for secret in [
+            "api-key-value",
+            "aria2-secret-value",
+            "ds-password-value",
+            "proxy-user",
+            "proxy-pass",
+        ] {
+            assert!(!debug.contains(secret), "{secret} leaked: {debug}");
+        }
+        assert!(
+            debug.contains("http://*****@proxy.local:8080/path"),
+            "{debug}"
+        );
+        assert_eq!(redacted_proxy("socks5://host:1080"), "socks5://host:1080");
+        assert_eq!(redacted_proxy("user:pass@host:3128"), "*****@host:3128");
+    }
 
     /// The expected default rows of a `<group>:Default` group.
     fn torrent_default_rows(group: &str) -> Vec<(String, Option<String>)> {

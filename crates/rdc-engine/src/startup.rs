@@ -5,11 +5,7 @@ use rdc_model::settings::Settings;
 use rdc_store::Store;
 
 pub(crate) async fn repair(store: &Store, settings: &Settings) -> Result<(), EngineError> {
-    let mut redacted = settings.clone();
-    "*****".clone_into(&mut redacted.provider.api_key);
-    "*****".clone_into(&mut redacted.download_client.aria2c_secret);
-    redacted.download_client.download_station_password = Some("*****".to_owned());
-    tracing::debug!(settings = ?redacted, "loaded engine settings");
+    tracing::debug!(?settings, "loaded engine settings");
     for torrent in store.torrents().list().await? {
         if torrent.completed.is_some() {
             continue;

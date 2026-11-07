@@ -1,10 +1,15 @@
 //! The `DownloadClient` settings group.
 
+use std::fmt;
+
 use super::field::section;
+use super::{REDACTED, redacted_proxy};
 use crate::{DownloadClient, DownloadClientLogLevel};
 
 /// How finished files reach the host (`DownloadClient:*` keys).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` hides the aria2 secret, the Synology password and proxy credentials.
+#[derive(Clone, PartialEq, Eq)]
 pub struct DownloadClientSettings {
     /// Engine used for new torrents.
     pub client: DownloadClient,
@@ -83,6 +88,48 @@ impl Default for DownloadClientSettings {
             disk_space_check_interval_minutes: 5,
             log_level: DownloadClientLogLevel::None,
         }
+    }
+}
+
+impl fmt::Debug for DownloadClientSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DownloadClientSettings")
+            .field("client", &self.client)
+            .field("download_path", &self.download_path)
+            .field("mapped_path", &self.mapped_path)
+            .field("max_speed", &self.max_speed)
+            .field("max_speed_slider_max", &self.max_speed_slider_max)
+            .field("parallel_count", &self.parallel_count)
+            .field("chunk_count", &self.chunk_count)
+            .field("buffer_size", &self.buffer_size)
+            .field("timeout", &self.timeout)
+            .field(
+                "proxy_server",
+                &self.proxy_server.as_deref().map(redacted_proxy),
+            )
+            .field("bind_to_specific_ip", &self.bind_to_specific_ip)
+            .field("bind_ip_address", &self.bind_ip_address)
+            .field("aria2c_url", &self.aria2c_url)
+            .field("aria2c_secret", &REDACTED)
+            .field("aria2c_download_path", &self.aria2c_download_path)
+            .field("rclone_mount_path", &self.rclone_mount_path)
+            .field("download_station_url", &self.download_station_url)
+            .field("download_station_username", &self.download_station_username)
+            .field(
+                "download_station_password",
+                &self.download_station_password.as_ref().map(|_| REDACTED),
+            )
+            .field(
+                "download_station_download_path",
+                &self.download_station_download_path,
+            )
+            .field("minimum_free_space_gb", &self.minimum_free_space_gb)
+            .field(
+                "disk_space_check_interval_minutes",
+                &self.disk_space_check_interval_minutes,
+            )
+            .field("log_level", &self.log_level)
+            .finish()
     }
 }
 

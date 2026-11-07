@@ -1,11 +1,15 @@
 //! The `Provider` settings group.
 
-use super::TorrentDefaults;
+use std::fmt;
+
 use super::field::section;
+use super::{REDACTED, TorrentDefaults};
 use crate::Provider;
 
 /// The debrid provider account and polling (`Provider:*` keys).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` hides the API key.
+#[derive(Clone, PartialEq, Eq)]
 pub struct ProviderSettings {
     /// The debrid service in use.
     pub provider: Provider,
@@ -43,6 +47,23 @@ impl Default for ProviderSettings {
             prefer_zipped_downloads: false,
             default: TorrentDefaults::default(),
         }
+    }
+}
+
+impl fmt::Debug for ProviderSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProviderSettings")
+            .field("provider", &self.provider)
+            .field("api_key", &REDACTED)
+            .field("api_hostname", &self.api_hostname)
+            .field("auto_import", &self.auto_import)
+            .field("auto_delete", &self.auto_delete)
+            .field("timeout", &self.timeout)
+            .field("check_interval", &self.check_interval)
+            .field("max_parallel_downloads", &self.max_parallel_downloads)
+            .field("prefer_zipped_downloads", &self.prefer_zipped_downloads)
+            .field("default", &self.default)
+            .finish()
     }
 }
 
