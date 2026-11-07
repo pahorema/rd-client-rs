@@ -12,7 +12,7 @@ use rdc_model::LogLevel;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::{
     Registry,
-    filter::LevelFilter,
+    filter::{LevelFilter, Targets},
     fmt::{FmtContext, FormatEvent, FormatFields, MakeWriter, format::Writer},
     layer::SubscriberExt,
     registry::LookupSpan,
@@ -97,7 +97,11 @@ where
     let format = RedactedFormat {
         secrets: secrets.clone(),
     };
-    let subscriber = Registry::default().with(level).with(
+    // The database driver logs every query at debug; only its warnings (slow queries) are useful.
+    let quiet_database = Targets::new()
+        .with_default(LevelFilter::TRACE)
+        .with_target("sqlx", LevelFilter::WARN);
+    let subscriber = Registry::default().with(level).with(quiet_database).with(
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
             .event_format(format)
