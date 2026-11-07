@@ -84,6 +84,37 @@ async fn list_groups_downloads_and_ignores_other_row_types() {
 }
 
 #[tokio::test]
+async fn incomplete_listing_and_payloadless_get_skip_what_they_do_not_need() {
+    let (_dir, store) = temp_store().await;
+    let pool = &store.pool;
+    insert_torrent_row(pool, FIRST, "a", "2026-01-01 10:00:00+00:00", 0).await;
+    insert_torrent_row(pool, SECOND, "b", "2026-01-01 11:00:00+00:00", 0).await;
+    insert_download_row(pool, THIRD, FIRST, "https://host/1").await;
+    insert_download_row(pool, FOURTH, SECOND, "https://host/2").await;
+    execute(
+        pool,
+        r#"UPDATE "Torrents" SET "Completed" = '2026-01-02 10:00:00+00:00'
+           WHERE "TorrentId" = '0A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10';
+           INSERT INTO "TorrentPayloads" VALUES ('1A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10', 'magnet')"#,
+    )
+    .await;
+
+    let torrents = store.torrents().list_incomplete().await.expect("list");
+    assert_eq!(torrents.len(), 1);
+    assert_eq!(torrents[0].torrent_id, id(SECOND));
+    assert_eq!(torrents[0].downloads.len(), 1);
+    assert_eq!(torrents[0].downloads[0].path, "https://host/2");
+    let state = store
+        .torrents()
+        .get_without_payload(id(SECOND))
+        .await
+        .expect("get")
+        .expect("torrent");
+    assert_eq!(state.payload, None);
+    assert_eq!(state.downloads, torrents[0].downloads);
+}
+
+#[tokio::test]
 async fn get_decodes_every_column_with_downloads_and_payload() {
     let (_dir, store) = temp_store().await;
     let pool = &store.pool;

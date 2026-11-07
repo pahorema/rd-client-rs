@@ -57,23 +57,57 @@ impl<'store> Torrents<'store> {
     ///
     /// Fails on database errors and undecodable rows.
     pub async fn list(&self) -> Result<Vec<Torrent>> {
-        let rows = sqlx::query(concat!(
-            "SELECT ",
-            torrent_columns!(),
-            r#" FROM "Torrents" WHERE "Type" = 0 ORDER BY COALESCE("Priority", 9999), rowid"#
-        ))
-        .fetch_all(self.pool)
-        .await?;
+        self.list_matching(
+            concat!(
+                "SELECT ",
+                torrent_columns!(),
+                r#" FROM "Torrents" WHERE "Type" = 0 ORDER BY rowid"#
+            ),
+            concat!(
+                "SELECT ",
+                download_columns!(),
+                r#" FROM "Downloads" WHERE "TorrentId" IN
+                    (SELECT "TorrentId" FROM "Torrents" WHERE "Type" = 0) ORDER BY rowid"#
+            ),
+        )
+        .await
+    }
+
+    /// Like [`list`](Self::list), restricted to torrents that are not
+    /// completed.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors and undecodable rows.
+    pub async fn list_incomplete(&self) -> Result<Vec<Torrent>> {
+        self.list_matching(
+            concat!(
+                "SELECT ",
+                torrent_columns!(),
+                r#" FROM "Torrents" WHERE "Type" = 0 AND "Completed" IS NULL ORDER BY rowid"#
+            ),
+            concat!(
+                "SELECT ",
+                download_columns!(),
+                r#" FROM "Downloads" WHERE "TorrentId" IN
+                    (SELECT "TorrentId" FROM "Torrents" WHERE "Type" = 0 AND "Completed" IS NULL)
+                    ORDER BY rowid"#
+            ),
+        )
+        .await
+    }
+
+    /// Runs a torrent and a download query selecting the same torrents and
+    /// returns the torrents with their downloads in priority order.
+    async fn list_matching(
+        &self,
+        torrents_sql: &'static str,
+        downloads_sql: &'static str,
+    ) -> Result<Vec<Torrent>> {
+        let rows = sqlx::query(torrents_sql).fetch_all(self.pool).await?;
         let mut torrents = rows.iter().map(from_row).collect::<Result<Vec<_>>>()?;
 
-        let rows = sqlx::query(concat!(
-            "SELECT ",
-            download_columns!(),
-            r#" FROM "Downloads" WHERE "TorrentId" IN
-                (SELECT "TorrentId" FROM "Torrents" WHERE "Type" = 0) ORDER BY rowid"#
-        ))
-        .fetch_all(self.pool)
-        .await?;
+        let rows = sqlx::query(downloads_sql).fetch_all(self.pool).await?;
         let mut by_torrent: HashMap<Uuid, Vec<Download>> = HashMap::new();
         for row in &rows {
             let download = downloads::from_row(row)?;
@@ -96,11 +130,23 @@ impl<'store> Torrents<'store> {
     ///
     /// Fails on database errors and undecodable rows.
     pub async fn get(&self, torrent_id: Uuid) -> Result<Option<Torrent>> {
+        let Some(mut torrent) = self.get_without_payload(torrent_id).await? else {
+            return Ok(None);
+        };
+        torrent.payload = self.payload(torrent_id).await?;
+        Ok(Some(torrent))
+    }
+
+    /// The torrent with this id and its downloads, without its payload.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors and undecodable rows.
+    pub async fn get_without_payload(&self, torrent_id: Uuid) -> Result<Option<Torrent>> {
         let Some(mut torrent) = row_by_id(self.pool, torrent_id).await? else {
             return Ok(None);
         };
         torrent.downloads = self.downloads_of(torrent_id).await?;
-        torrent.payload = self.payload(torrent_id).await?;
         Ok(Some(torrent))
     }
 
