@@ -186,7 +186,7 @@ impl Shared {
                 .tell_all()
                 .await
                 .map_err(|error| fail(error.to_string()))?;
-            if downloads.iter().any(|download| has_uri(download, url)) {
+            if downloads.iter().any(|download| download.has_uri(url)) {
                 return Err(fail(format!(
                     "The download link {url} has already been added to Aria2"
                 )));
@@ -254,13 +254,6 @@ async fn add_or_adopt(
     let added = gid.insert(added);
     client.tell_status(added).await?;
     Ok(added.clone())
-}
-
-fn has_uri(download: &DownloadStatus, url: &str) -> bool {
-    download
-        .files
-        .iter()
-        .any(|file| file.uris.iter().any(|uri| uri.uri == url))
 }
 
 #[async_trait]
