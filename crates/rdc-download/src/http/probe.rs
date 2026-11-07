@@ -5,12 +5,12 @@ use std::time::Duration;
 use reqwest::header::{
     ACCEPT_RANGES, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, HeaderMap, HeaderName,
 };
-use reqwest::{Response, StatusCode, Url};
+use reqwest::{Response, Url};
 
 use super::connection::{ByteRange, Context};
 use super::error::{TransferError, is_transient_status};
 
-/// Retries of a probe answered with a passing server error.
+/// Retries of a probe that failed on a passing transport or server condition.
 const MAX_PROBE_RETRIES: u32 = 3;
 /// Longest wait between probe attempts.
 const MAX_PROBE_RETRY_DELAY: Duration = Duration::from_secs(10);
@@ -32,20 +32,17 @@ pub(crate) struct RemoteFile {
 
 /// Probes `url` with a `Range: bytes=0-0` request.
 ///
-/// Servers that refuse the range request are asked again without it. Probes answered with a
-/// passing server condition (throttling, overload) are retried up to three times.
+/// Servers that refuse the range request are asked again without it. Probes failing on a
+/// passing condition (a timeout, a dropped connection, throttling, overload) are retried up
+/// to three times.
 pub(crate) async fn probe(context: &Context, url: &Url) -> Result<RemoteFile, TransferError> {
     let mut attempt = 0;
     loop {
         attempt += 1;
         match probe_once(context, url).await {
-            Err(TransferError::Status(status))
-                if is_transient_status(status)
-                    && !status.is_redirection()
-                    && attempt <= MAX_PROBE_RETRIES =>
-            {
+            Err(error) if worth_retrying(&error) && attempt <= MAX_PROBE_RETRIES => {
                 let delay = (context.config().read_timeout() * attempt).min(MAX_PROBE_RETRY_DELAY);
-                tracing::debug!("Probe of {url} answered {status}, retrying in {delay:?}");
+                tracing::debug!("Probe of {url} failed ({error}), retrying in {delay:?}");
                 Context::sleep(&context.cancel, delay).await?;
             }
             result => return result,
@@ -53,14 +50,23 @@ pub(crate) async fn probe(context: &Context, url: &Url) -> Result<RemoteFile, Tr
     }
 }
 
+/// Whether a failed probe may succeed when sent again; a redirect the client could not
+/// follow (no target, or too many hops) will not.
+fn worth_retrying(error: &TransferError) -> bool {
+    match error {
+        TransferError::Status(status) => !status.is_redirection() && is_transient_status(*status),
+        TransferError::Http(error) if error.is_redirect() => false,
+        error => error.is_transient(),
+    }
+}
+
 async fn probe_once(context: &Context, url: &Url) -> Result<RemoteFile, TransferError> {
     let cancel = &context.cancel;
     match context.get(url, Some(FIRST_BYTE), cancel).await {
         Ok(response) => Ok(describe(&response)),
-        Err(TransferError::Status(status))
-            if status == StatusCode::RANGE_NOT_SATISFIABLE || !status.is_redirection() =>
-        {
-            // Some servers refuse range requests although the file downloads fine without one.
+        // Some servers refuse range requests (403, 404, 416, 503…) although the file
+        // downloads fine without one.
+        Err(TransferError::Status(status)) if !status.is_redirection() => {
             let plain = describe(&context.get(url, None, cancel).await?);
             if !(status.is_server_error() || is_transient_status(status)) {
                 return Ok(plain);

@@ -68,6 +68,8 @@ pub struct Reply {
     pub abort_after: Option<usize>,
     /// Stop sending for the duration after this many body bytes.
     pub stall_after: Option<(usize, Duration)>,
+    /// Close the connection without answering.
+    pub hang_up: bool,
 }
 
 impl Reply {
@@ -81,6 +83,15 @@ impl Reply {
             write_delay: Duration::ZERO,
             abort_after: None,
             stall_after: None,
+            hang_up: false,
+        }
+    }
+
+    /// Closes the connection after reading the request, before any response byte.
+    pub fn hang_up() -> Self {
+        Self {
+            hang_up: true,
+            ..Self::status(200)
         }
     }
 
@@ -245,6 +256,9 @@ async fn serve(stream: TcpStream, handler: &Handler, stats: &Stats) {
 }
 
 async fn write_reply(stream: &mut TcpStream, reply: &Reply) -> std::io::Result<()> {
+    if reply.hang_up {
+        return Ok(());
+    }
     let mut head = format!(
         "HTTP/1.1 {} Scripted\r\nConnection: close\r\n",
         reply.status

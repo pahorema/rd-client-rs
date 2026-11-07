@@ -313,6 +313,41 @@ async fn probe_retries_passing_server_errors() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn probe_retries_dropped_connections() {
+    let data = test_data(4096);
+    let probes = Arc::new(AtomicUsize::new(0));
+    let server = {
+        let data = Arc::clone(&data);
+        let probes = Arc::clone(&probes);
+        TestServer::start(move |request| {
+            if probes.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Reply::hang_up();
+            }
+            file_reply(&data, request, &FileOptions::default())
+        })
+        .await
+    };
+    let fast = InternalConfig {
+        timeout_ms: 100,
+        ..config()
+    };
+    let (run, outcome) = download(&server.url("/file.bin"), fast).await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+    let first_two: Vec<_> = server
+        .requests()
+        .iter()
+        .take(2)
+        .map(support::Request::range)
+        .collect();
+    assert_eq!(
+        first_two,
+        [Some((0, Some(0))); 2],
+        "the probe was sent again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn range_refusing_servers_are_probed_again_without_range() {
     let data = test_data(4096);
     let server = {
