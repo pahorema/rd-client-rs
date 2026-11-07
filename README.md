@@ -165,7 +165,9 @@ development, `bun run dev` in `web/` serves the UI with hot reload and proxies
 the API to a server on port 6500.
 
 Release binaries for Linux (static), macOS and Windows are attached to each
-[GitHub release](https://github.com/pahorema/rd-client-rs/releases).
+[GitHub release](https://github.com/pahorema/rd-client-rs/releases), with
+signed build provenance: check an archive with
+`gh attestation verify <archive> --repo pahorema/rd-client-rs`.
 
 ## Credits
 

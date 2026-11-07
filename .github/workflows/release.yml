@@ -75,6 +75,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Signed build provenance for the archives.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -83,6 +86,9 @@ jobs:
           path: dist
       - working-directory: dist
         run: sha256sum rd-client-* > SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/rd-client-*
       - env:
           GH_TOKEN: ${{ github.token }}
         run: >
