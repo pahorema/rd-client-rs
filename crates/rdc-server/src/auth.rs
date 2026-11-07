@@ -3,18 +3,19 @@
 //! Protect routers with `from_fn_with_state(AuthPolicy::new(...), require_auth)`.
 //! Successful requests carry [`RequestUser`]. Anonymous endpoints can call
 //! [`Sessions::is_authenticated`] and [`AuthPolicy::is_disabled`] themselves.
-//! After a credential update, await [`Sessions::invalidate`] before responding.
+//! After a credential update, call [`Sessions::invalidate`] before responding.
 //! Login and logout return a header to append as `SET_COOKIE`; both must receive
 //! the request's [`CookieScope`].
 
 use std::{
+    collections::HashMap,
     convert::Infallible,
     fmt,
     fs::OpenOptions,
     io::{self, Read, Seek, SeekFrom, Write},
     net::{IpAddr, SocketAddr},
     path::Path,
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -29,7 +30,6 @@ use hmac::{Hmac, KeyInit, Mac};
 use rdc_store::{LoginOutcome, Store, User};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use tokio::sync::Mutex;
 
 use crate::{
     http::RequestBasePath,
@@ -100,12 +100,20 @@ pub struct Sessions(Arc<Inner>);
 struct Inner {
     store: Store,
     signer: Signature,
-    stamp: Mutex<Option<CachedStamp>>,
+    stamps: Mutex<StampCache>,
     throttle: LoginThrottle,
 }
 
+/// Security-stamp digests by user id. The lock is never held across a database read;
+/// `generation` changes on every invalidation, so a read that started before one
+/// cannot store its outdated result.
+#[derive(Default)]
+struct StampCache {
+    generation: u64,
+    entries: HashMap<String, CachedStamp>,
+}
+
 struct CachedStamp {
-    user_id: String,
     digest: [u8; 32],
     loaded: Instant,
 }
@@ -138,7 +146,7 @@ impl Sessions {
         Ok(Self(Arc::new(Inner {
             store,
             signer: Signature::new_from_slice(&key).expect("HMAC accepts a 32-byte key"),
-            stamp: Mutex::new(None),
+            stamps: Mutex::default(),
             throttle: LoginThrottle::default(),
         })))
     }
@@ -177,8 +185,7 @@ impl Sessions {
         };
         attempt.succeeded();
         Ok(self
-            .sign_in(&user, scope)
-            .await?
+            .sign_in(&user, scope)?
             .map_or(Login::Failed, Login::SignedIn))
     }
 
@@ -197,7 +204,7 @@ impl Sessions {
     ///
     /// # Errors
     /// Fails on an invalid base path.
-    pub async fn sign_in(
+    pub fn sign_in(
         &self,
         user: &User,
         scope: &CookieScope,
@@ -205,7 +212,7 @@ impl Sessions {
         let Some(stamp) = &user.security_stamp else {
             return Ok(None);
         };
-        self.invalidate(&user.id).await;
+        self.invalidate(&user.id);
         self.issue(
             &user.id,
             &Sha256::digest(stamp.as_bytes()).into(),
@@ -250,7 +257,7 @@ impl Sessions {
                 .users()
                 .rotate_security_stamp(&session.user_id)
                 .await?;
-            self.invalidate(&session.user_id).await;
+            self.invalidate(&session.user_id);
         }
         Ok(())
     }
@@ -265,17 +272,17 @@ impl Sessions {
 
     /// Clears a cached stamp after a successful credential change.
     ///
-    /// Await this after `Store::users().update_credentials(...)` and before
-    /// responding. Clones share this cache. In-flight stamp reads cannot restore
-    /// an invalidated entry because loading and invalidation share one lock.
-    pub async fn invalidate(&self, user_id: &str) {
-        let mut stamp = self.0.stamp.lock().await;
-        if stamp
-            .as_ref()
-            .is_some_and(|cached| cached.user_id == user_id)
-        {
-            *stamp = None;
-        }
+    /// Call this after `Store::users().update_credentials(...)` and before
+    /// responding. Clones share this cache. Stamp reads already in flight cannot
+    /// restore an invalidated entry.
+    pub fn invalidate(&self, user_id: &str) {
+        let mut stamps = self.stamps();
+        stamps.generation = stamps.generation.wrapping_add(1);
+        stamps.entries.remove(user_id);
+    }
+
+    fn stamps(&self) -> MutexGuard<'_, StampCache> {
+        self.0.stamps.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     async fn authenticate(&self, headers: &HeaderMap, now: u64) -> Option<ValidSession> {
@@ -310,20 +317,27 @@ impl Sessions {
     }
 
     async fn stamp_digest(&self, user_id: &str) -> Option<[u8; 32]> {
-        let mut cache = self.0.stamp.lock().await;
-        if let Some(stamp) = cache.as_ref()
-            && stamp.user_id == user_id
-            && stamp.loaded.elapsed() < STAMP_CACHE_TTL
-        {
-            return Some(stamp.digest);
-        }
+        let generation = {
+            let stamps = self.stamps();
+            if let Some(stamp) = stamps.entries.get(user_id)
+                && stamp.loaded.elapsed() < STAMP_CACHE_TTL
+            {
+                return Some(stamp.digest);
+            }
+            stamps.generation
+        };
         let stamp = self.0.store.users().security_stamp(user_id).await.ok()??;
         let digest = Sha256::digest(stamp.as_bytes()).into();
-        *cache = Some(CachedStamp {
-            user_id: user_id.to_owned(),
-            digest,
-            loaded: Instant::now(),
-        });
+        let mut stamps = self.stamps();
+        if stamps.generation == generation {
+            stamps.entries.insert(
+                user_id.to_owned(),
+                CachedStamp {
+                    digest,
+                    loaded: Instant::now(),
+                },
+            );
+        }
         Some(digest)
     }
 

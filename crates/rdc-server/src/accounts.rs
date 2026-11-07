@@ -118,7 +118,6 @@ async fn create(
     let cookie = state
         .sessions
         .sign_in(&user, &scope)
-        .await
         .map_err(internal)?
         .ok_or_else(|| internal("Account created but sign-in failed"))?;
     Ok(([(header::SET_COOKIE, cookie)], StatusCode::OK).into_response())
@@ -252,7 +251,7 @@ async fn update(
         attempt.succeeded();
     }
     let user = result.map_err(user_error)?;
-    state.sessions.invalidate(&user.id).await;
+    state.sessions.invalidate(&user.id);
     Ok(StatusCode::OK.into_response())
 }
 

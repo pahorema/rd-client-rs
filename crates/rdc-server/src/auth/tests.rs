@@ -362,7 +362,7 @@ async fn credential_changes_and_invalidation_reject_previously_cached_cookies() 
             .update_credentials(&fixture.user.id, current, user_name, password)
             .await
             .unwrap();
-        fixture.sessions.clone().invalidate(&user.id).await;
+        fixture.sessions.clone().invalidate(&user.id);
         assert!(!fixture.sessions.is_authenticated(&old).await);
         let response = request(
             fixture.router("", enabled()),
