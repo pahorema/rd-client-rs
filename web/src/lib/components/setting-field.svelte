@@ -7,7 +7,11 @@
 	import { descriptionHtml, enumOptions } from '#lib/settings-form.js';
 	import type { Snippet } from 'svelte';
 
-	let { setting = $bindable(), extra }: { setting: Setting; extra?: Snippet } = $props();
+	let {
+		setting = $bindable(),
+		error,
+		extra
+	}: { setting: Setting; error?: string; extra?: Snippet } = $props();
 
 	const id = $derived(`setting-${setting.key.replaceAll(':', '-')}`);
 </script>
@@ -15,7 +19,10 @@
 {#if setting.type === 'Object'}
 	<h3 class="pt-4 text-base font-semibold first:pt-0">{setting.displayName}</h3>
 {:else}
-	<Field.Field orientation={setting.type === 'Boolean' ? 'horizontal' : 'vertical'}>
+	<Field.Field
+		orientation={setting.type === 'Boolean' ? 'horizontal' : 'vertical'}
+		data-invalid={error ? true : undefined}
+	>
 		{#if setting.type === 'Boolean'}
 			<Checkbox
 				{id}
@@ -40,6 +47,7 @@
 					{id}
 					type="number"
 					step="1"
+					aria-invalid={error ? true : undefined}
 					value={setting.value ?? ''}
 					oninput={(event) => {
 						const raw = event.currentTarget.value;
@@ -54,6 +62,7 @@
 				/>
 			{/if}
 			{@render description()}
+			{#if error}<Field.Error>{error}</Field.Error>{/if}
 		{/if}
 		{@render extra?.()}
 	</Field.Field>

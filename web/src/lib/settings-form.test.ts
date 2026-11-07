@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { Setting } from './api/types.js';
-import { descriptionHtml, enumOptions, settingsTabs, settingUpdates } from './settings-form.js';
+import {
+	descriptionHtml,
+	enumOptions,
+	settingErrors,
+	settingsTabs,
+	settingUpdates
+} from './settings-form.js';
 
 function entry(key: string, type: Setting['type'], value: Setting['value'] = null): Setting {
 	return { key, value, displayName: key, description: null, type, enumValues: null };
@@ -59,5 +65,22 @@ describe('descriptionHtml', () => {
 			'See<br /><a href="x">docs</a><br />now'
 		);
 		expect(descriptionHtml(null)).toBe('');
+	});
+});
+
+describe('settingErrors', () => {
+	it('rejects empty and decimal Int32 values only', () => {
+		expect(settingErrors(catalogue)).toEqual({});
+		expect(
+			settingErrors([
+				entry('Gui:Default:Priority', 'Int32', null),
+				entry('Gui:Default:Lifetime', 'Int32', 1.5),
+				entry('Gui:Default:Offset', 'Int32', -5),
+				entry('General:Categories', 'String', null)
+			])
+		).toEqual({
+			'Gui:Default:Priority': 'Enter a number.',
+			'Gui:Default:Lifetime': 'Enter a whole number from -2147483648 to 2147483647.'
+		});
 	});
 });

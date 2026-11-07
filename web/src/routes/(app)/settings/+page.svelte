@@ -9,7 +9,7 @@
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
 	import * as Tabs from '#lib/components/ui/tabs/index.js';
 	import { formatSpeed } from '#lib/format.js';
-	import { settingsTabs, settingUpdates } from '#lib/settings-form.js';
+	import { settingErrors, settingsTabs, settingUpdates } from '#lib/settings-form.js';
 	import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
 	import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
 	import { onMount } from 'svelte';
@@ -21,10 +21,15 @@
 	let active = $state('');
 	let saving = $state(false);
 	let saveOutcome = $state<Outcome>(null);
+	// Field errors show once a save was attempted and then follow every edit.
+	let validated = $state(false);
 	let running = $state<string | null>(null);
 	const outcomes = $state<Record<string, Outcome>>({});
 
 	const tabs = $derived(catalogue ? settingsTabs(catalogue) : []);
+	const errors: Record<string, string> = $derived(
+		validated && catalogue ? settingErrors(catalogue) : {}
+	);
 	const canRegisterMagnetHandler =
 		typeof window !== 'undefined' &&
 		window.isSecureContext &&
@@ -44,8 +49,18 @@
 
 	async function save() {
 		if (!catalogue) return;
-		saving = true;
+		validated = true;
 		saveOutcome = null;
+
+		const invalid = Object.keys(settingErrors(catalogue));
+		if (invalid.length > 0) {
+			const tab = tabs.find(({ entries }) => entries.some((e) => e.key === invalid[0]));
+			if (tab) active = tab.tab.key;
+			saveOutcome = { ok: false, text: 'Some settings are not valid; fix the marked fields.' };
+			return;
+		}
+
+		saving = true;
 
 		try {
 			await settingsApi.update(settingUpdates(catalogue));
@@ -149,7 +164,7 @@
 						<Field.Group class="max-w-2xl gap-6">
 							{#each entries as entry (entry.key)}
 								{@const index = catalogue.indexOf(entry)}
-								<SettingField bind:setting={catalogue[index]}>
+								<SettingField bind:setting={catalogue[index]} error={errors[entry.key]}>
 									{#snippet extra()}
 										{#if entry.key === 'DownloadClient:Aria2cSecret'}
 											<div class="grid justify-items-start gap-2">

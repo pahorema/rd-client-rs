@@ -1,4 +1,4 @@
-const INT32_MIN = -2_147_483_648;
+export const INT32_MIN = -2_147_483_648;
 const INT32_MAX = 2_147_483_647;
 
 /**
