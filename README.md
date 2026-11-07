@@ -9,6 +9,11 @@ and similar tools can use it as a regular torrent client.
 [![Web](https://github.com/pahorema/rd-client-rs/actions/workflows/web.yml/badge.svg)](https://github.com/pahorema/rd-client-rs/actions/workflows/web.yml)
 [![Docker](https://github.com/pahorema/rd-client-rs/actions/workflows/docker.yml/badge.svg)](https://github.com/pahorema/rd-client-rs/actions/workflows/docker.yml)
 
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/torrents-light.png">
+  <img alt="Torrent list with finished, downloading and queued torrents" src="docs/screenshots/torrents.png">
+</picture>
+
 ## Features
 
 - Add torrents from magnet links or `.torrent` files, from the web UI, a watch
@@ -25,6 +30,14 @@ and similar tools can use it as a regular torrent client.
 - Pause downloads when free disk space runs low and resume them afterwards.
 - Live updates in the web UI; light and dark themes.
 - Single static binary with the web UI embedded; small multi-arch Docker image.
+
+## Screenshots
+
+| Torrent details | Adding a torrent |
+|---|---|
+| ![Torrent details with provider status and download progress](docs/screenshots/torrent.png) | ![Add torrent page listing the files the provider already has](docs/screenshots/add.png) |
+
+![Download client settings](docs/screenshots/settings.png)
 
 ## Running with Docker
 
