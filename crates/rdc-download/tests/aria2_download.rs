@@ -351,7 +351,7 @@ async fn a_completed_download_without_local_file_fails() {
     let fake = FakeAria2::start().await;
     let engine = fake.engine(fake.request());
     engine.start().await.expect("start");
-    FakeAria2::set(&fake.status, Some(status("removed")));
+    FakeAria2::set(&fake.status, Some(status("complete")));
     assert_eq!(
         finish(&engine).await,
         Err(format!(
@@ -359,6 +359,35 @@ async fn a_completed_download_without_local_file_fails() {
             fake.local.display()
         ))
     );
+}
+
+#[tokio::test]
+async fn a_download_removed_before_its_last_byte_fails() {
+    let fake = FakeAria2::start().await;
+    let engine = fake.engine(fake.request());
+    engine.start().await.expect("start");
+    // aria2 leaves the partial file behind; it must not count as the finished download.
+    std::fs::create_dir_all(fake.local.parent().expect("parent")).expect("dir");
+    std::fs::write(&fake.local, b"partial").expect("file");
+    FakeAria2::set(&fake.status, Some(status("removed")));
+    assert_eq!(
+        finish(&engine).await,
+        Err("Download was removed from Aria2 after 40 of 100 bytes".to_owned())
+    );
+    assert_eq!(fake.calls("aria2.removeDownloadResult").await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_download_removed_after_its_last_byte_succeeds() {
+    let fake = FakeAria2::start().await;
+    let engine = fake.engine(fake.request());
+    engine.start().await.expect("start");
+    std::fs::create_dir_all(fake.local.parent().expect("parent")).expect("dir");
+    std::fs::write(&fake.local, b"done").expect("file");
+    let mut removed = status("removed");
+    removed["completedLength"] = json!("100");
+    FakeAria2::set(&fake.status, Some(removed));
+    assert_eq!(finish(&engine).await, Ok(()));
 }
 
 #[tokio::test]

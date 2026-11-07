@@ -65,8 +65,9 @@ pub struct Aria2Request {
 /// already downloads is refused, unless an earlier start or attempt of this download may have
 /// added it, in which case that download is adopted. The add-and-verify sequence is tried up
 /// to six times. It returns the GID. The engine then asks aria2 about the download every second:
-/// an error removes it and fails, a completed or removed download is removed and succeeds as
-/// soon as the local file exists (looked for ten times, about 45 s), and an unknown GID fails.
+/// an error removes it and fails, a download removed before its last byte fails, a completed
+/// download (or one removed after its last byte) is removed and succeeds as soon as the local
+/// file exists (looked for ten times, about 45 s), and an unknown GID fails.
 /// Pausing and resuming pause and unpause the aria2 download; cancelling removes it.
 #[derive(Debug)]
 pub struct Aria2Download {
@@ -307,11 +308,20 @@ impl Polled for Shared {
             return Some(Err(format!("{code}: {message}")));
         }
         self.report(&status);
-        if !matches!(
-            status.status,
-            DownloadState::Complete | DownloadState::Removed
-        ) {
-            return None;
+        match status.status {
+            DownloadState::Complete => {}
+            // aria2 keeps the partial file of a removed download, so only a removal after
+            // the last byte counts as finished.
+            DownloadState::Removed
+                if status.total_length > 0 && status.completed_length == status.total_length => {}
+            DownloadState::Removed => {
+                self.remove().await;
+                return Some(Err(format!(
+                    "Download was removed from Aria2 after {} of {} bytes",
+                    status.completed_length, status.total_length
+                )));
+            }
+            _ => return None,
         }
         tracing::debug!("aria2 download {gid} finished");
         self.remove().await;
