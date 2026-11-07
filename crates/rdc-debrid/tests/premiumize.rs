@@ -183,6 +183,44 @@ async fn empty_and_unreadable_responses_are_invalid() {
 }
 
 #[tokio::test]
+async fn timeouts_name_the_cause_but_not_the_api_key() {
+    let server = MockServer::start().await;
+    Mock::given(path("/account/info"))
+        .respond_with(
+            json(r#"{"status":"success","customer_id":1}"#).set_delay(Duration::from_secs(5)),
+        )
+        .mount(&server)
+        .await;
+    let mut config = common::config();
+    config.timeout = Duration::from_millis(50);
+    let client = Premiumize::new(&config, common::http_with_timeout(config.timeout))
+        .with_base_url(&server.uri());
+
+    let error = client.user().await.expect_err("timed out");
+
+    let text = error.to_string();
+    assert!(matches!(error, DebridError::Transport(_)), "{error:?}");
+    assert!(text.contains("timed out"), "{text}");
+    assert!(!text.contains(API_KEY), "{text}");
+}
+
+#[tokio::test]
+async fn refused_connections_name_the_cause_but_not_the_api_key() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
+    let address = listener.local_addr().expect("address");
+    drop(listener);
+    let client = Premiumize::new(&common::config(), common::http())
+        .with_base_url(&format!("http://{address}/"));
+
+    let error = client.user().await.expect_err("refused");
+
+    let text = error.to_string();
+    assert!(matches!(error, DebridError::Transport(_)), "{error:?}");
+    assert!(text.contains("refused"), "{text}");
+    assert!(!text.contains(API_KEY), "{text}");
+}
+
+#[tokio::test]
 async fn transfers_are_listed_without_sizes_or_files() {
     let (server, client) = client().await;
     Mock::given(method("POST"))

@@ -20,13 +20,15 @@ pub(crate) fn config() -> ProviderConfig {
 
 /// An HTTP client without transport retries and with its own coordinator.
 pub(crate) fn http() -> ProviderHttp {
-    ProviderHttp::new(
-        Duration::from_secs(5),
-        Arc::new(RateLimitCoordinator::new()),
-    )
-    .expect("client builds")
-    .with_retry_policy(RetryPolicy {
-        max_retries: 0,
-        base_delay: Duration::ZERO,
-    })
+    http_with_timeout(Duration::from_secs(5))
+}
+
+/// Like [`http`], with requests timing out after `timeout`.
+pub(crate) fn http_with_timeout(timeout: Duration) -> ProviderHttp {
+    ProviderHttp::new(timeout, Arc::new(RateLimitCoordinator::new()))
+        .expect("client builds")
+        .with_retry_policy(RetryPolicy {
+            max_retries: 0,
+            base_delay: Duration::ZERO,
+        })
 }

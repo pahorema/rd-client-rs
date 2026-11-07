@@ -29,8 +29,12 @@ pub enum DebridError {
     #[error("{0}")]
     InvalidResponse(String),
     /// The request could not be sent or the response could not be read.
-    #[error("{0}")]
-    Transport(#[source] reqwest::Error),
+    ///
+    /// The text names the cause (timeout, refused connection, DNS or TLS
+    /// failure) but never the request URL, whose query may carry an API key.
+    /// The causes are part of the text, so the error reports no `source`.
+    #[error("{}", transport_message(.0))]
+    Transport(reqwest::Error),
     /// A torrent's include or exclude expression is invalid.
     #[error(transparent)]
     Filter(#[from] rdc_model::FilterError),
@@ -53,6 +57,22 @@ impl DebridError {
 
 impl From<reqwest::Error> for DebridError {
     fn from(error: reqwest::Error) -> Self {
-        Self::Transport(error)
+        Self::Transport(error.without_url())
     }
+}
+
+/// `error` followed by its causes, separated by `": "`; a cause whose text
+/// the message already contains is skipped.
+fn transport_message(error: &reqwest::Error) -> String {
+    let mut message = error.to_string();
+    let mut cause = std::error::Error::source(error);
+    while let Some(current) = cause {
+        let text = current.to_string();
+        if !message.contains(&text) {
+            message.push_str(": ");
+            message.push_str(&text);
+        }
+        cause = current.source();
+    }
+    message
 }
