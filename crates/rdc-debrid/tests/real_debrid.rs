@@ -188,6 +188,29 @@ async fn requests_time_out_after_the_configured_timeout() {
     assert!(matches!(error, DebridError::Transport(_)), "{error:?}");
 }
 
+#[tokio::test]
+async fn timed_out_adds_are_not_sent_again() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rest/1.0/torrents/addMagnet"))
+        .respond_with(
+            ResponseTemplate::new(201)
+                .set_body_json(json!({"id": "A"}))
+                .set_delay(Duration::from_secs(5)),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client_with(&server, &config("secret", Duration::from_millis(100)));
+
+    let error = client
+        .add_magnet("magnet:?xt=urn:btih:abc")
+        .await
+        .expect_err("times out");
+
+    assert!(matches!(error, DebridError::Transport(_)), "{error:?}");
+}
+
 async fn mock_server_time(server: &MockServer, time: &str) {
     Mock::given(method("GET"))
         .and(path("/rest/1.0/time/iso"))

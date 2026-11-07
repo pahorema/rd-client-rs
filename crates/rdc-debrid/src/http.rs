@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use jiff::Timestamp;
 use reqwest::header::{HeaderMap, RETRY_AFTER};
-use reqwest::{Client, Request, RequestBuilder, Response, StatusCode};
+use reqwest::{Client, Method, Request, RequestBuilder, Response, StatusCode};
 
 use crate::error::DebridError;
 use crate::rate_limit::RateLimitCoordinator;
@@ -18,6 +18,9 @@ pub const USER_AGENT: &str = concat!("rd-client/", env!("CARGO_PKG_VERSION"));
 pub const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(120);
 
 /// How transient failures (connection errors, timeouts, HTTP 408) are retried.
+///
+/// `POST`, `PUT` and `PATCH` requests may have been carried out by the time
+/// they time out, so they are only retried when the connection failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
     /// Retries after the first attempt.
@@ -90,7 +93,9 @@ impl ProviderHttp {
     ///
     /// Any response other than 429 is returned as is; mapping provider error
     /// bodies is up to the caller. Requests with streaming bodies (multipart
-    /// uploads) cannot be cloned and are sent only once.
+    /// uploads) cannot be cloned and are sent only once; `POST`, `PUT` and
+    /// `PATCH` requests are only sent again when the connection failed, as a
+    /// timed-out attempt may already have added a torrent.
     ///
     /// # Errors
     ///
@@ -108,6 +113,7 @@ impl ProviderHttp {
             });
         }
 
+        let repeatable = is_repeatable(request.method());
         let mut attempt = 0;
         loop {
             let retry = self.retry_copy(&request, attempt);
@@ -120,7 +126,7 @@ impl ProviderHttp {
                     None => return Ok(response),
                 },
                 Ok(response) => return Ok(response),
-                Err(error) if is_transient(&error) => match retry {
+                Err(error) if is_transient(&error, repeatable) => match retry {
                     Some(next) => request = next,
                     None => return Err(error.into()),
                 },
@@ -168,8 +174,15 @@ pub fn retry_after_delay(headers: &HeaderMap) -> Duration {
         .unwrap_or(DEFAULT_RATE_LIMIT_COOLDOWN)
 }
 
-fn is_transient(error: &reqwest::Error) -> bool {
-    error.is_connect() || error.is_timeout() || error.is_request()
+/// Whether a failed attempt is worth repeating: a connection that could not
+/// be made always is, other failures only for `repeatable` requests.
+fn is_transient(error: &reqwest::Error, repeatable: bool) -> bool {
+    error.is_connect() || (repeatable && (error.is_timeout() || error.is_request()))
+}
+
+/// Whether sending `method` twice has the same effect as sending it once.
+fn is_repeatable(method: &Method) -> bool {
+    !matches!(*method, Method::POST | Method::PUT | Method::PATCH)
 }
 
 #[cfg(test)]
@@ -275,6 +288,30 @@ mod tests {
             matches!(&error, DebridError::Transport(e) if e.is_timeout()),
             "{error:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn timed_out_posts_and_puts_are_sent_once() {
+        for verb in [Method::POST, Method::PUT] {
+            let server = MockServer::start().await;
+            Mock::given(method(verb.as_str()))
+                .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(500)))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let http = http(Duration::from_millis(50));
+
+            let error = http
+                .send(http.client().request(verb.clone(), server.uri()).body("x"))
+                .await
+                .expect_err("times out");
+
+            assert!(
+                matches!(&error, DebridError::Transport(e) if e.is_timeout()),
+                "{verb}: {error:?}"
+            );
+            server.verify().await;
+        }
     }
 
     #[tokio::test]
