@@ -21,7 +21,7 @@ use crate::{
     events,
     http::{ApiError, AppBuilder},
     logging::LogControl,
-    preferences, torrents,
+    preferences, qbittorrent, torrents,
 };
 
 /// Services the web API handlers work with.
@@ -90,7 +90,7 @@ impl<'de, T: DeserializeOwned> Deserialize<'de> for CaseInsensitive<T> {
     }
 }
 
-/// Build the complete web application with protected routes mounted inside path preprocessing.
+/// Build the complete application: the web API, the qBittorrent-compatible API and the UI.
 ///
 /// Cancelling `shutdown` ends every open event stream.
 pub fn build(
@@ -105,20 +105,21 @@ pub fn build(
         sessions,
         policy,
     } = backend;
-    let state = AppState {
-        engine,
-        store,
-        sessions,
-        policy: policy.clone(),
-        connections: Arc::new(Mutex::new(0)),
-        shutdown,
-    };
+    let torrent_client = qbittorrent::router(engine.clone(), sessions.clone(), policy.clone());
     let protected = Router::new()
         .merge(accounts::protected_routes())
         .merge(preferences::routes())
         .merge(torrents::routes())
         .merge(events::routes())
-        .route_layer(middleware::from_fn_with_state(policy, require_auth));
+        .route_layer(middleware::from_fn_with_state(policy.clone(), require_auth));
+    let state = AppState {
+        engine,
+        store,
+        sessions,
+        policy,
+        connections: Arc::new(Mutex::new(0)),
+        shutdown,
+    };
     AppBuilder::new(base_path, logs)
         .merge(accounts::public_routes(), accounts::PUBLIC_PATHS)
         .merge(
@@ -131,5 +132,6 @@ pub fn build(
             ]
             .concat(),
         )
+        .merge(torrent_client, qbittorrent::PATHS)
         .build(state)
 }
