@@ -104,7 +104,8 @@ pub enum EnrichTorrentError {
 }
 
 /// Merges tier trackers, the primary announce, and new trackers, in that order.
-/// Changed output has one tracker per tier and canonical bencode encoding.
+/// Changed output has one tracker per tier; the root dictionary is re-encoded with sorted keys
+/// while every other value keeps its exact bytes, so the info-hash does not change.
 /// No additions return byte-identical borrowed input, even with noncanonical encoding.
 pub fn enrich_torrent<'src>(
     bytes: &'src [u8],
@@ -156,5 +157,7 @@ pub fn enrich_torrent<'src>(
         .collect();
     entries.insert(b"announce-list", Node::new(Value::List(tiers)));
     entries.insert(b"announce", Node::new(Value::Bytes(all[0].as_bytes())));
-    Ok(Cow::Owned(bencode::encode(&root)))
+    // The root changed: re-encode it, keeping the source bytes of every untouched value.
+    root.span = 0..0;
+    Ok(Cow::Owned(bencode::encode_with_source(&root, bytes)))
 }

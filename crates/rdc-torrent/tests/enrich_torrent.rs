@@ -1,5 +1,5 @@
 use rdc_torrent::{
-    EnrichTorrentError,
+    EnrichTorrentError, TorrentFile,
     bencode::{self, Node, Value},
     enrich_torrent,
 };
@@ -178,14 +178,25 @@ fn merges_existing_tiers_before_primary_and_new_trackers() {
 }
 
 #[test]
-fn ignores_non_strings_and_non_list_tiers_and_keeps_info_structure() {
+fn ignores_non_strings_and_non_list_tiers_and_keeps_the_exact_info_bytes() {
     let bytes = b"d13:announce-listli1el3:urli2eee4:infod4:name1:x6:lengthi1eee";
     let output = enrich_torrent(bytes, &strings(&["udp://new"])).unwrap();
     let before = bencode::decode(bytes).unwrap();
     let after = bencode::decode(&output).unwrap();
     assert_eq!(
-        bencode::encode(before.get(b"info").unwrap()),
-        bencode::encode(after.get(b"info").unwrap())
+        &output[after.get(b"info").unwrap().span.clone()],
+        &bytes[before.get(b"info").unwrap().span.clone()]
     );
     assert_eq!(flattened(&after), [b"url".as_slice(), b"udp://new"]);
+}
+
+#[test]
+fn an_unsorted_info_dictionary_keeps_its_info_hash() {
+    let bytes = b"d8:announce3:url4:infod4:name1:x6:lengthi1eee";
+    let output = enrich_torrent(bytes, &strings(&["udp://new"])).unwrap();
+    let before = TorrentFile::parse(bytes).unwrap();
+    let after = TorrentFile::parse(&output).unwrap();
+    assert_eq!(after.info_hash_v1, before.info_hash_v1);
+    assert_eq!(after.info_hash_hex(), before.info_hash_hex());
+    assert_eq!(after.announce_list, [["url"], ["udp://new"]]);
 }

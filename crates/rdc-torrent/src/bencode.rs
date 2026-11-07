@@ -200,10 +200,31 @@ impl<'src> Parser<'src> {
 #[must_use]
 pub fn encode(node: &Node<'_>) -> Vec<u8> {
     let mut out = Vec::new();
-    encode_into(node, &mut out);
+    encode_into(node, None, &mut out);
     out
 }
-fn encode_into(node: &Node<'_>, out: &mut Vec<u8>) {
+
+/// Encodes `node`, copying decoded values byte for byte from `source`, the input they were
+/// decoded from.
+///
+/// A node with a non-empty span is written as `source[span]`, so unsorted dictionaries and
+/// noncanonical encodings survive. A node with an empty span (built with [`Node::new`], or a
+/// decoded container whose span was cleared after its contents changed) is encoded
+/// canonically, its children following the same rule.
+#[must_use]
+pub fn encode_with_source(node: &Node<'_>, source: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(source.len());
+    encode_into(node, Some(source), &mut out);
+    out
+}
+fn encode_into(node: &Node<'_>, source: Option<&[u8]>, out: &mut Vec<u8>) {
+    if let Some(raw) = source
+        .filter(|_| !node.span.is_empty())
+        .and_then(|source| source.get(node.span.clone()))
+    {
+        out.extend_from_slice(raw);
+        return;
+    }
     match &node.value {
         Value::Integer(n) => {
             out.push(b'i');
@@ -214,7 +235,7 @@ fn encode_into(node: &Node<'_>, out: &mut Vec<u8>) {
         Value::List(items) => {
             out.push(b'l');
             for item in items {
-                encode_into(item, out);
+                encode_into(item, source, out);
             }
             out.push(b'e');
         }
@@ -222,7 +243,7 @@ fn encode_into(node: &Node<'_>, out: &mut Vec<u8>) {
             out.push(b'd');
             for (key, item) in items {
                 encode_bytes(key, out);
-                encode_into(item, out);
+                encode_into(item, source, out);
             }
             out.push(b'e');
         }
