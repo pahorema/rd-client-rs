@@ -16,7 +16,7 @@ use crate::{
     auth::{AuthPolicy, Sessions, require_auth},
     http::{ApiError, AppBuilder},
     logging::LogControl,
-    preferences,
+    preferences, torrents,
 };
 
 /// Services the web API handlers work with.
@@ -98,12 +98,18 @@ pub fn build(backend: Backend, base_path: &str, logs: LogControl) -> Router {
     let protected = Router::new()
         .merge(accounts::protected_routes())
         .merge(preferences::routes())
+        .merge(torrents::routes())
         .route_layer(middleware::from_fn_with_state(policy, require_auth));
     AppBuilder::new(base_path, logs)
         .merge(accounts::public_routes(), accounts::PUBLIC_PATHS)
         .merge(
             protected,
-            &[accounts::PROTECTED_PATHS, preferences::PATHS].concat(),
+            &[
+                accounts::PROTECTED_PATHS,
+                preferences::PATHS,
+                torrents::PATHS,
+            ]
+            .concat(),
         )
         .build(state)
 }
