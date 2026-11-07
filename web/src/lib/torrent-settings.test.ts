@@ -4,6 +4,7 @@ import {
 	applySettings,
 	commonSettings,
 	draftErrors,
+	settingsOf,
 	type TorrentSettingsDraft
 } from './torrent-settings.js';
 
@@ -119,5 +120,24 @@ describe('draftErrors', () => {
 			'priority',
 			'lifetime'
 		]);
+	});
+});
+
+describe('settingsOf', () => {
+	it('leaves the payload, files and downloads out of the update', () => {
+		const settings = settingsOf(
+			torrent({ category: 'tv', fileOrMagnet: 'AAAA', files: [], downloads: [], rdName: 'x' })
+		);
+
+		expect(settings).toEqual({
+			downloadClient: DownloadClient.Internal,
+			hostDownloadAction: TorrentHostDownloadAction.DownloadAll,
+			category: 'tv',
+			priority: null,
+			downloadRetryAttempts: 3,
+			torrentRetryAttempts: 1,
+			deleteOnError: 0,
+			lifetime: 0
+		});
 	});
 });

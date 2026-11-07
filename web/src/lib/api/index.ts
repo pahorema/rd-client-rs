@@ -12,6 +12,7 @@ import type {
 	SettingUpdate,
 	SettingValue,
 	Torrent,
+	TorrentSettings,
 	Version,
 	VerifyRegexResult
 } from './types.js';
@@ -116,7 +117,7 @@ export const torrents = {
 			method: 'POST',
 			json: {}
 		}),
-	/** Saves a torrent's settings; the server persists only the `TorrentSettings` fields. */
-	update: (torrent: Torrent) =>
-		request<null>('Api/Torrents/Update', { method: 'PUT', json: torrent })
+	/** Saves a torrent's settings, the only fields the server reads from this request. */
+	update: (torrentId: string, settings: TorrentSettings) =>
+		request<null>('Api/Torrents/Update', { method: 'PUT', json: { torrentId, ...settings } })
 };

@@ -15,6 +15,17 @@ const KEYS = [
 	'lifetime'
 ] as const satisfies readonly (keyof TorrentSettings)[];
 
+/** The persisted settings of `torrent`, as sent to the server on update. */
+export function settingsOf(torrent: Torrent): TorrentSettings {
+	const settings = {} as Record<keyof TorrentSettings, unknown>;
+
+	for (const key of KEYS) {
+		settings[key] = torrent[key];
+	}
+
+	return settings as TorrentSettings;
+}
+
 /** The settings shared by every torrent; settings that differ are `null`. */
 export function commonSettings(torrents: readonly Torrent[]): TorrentSettingsDraft {
 	const draft = {} as Record<keyof TorrentSettings, unknown>;

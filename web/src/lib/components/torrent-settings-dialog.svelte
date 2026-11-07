@@ -10,6 +10,7 @@
 		applySettings,
 		commonSettings,
 		draftErrors,
+		settingsOf,
 		type TorrentSettingsDraft
 	} from '#lib/torrent-settings.js';
 	import { untrack } from 'svelte';
@@ -51,7 +52,9 @@
 		const updated = torrents.map((torrent) =>
 			applySettings(torrent, draft, bulk ? 'bulk' : 'single')
 		);
-		const results = await Promise.allSettled(updated.map((torrent) => torrentsApi.update(torrent)));
+		const results = await Promise.allSettled(
+			updated.map((torrent) => torrentsApi.update(torrent.torrentId, settingsOf(torrent)))
+		);
 		const failure = results.find((result) => result.status === 'rejected');
 
 		saving = false;

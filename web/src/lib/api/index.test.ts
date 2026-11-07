@@ -6,8 +6,7 @@ import {
 	TorrentDownloadAction,
 	TorrentFinishedAction,
 	TorrentHostDownloadAction,
-	type NewTorrent,
-	type Torrent
+	type NewTorrent
 } from './types.js';
 
 const fetchMock = vi.fn<typeof fetch>();
@@ -226,8 +225,18 @@ describe('torrents', () => {
 		await torrents.retryDownload('d1');
 		expect(lastCall()).toMatchObject({ url: 'Api/Torrents/RetryDownload/d1', json: {} });
 
-		const torrent = { torrentId: 't1', category: 'movies', priority: 2 } as Torrent;
-		await torrents.update(torrent);
-		expect(lastCall()).toMatchObject({ url: 'Api/Torrents/Update', method: 'PUT', json: torrent });
+		const settings = {
+			downloadClient: 0,
+			hostDownloadAction: 0,
+			category: 'movies',
+			priority: 2,
+			downloadRetryAttempts: 3,
+			torrentRetryAttempts: 1,
+			deleteOnError: 0,
+			lifetime: 0
+		} as const;
+		await torrents.update('t1', settings);
+		expect(lastCall()).toMatchObject({ url: 'Api/Torrents/Update', method: 'PUT' });
+		expect(lastCall().json).toEqual({ torrentId: 't1', ...settings });
 	});
 });
