@@ -335,12 +335,14 @@ impl Engine {
                 .inspect_err(|error| self.record_provider_error(error))?
             && let Some(info) = paths::match_download_info(&infos, download)
             && info.restricted_link != download.path
-        {
-            self.inner
+            // A link that already belongs to a sibling download is not taken over.
+            && self
+                .inner
                 .store
                 .downloads()
                 .update_path(download.download_id, &info.restricted_link)
-                .await?;
+                .await?
+        {
             download.path.clone_from(&info.restricted_link);
         }
         let link = provider

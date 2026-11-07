@@ -43,6 +43,38 @@ async fn an_add_for_a_missing_torrent_reports_torrent_missing() {
 }
 
 #[tokio::test]
+async fn taking_the_link_of_a_sibling_download_changes_nothing() {
+    let (_dir, store) = temp_store().await;
+    insert_torrent_row(&store.pool, TORRENT, "a", "2026-01-01 00:00:00+00:00", 0).await;
+    let torrent_id = Uuid::parse_str(TORRENT).expect("uuid");
+    let downloads = store.downloads();
+    for link in ["https://host/a", "https://host/b"] {
+        downloads
+            .try_add(torrent_id, &info(link))
+            .await
+            .expect("add");
+    }
+    let second = downloads.for_torrent(torrent_id).await.expect("list")[1].download_id;
+
+    let updated = downloads.update_path(second, "https://host/a").await;
+    assert!(!updated.expect("update"));
+    let paths: Vec<_> = downloads
+        .for_torrent(torrent_id)
+        .await
+        .expect("list")
+        .into_iter()
+        .map(|download| download.path)
+        .collect();
+    assert_eq!(paths, ["https://host/a", "https://host/b"]);
+    assert!(
+        downloads
+            .update_path(second, "https://host/c")
+            .await
+            .expect("update")
+    );
+}
+
+#[tokio::test]
 async fn downloads_of_other_row_types_are_hidden() {
     let (_dir, store) = temp_store().await;
     let download = "1A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10";

@@ -194,13 +194,23 @@ impl<'store> Downloads<'store> {
             .await
     }
 
-    /// Stores the restricted link.
+    /// Stores the restricted link; returns `false` and changes nothing when
+    /// another download of the torrent already has this link.
     ///
     /// # Errors
     ///
-    /// Fails on database errors.
-    pub async fn update_path(&self, download_id: Uuid, path: &str) -> Result<()> {
-        self.set(download_id, r#""Path" = ?"#, Some(path)).await
+    /// Fails on other database errors.
+    pub async fn update_path(&self, download_id: Uuid, path: &str) -> Result<bool> {
+        match self.set(download_id, r#""Path" = ?"#, Some(path)).await {
+            Ok(()) => Ok(true),
+            Err(StoreError::Database(sqlx::Error::Database(error)))
+                if is_duplicate_download(error.as_ref()) =>
+            {
+                debug!(%download_id, "skipped taking the link of another download");
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Stores when the transfer started.
