@@ -126,9 +126,9 @@ pub(crate) fn inspect(archive: &Path) -> Result<Inspection, Error> {
 /// `on_progress` receives the percentage of uncompressed bytes written so far, each value once
 /// and in increasing order, ending with 100 on success.
 ///
-/// `cancel` is checked between entries, and for ZIP archives also while an entry is written; a
-/// RAR entry, once started, is written to the end. A cancelled extraction fails with
-/// [`Error::Cancelled`] and leaves the files written so far.
+/// `cancel` is checked between entries and while an entry is written. A cancelled extraction
+/// fails with [`Error::Cancelled`] and leaves the entries completed so far; the entry being
+/// written stays incomplete in a ZIP archive and is removed in a RAR archive.
 ///
 /// This call blocks; run it on a blocking thread from async code.
 pub fn extract<F>(

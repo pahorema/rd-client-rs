@@ -90,7 +90,10 @@ fn new_style_multi_volume_set_is_extracted_from_its_first_volume() {
         fs::read_to_string(destination.join("big.txt")).unwrap(),
         big_text()
     );
-    assert_eq!(seen, [0, 100]);
+    assert_eq!(seen.first(), Some(&0));
+    assert_eq!(seen.last(), Some(&100));
+    assert!(seen.len() > 2, "progress moves within the entry: {seen:?}");
+    assert!(seen.windows(2).all(|pair| pair[0] < pair[1]), "{seen:?}");
 }
 
 #[test]
@@ -171,7 +174,7 @@ fn existing_files_are_replaced_by_rar_entries() {
 }
 
 #[test]
-fn cancellation_is_honoured_between_rar_entries() {
+fn cancellation_during_a_rar_entry_stops_before_the_next_ones() {
     let dir = tempfile::tempdir().unwrap();
     let archive = copy_fixtures(dir.path(), &["nested.rar"]);
     let destination = dir.path().join("out");
@@ -189,7 +192,32 @@ fn cancellation_is_honoured_between_rar_entries() {
     );
 
     assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
-    assert_eq!(files_below(&destination).len(), 1);
+    assert_eq!(files_below(&destination), Vec::<String>::new());
+}
+
+#[test]
+fn cancellation_stops_a_large_rar_entry_mid_write_and_removes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = copy_fixtures(dir.path(), &["zeros.rar"]);
+    let destination = dir.path().join("out");
+    let cancel = CancellationToken::new();
+    let mut seen = Vec::new();
+
+    let result = extract(
+        &archive,
+        &destination,
+        |percent| {
+            seen.push(percent);
+            if percent > 0 {
+                cancel.cancel();
+            }
+        },
+        &cancel,
+    );
+
+    assert!(matches!(result, Err(Error::Cancelled)), "{result:?}");
+    assert!(seen.last().is_some_and(|last| *last < 100), "{seen:?}");
+    assert!(!destination.join("zeros.bin").exists());
 }
 
 #[test]

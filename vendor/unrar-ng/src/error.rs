@@ -33,6 +33,10 @@ pub enum Code {
     EReference,
     BadPassword,
     LargeDict,
+    /// The caller stopped an extraction from its progress callback
+    /// ([`OpenArchive::extract_to_with_progress`](crate::OpenArchive::extract_to_with_progress)).
+    /// The DLL itself reports a user break as [`Code::Unknown`].
+    UserBreak,
     /// Catches any DLL error code that this Rust enum does not (yet) name.
     /// Carries the raw `int` returned by the DLL so callers can log or match
     /// numerically without panicking when a future UnRAR release adds a new
@@ -117,6 +121,7 @@ impl fmt::Display for UnrarError {
             (EReference, _) => write!(f, "Cannot open file source for reference record"),
             (BadPassword, _) => write!(f, "Wrong password was specified"),
             (LargeDict, _) => write!(f, "Archive uses a dictionary too large for this build"),
+            (UserBreak, _) => write!(f, "Extraction stopped by the caller"),
             (Unmapped(c), _) => write!(f, "Unmapped DLL error code: {c}"),
             (Unknown, _) => write!(f, "Unknown error"),
             (EndArchive, _) => write!(f, "Archive end"),

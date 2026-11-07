@@ -771,6 +771,98 @@ impl OpenArchive<Process, CursorBeforeFile> {
         self.process_file::<Extract>(None, Some(&dest))
     }
 
+    /// Extracts the file into the specified file like [`extract_to`](Self::extract_to),
+    /// reporting each block of unpacked data as it is written.
+    ///
+    /// `on_data` receives the length in bytes of every block the library writes. Returning
+    /// `false` stops the extraction inside the file: the call then fails with
+    /// [`Code::UserBreak`](crate::error::Code::UserBreak) and the part written so far stays on
+    /// disk.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if `file` contains nul characters.
+    pub fn extract_to_with_progress<P, F>(
+        self,
+        file: P,
+        mut on_data: F,
+    ) -> UnrarResult<OpenArchive<Process, CursorBeforeHeader>>
+    where
+        P: AsRef<Path>,
+        F: FnMut(usize) -> bool,
+    {
+        struct ProgressData<'a, F> {
+            on_data: &'a mut F,
+            stopped: bool,
+        }
+
+        extern "C" fn callback<F>(
+            msg: native::UINT,
+            user_data: native::LPARAM,
+            _p1: native::LPARAM,
+            p2: native::LPARAM,
+        ) -> c_int
+        where
+            F: FnMut(usize) -> bool,
+        {
+            if user_data == 0 {
+                return 0;
+            }
+            let data = unsafe { &mut *(user_data as *mut ProgressData<'_, F>) };
+            match msg {
+                native::UCM_CHANGEVOLUMEW => match p2 {
+                    // Next volume not found. -1 means stop
+                    native::RAR_VOL_ASK => -1,
+                    // Next volume found, 0 means continue
+                    _ => 0,
+                },
+                // p1 = unpacked data, p2 = its length. -1 makes the library abort the file
+                // with RARX_USERBREAK (`ComprDataIO::UnpWrite` in rdwrfn.cpp).
+                native::UCM_PROCESSDATA => {
+                    if (data.on_data)(p2 as usize) {
+                        0
+                    } else {
+                        data.stopped = true;
+                        -1
+                    }
+                }
+                _ => 0,
+            }
+        }
+
+        let dest = pathed::construct(file.as_ref());
+        let mut data = ProgressData {
+            on_data: &mut on_data,
+            stopped: false,
+        };
+        unsafe {
+            native::RARSetCallback(
+                self.handle.0.as_ptr(),
+                Some(callback::<F>),
+                &mut data as *mut _ as native::LPARAM,
+            );
+        }
+        let result = Code::from(pathed::process_file(
+            self.handle.0.as_ptr(),
+            Extract::OPERATION as i32,
+            None,
+            Some(&dest),
+        ));
+        // `data` lives on this stack frame only: unregister it before returning.
+        unsafe { native::RARSetCallback(self.handle.0.as_ptr(), None, 0) };
+        match result {
+            Code::Success => Ok(OpenArchive {
+                extra: CursorBeforeHeader,
+                damaged: self.damaged,
+                handle: self.handle,
+                flags: self.flags,
+                marker: std::marker::PhantomData,
+            }),
+            _ if data.stopped => Err(UnrarError::from(Code::UserBreak, When::Process)),
+            code => Err(UnrarError::from(code, When::Process)),
+        }
+    }
+
     /// extracting into a directory if the filename has unicode characters
     /// does not work on Linux, so we must specify the full path for Linux
     fn dir_extract(

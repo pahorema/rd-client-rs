@@ -4,31 +4,17 @@
 //! ones (`.partN.rar`, `.rNN` or `.NNN` names) as their content is needed and fails when one is
 //! missing.
 
-use std::fs;
 use std::io;
 use std::path::Path;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
-use unrar_ng::{
-    Archive, CursorBeforeFile, CursorBeforeHeader, FileHeader, OpenArchive, Process, Redirection,
-    UnrarResult, VolumeInfo,
-};
+use unrar_ng::error::Code;
+use unrar_ng::{Archive, FileHeader, Redirection, VolumeInfo};
 
 use crate::Error;
 use crate::extract::{Entry, Inspection, VolumeRole, ensure_within_limit};
 use crate::path::{create_entry_directory, entry_destination, prepare_file_target};
 use crate::progress::Progress;
-
-/// Entries at least this large are watched while the library writes them, so progress keeps moving
-/// during a long write instead of jumping once the entry is done.
-const WATCHED_ENTRY_SIZE: u64 = 8 * 1024 * 1024;
-
-/// Interval between two size checks of a watched entry.
-const WATCH_INTERVAL: Duration = Duration::from_millis(250);
 
 /// The library takes C strings; a path with a NUL byte cannot name a file anyway.
 fn ensure_no_nul(path: &Path) -> Result<(), Error> {
@@ -131,8 +117,8 @@ fn scan(archive: &Path, destination: &Path) -> Result<u64, Error> {
 /// Extracts every entry of `archive` (and of its following volumes) below `destination`.
 ///
 /// All entries, and their total uncompressed size against `limit`, are validated before anything
-/// is written. Cancellation is checked between entries: the library writes one entry in a single
-/// call that cannot be interrupted.
+/// is written. Progress counts the bytes the library writes, and cancellation is checked before
+/// each entry and for every block written, so a long entry stops part-way.
 pub(crate) fn extract(
     archive: &Path,
     destination: &Path,
@@ -163,47 +149,18 @@ pub(crate) fn extract(
             continue;
         }
         prepare_file_target(destination, &target, &name)?;
-        let size = entry.unpacked_size;
-        let start = progress.done();
-        open = if size >= WATCHED_ENTRY_SIZE {
-            extract_watched(header, &target, size, &mut progress)
-        } else {
-            header.extract_to(&target)
-        }
-        .map_err(Error::read(archive))?;
-        progress.advance_to(start.saturating_add(size));
+        let end = progress.done().saturating_add(entry.unpacked_size);
+        let extracted = header.extract_to_with_progress(&target, |written| {
+            progress.advance(u64::try_from(written).unwrap_or(u64::MAX));
+            !cancel.is_cancelled()
+        });
+        open = match extracted {
+            Ok(open) => open,
+            Err(error) if error.code == Code::UserBreak => return Err(Error::Cancelled),
+            Err(error) => return Err(Error::read(archive)(error)),
+        };
+        progress.advance_to(end);
     }
     progress.finish();
     Ok(())
-}
-
-/// Extracts the entry under `header` to `target` while a helper thread turns the growing size
-/// of `target` into progress.
-fn extract_watched(
-    header: OpenArchive<Process, CursorBeforeFile>,
-    target: &Path,
-    size: u64,
-    progress: &mut Progress<'_>,
-) -> UnrarResult<OpenArchive<Process, CursorBeforeHeader>> {
-    let start = progress.done();
-    let progress = Mutex::new(progress);
-    let finished = AtomicBool::new(false);
-    thread::scope(|scope| {
-        let watcher = scope.spawn(|| {
-            while !finished.load(Ordering::Acquire) {
-                thread::park_timeout(WATCH_INTERVAL);
-                if let Ok(metadata) = fs::metadata(target) {
-                    let written = metadata.len().min(size);
-                    progress
-                        .lock()
-                        .expect("progress lock is never poisoned")
-                        .advance_to(start.saturating_add(written));
-                }
-            }
-        });
-        let result = header.extract_to(target);
-        finished.store(true, Ordering::Release);
-        watcher.thread().unpark();
-        result
-    })
 }

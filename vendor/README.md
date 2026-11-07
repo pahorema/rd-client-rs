@@ -6,4 +6,4 @@ released yet. Each one is wired in through `[patch.crates-io]` in the root
 
 | Crate | Version | Local change |
 |---|---|---|
-| `unrar-ng` | 0.7.7 | The volume-change callback reads the next volume name up to its terminator instead of copying a fixed 2048-character window past the end of the buffer. `FileHeader::redirection` exposes the entry's link type (`RedirType`), so links and file copies can be refused before extraction. |
+| `unrar-ng` | 0.7.7 | The volume-change callback reads the next volume name up to its terminator instead of copying a fixed 2048-character window past the end of the buffer. `FileHeader::redirection` exposes the entry's link type (`RedirType`), so links and file copies can be refused before extraction. `OpenArchive::extract_to_with_progress` reports each written block and stops the entry when its callback returns `false` (`Code::UserBreak`). |
