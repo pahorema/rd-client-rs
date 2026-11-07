@@ -256,7 +256,7 @@ impl Engine {
             let engine = match self.prepare_download(torrent, &download).await {
                 Ok(engine) => engine,
                 Err(error) => {
-                    self.finish_download(download.download_id, Err(error.to_string()))
+                    self.finish_download(download.download_id, None, Err(error.to_string()))
                         .await?;
                     continue;
                 }
@@ -312,18 +312,12 @@ impl Engine {
                     }
                 }
                 Err(error) => {
-                    let registered = self
-                        .inner
-                        .registry
-                        .downloads
-                        .lock()
-                        .expect("download registry lock poisoned")
-                        .get(&download.download_id)
-                        .is_some_and(|current| Arc::ptr_eq(current, &active));
-                    if registered {
-                        self.finish_download(download.download_id, Err(error.to_string()))
-                            .await?;
-                    }
+                    self.finish_download(
+                        download.download_id,
+                        Some(&active),
+                        Err(error.to_string()),
+                    )
+                    .await?;
                 }
             }
         }
@@ -457,18 +451,38 @@ impl Engine {
                     .engine
                     .completion()
                     .outcome()
-                    .map(|outcome| (*id, outcome))
+                    .map(|outcome| (*id, active.clone(), outcome))
             })
             .collect();
-        for (id, outcome) in finished {
-            self.finish_download(id, outcome).await?;
+        for (id, active, outcome) in finished {
+            self.finish_download(id, Some(&active), outcome).await?;
         }
         Ok(())
     }
 
-    async fn finish_download(&self, id: Uuid, outcome: Outcome) -> Result<(), EngineError> {
+    /// Stores the outcome of a transfer. An outcome of a registered transfer is dropped when
+    /// that transfer was cancelled or replaced meanwhile, so it never reaches a reset row.
+    async fn finish_download(
+        &self,
+        id: Uuid,
+        active: Option<&Arc<ActiveDownload>>,
+        outcome: Outcome,
+    ) -> Result<(), EngineError> {
         let _guard = self.inner.provider_lock.lock().await;
-        self.inner.registry.stats(id);
+        if let Some(active) = active {
+            let registered = self
+                .inner
+                .registry
+                .downloads
+                .lock()
+                .expect("download registry lock poisoned")
+                .get(&id)
+                .is_some_and(|current| Arc::ptr_eq(current, active));
+            if !registered {
+                return Ok(());
+            }
+            self.inner.registry.stats(id);
+        }
         if let Some(record) = self.inner.store.downloads().get(id).await? {
             match outcome {
                 Ok(()) => {
@@ -508,12 +522,20 @@ impl Engine {
                 }
             }
         }
-        self.inner
-            .registry
-            .downloads
-            .lock()
-            .expect("download registry lock poisoned")
-            .remove(&id);
+        if let Some(active) = active {
+            let mut downloads = self
+                .inner
+                .registry
+                .downloads
+                .lock()
+                .expect("download registry lock poisoned");
+            if downloads
+                .get(&id)
+                .is_some_and(|current| Arc::ptr_eq(current, active))
+            {
+                downloads.remove(&id);
+            }
+        }
         Ok(())
     }
 

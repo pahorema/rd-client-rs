@@ -222,6 +222,45 @@ async fn rate_limited_unrestrict_requeues_at_cooldown_without_consuming_a_retry(
 }
 
 #[tokio::test]
+async fn an_outcome_of_a_cancelled_transfer_never_reaches_the_reset_download() {
+    let (test, factory) = fixture().await;
+    let torrent = add(&test, HASH, "one", &["a.bin"], template()).await;
+    test.engine.tick_once().await.expect("create");
+    test.engine.tick_once().await.expect("start");
+    let id = current(&test, torrent.torrent_id).await.downloads[0].download_id;
+    let active = test
+        .engine
+        .inner
+        .registry
+        .downloads
+        .lock()
+        .expect("registry")[&id]
+        .clone();
+    factory.engines()[0].complete(Err("connection reset".to_owned()));
+    tokio::time::timeout(Duration::from_secs(2), active.engine.completion().wait())
+        .await
+        .expect("completion timeout")
+        .expect_err("failed transfer");
+    // A manual download retry holds the provider lock while the outcome is collected.
+    let retry_guard = test.engine.inner.provider_lock.lock().await;
+    let collector = {
+        let engine = test.engine.clone();
+        tokio::spawn(async move { engine.collect_completed_downloads().await })
+    };
+    tokio::task::yield_now().await;
+    test.engine.inner.registry.cancel(id).await;
+    test.store.downloads().reset(id, None).await.expect("reset");
+    drop(retry_guard);
+    collector.await.expect("collector").expect("collect");
+    let download = current(&test, torrent.torrent_id).await.downloads[0].clone();
+    assert_eq!(download.retry_count, 0);
+    assert_eq!(download.error, None);
+    assert_eq!(download.completed, None);
+    assert_eq!(download.download_started, None);
+    test.engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn rate_limits_during_selection_or_download_creation_only_postpone_the_torrent() {
     let (test, _) = fixture().await;
     let torrent = add(&test, HASH, "one", &["a.bin"], template()).await;
