@@ -45,9 +45,10 @@ impl Params {
         }
     }
 
-    pub(super) async fn read(request: Request, form_only: bool) -> Result<Self, ApiError> {
+    /// Reads the query string of a GET request, or the form body of any other request.
+    pub(super) async fn read(request: Request) -> Result<Self, ApiError> {
         let mut result = Self::default();
-        if request.method() == Method::GET && !form_only {
+        if request.method() == Method::GET {
             result.decode(request.uri().query().unwrap_or_default().as_bytes());
             return Ok(result);
         }

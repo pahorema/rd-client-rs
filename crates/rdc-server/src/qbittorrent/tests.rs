@@ -683,7 +683,7 @@ async fn queued_add_returns_ok_after_bounded_provider_wait() {
 }
 
 #[tokio::test]
-async fn http_torrent_url_uses_query_binding_and_requested_priority() {
+async fn http_torrent_url_uses_requested_priority() {
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
@@ -704,11 +704,11 @@ async fn http_torrent_url_uses_query_binding_and_requested_priority() {
         .finish();
     let response = call(
         &app,
-        Method::GET,
-        &format!("/api/v2/torrents/add?{query}"),
+        Method::POST,
+        "/api/v2/torrents/add",
         Some(&cookie),
-        None,
-        Body::empty(),
+        Some("application/x-www-form-urlencoded"),
+        query,
     )
     .await;
     assert_eq!(text(response).await, "Ok.");
@@ -723,14 +723,14 @@ async fn auxiliary_endpoints_and_binding_errors_keep_expected_statuses() {
     let app = fixture.app("");
     for prefix in ["/api/v2", "/qbittorrent/api/v2"] {
         let cookie = fixture.login(&app, "", prefix).await;
-        for suffix in [
-            "app/shutdown",
-            "app/setPreferences",
-            "torrents/setShareLimits",
-            "torrents/createTags",
-            "torrents/setForcestart",
+        for (suffix, get) in [
+            ("app/shutdown", StatusCode::OK),
+            ("app/setPreferences", StatusCode::OK),
+            ("torrents/setShareLimits", StatusCode::METHOD_NOT_ALLOWED),
+            ("torrents/createTags", StatusCode::METHOD_NOT_ALLOWED),
+            ("torrents/setForcestart", StatusCode::METHOD_NOT_ALLOWED),
         ] {
-            for method in [Method::GET, Method::POST] {
+            for (method, status) in [(Method::GET, get), (Method::POST, StatusCode::OK)] {
                 assert_eq!(
                     call(
                         &app,
@@ -742,7 +742,7 @@ async fn auxiliary_endpoints_and_binding_errors_keep_expected_statuses() {
                     )
                     .await
                     .status(),
-                    StatusCode::OK,
+                    status,
                     "{suffix}"
                 );
             }
@@ -816,7 +816,7 @@ async fn auxiliary_endpoints_and_binding_errors_keep_expected_statuses() {
             )
             .await
             .status(),
-            StatusCode::BAD_REQUEST
+            StatusCode::METHOD_NOT_ALLOWED
         );
         assert_eq!(
             call(
@@ -829,7 +829,7 @@ async fn auxiliary_endpoints_and_binding_errors_keep_expected_statuses() {
             )
             .await
             .status(),
-            StatusCode::BAD_REQUEST
+            StatusCode::METHOD_NOT_ALLOWED
         );
         assert_eq!(
             call(
@@ -897,4 +897,66 @@ async fn repeated_failed_logins_lock_the_name_out_even_with_the_right_password()
     let locked = attempt("Passw0rd%21").await;
     assert_eq!(locked.status(), StatusCode::FORBIDDEN);
     assert!(!locked.headers().contains_key(header::SET_COOKIE));
+}
+
+#[tokio::test]
+async fn state_changes_need_a_same_origin_post() {
+    let fixture = Fixture::new(Settings::default()).await;
+    let torrent = fixture
+        .test
+        .engine
+        .add_magnet(MAGNET1, TorrentTemplate::default())
+        .await
+        .unwrap();
+    let app = fixture.app("");
+    let cookie = fixture.login(&app, "", "/api/v2").await;
+    let delete = call(
+        &app,
+        Method::GET,
+        &format!(
+            "/api/v2/torrents/delete?hashes={}&deleteFiles=true",
+            torrent.hash
+        ),
+        Some(&cookie),
+        None,
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(delete.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    let set_category = |source: Option<(header::HeaderName, &'static str)>, category: &str| {
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/torrents/setCategory")
+            .header(header::HOST, "rdclient.lan:6500")
+            .header(header::COOKIE, &cookie)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+        if let Some((name, value)) = source {
+            request = request.header(name, value);
+        }
+        let body = format!("hashes={}&category={category}", torrent.hash);
+        app.clone().oneshot(request.body(Body::from(body)).unwrap())
+    };
+    for source in [
+        (header::ORIGIN, "http://evil.example"),
+        (header::ORIGIN, "http://rdclient.lan:6501"),
+        (header::ORIGIN, "null"),
+        (header::REFERER, "http://evil.example/page"),
+    ] {
+        let response = set_category(Some(source.clone()), "planted").await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{source:?}");
+    }
+    let stored = fixture.test.engine.torrent(torrent.torrent_id).await.unwrap().unwrap();
+    assert_eq!(stored.category, None, "rejected requests change nothing");
+
+    for (source, category) in [
+        (Some((header::ORIGIN, "http://rdclient.lan:6500")), "ui"),
+        (Some((header::REFERER, "http://RDCLIENT.lan:6500/#/torrents")), "referred"),
+        (None, "sonarr"),
+    ] {
+        let response = set_category(source, category).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{category}");
+        let stored = fixture.test.engine.torrent(torrent.torrent_id).await.unwrap().unwrap();
+        assert_eq!(stored.category.as_deref(), Some(category));
+    }
 }

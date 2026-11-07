@@ -15,7 +15,7 @@ use axum::{
     http::{StatusCode, header},
     middleware,
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use rdc_engine::{DeleteOptions, Engine, TorrentTemplate, WaitOutcome};
 use rdc_model::TorrentFinishedAction;
@@ -101,6 +101,10 @@ struct Context {
 
 /// Creates the qBittorrent routes, applying session protection to every non-public endpoint.
 /// Merge this inside `AppBuilder` to retain base-path-aware session cookies.
+///
+/// Endpoints that change state, and the login carrying the password, accept POST only, so a
+/// cross-site link or image cannot trigger them; read endpoints also accept GET with query
+/// parameters.
 pub fn router<S: Clone + Send + Sync + 'static>(
     engine: Engine,
     sessions: Sessions,
@@ -114,52 +118,50 @@ pub fn router<S: Clone + Send + Sync + 'static>(
     let mut public =
         Router::<Context>::new().route("/version/api", get(version_api).post(version_api));
     let mut protected = Router::<Context>::new();
-    for name in [
-        "auth/login",
-        "app/version",
-        "app/webapiversion",
-        "app/buildinfo",
-    ] {
-        for prefix in ["/api/v2/", "/qbittorrent/api/v2/"] {
+    for prefix in ["/api/v2/", "/qbittorrent/api/v2/"] {
+        public = public.route(&format!("{prefix}auth/login"), post(public_request));
+        for name in ["app/version", "app/webapiversion", "app/buildinfo"] {
             public = public.route(
                 &format!("{prefix}{name}"),
                 get(public_request).post(public_request),
             );
         }
-    }
-    for name in [
-        "auth/logout",
-        "app/shutdown",
-        "app/preferences",
-        "app/setpreferences",
-        "app/defaultsavepath",
-        "torrents/info",
-        "torrents/count",
-        "torrents/files",
-        "torrents/properties",
-        "torrents/pause",
-        "torrents/resume",
-        "torrents/setsharelimits",
-        "torrents/delete",
-        "torrents/add",
-        "torrents/fileprio",
-        "torrents/setcategory",
-        "torrents/categories",
-        "torrents/createcategory",
-        "torrents/removecategories",
-        "torrents/createtags",
-        "torrents/tags",
-        "torrents/setforcestart",
-        "torrents/topprio",
-        "torrents/trackers",
-        "sync/maindata",
-        "transfer/info",
-    ] {
-        for prefix in ["/api/v2/", "/qbittorrent/api/v2/"] {
+        for name in [
+            "app/shutdown",
+            "app/preferences",
+            "app/setpreferences",
+            "app/defaultsavepath",
+            "torrents/info",
+            "torrents/count",
+            "torrents/files",
+            "torrents/properties",
+            "torrents/categories",
+            "torrents/tags",
+            "torrents/trackers",
+            "sync/maindata",
+            "transfer/info",
+        ] {
             protected = protected.route(
                 &format!("{prefix}{name}"),
                 get(protected_request).post(protected_request),
             );
+        }
+        for name in [
+            "auth/logout",
+            "torrents/pause",
+            "torrents/resume",
+            "torrents/setsharelimits",
+            "torrents/delete",
+            "torrents/add",
+            "torrents/fileprio",
+            "torrents/setcategory",
+            "torrents/createcategory",
+            "torrents/removecategories",
+            "torrents/createtags",
+            "torrents/setforcestart",
+            "torrents/topprio",
+        ] {
+            protected = protected.route(&format!("{prefix}{name}"), post(protected_request));
         }
     }
     public
@@ -191,7 +193,7 @@ async fn public_request(
         "auth/login" => {
             let scope = CookieScope::of(request.extensions(), request.headers());
             let client = ClientIp::of(request.extensions());
-            let params = Params::read(request, false).await?;
+            let params = Params::read(request).await?;
             if state.policy.is_disabled() { return Ok("Ok.".into_response()); }
             let user = params.get("username").unwrap_or_default();
             let pass = params.get("password").unwrap_or_default();
@@ -214,9 +216,7 @@ async fn protected_request(
     request: Request,
 ) -> Result<Response, ApiError> {
     let name = endpoint(&request).to_owned();
-    let is_get = request.method() == axum::http::Method::GET;
     if name == "torrents/add"
-        && !is_get
         && !request
             .headers()
             .get(header::CONTENT_TYPE)
@@ -232,11 +232,7 @@ async fn protected_request(
     let Some(user) = request.extensions().get::<RequestUser>().cloned() else {
         return Ok(StatusCode::FORBIDDEN.into_response());
     };
-    let form_only = matches!(
-        name.as_str(),
-        "torrents/createcategory" | "torrents/removecategories"
-    );
-    let params = Params::read(request, form_only).await?;
+    let params = Params::read(request).await?;
     let engine = &state.engine;
     match name.as_str() {
         "auth/logout" => Ok((
@@ -381,7 +377,7 @@ async fn protected_request(
             }
             Ok(StatusCode::OK.into_response())
         }
-        "torrents/add" => add(engine, params, is_get).await,
+        "torrents/add" => add(engine, params).await,
         "torrents/fileprio" => {
             let hash = params.required("hash")?;
             let ids = params
@@ -465,7 +461,7 @@ async fn protected_request(
     }
 }
 
-async fn add(engine: &Engine, params: Params, is_get: bool) -> Result<Response, ApiError> {
+async fn add(engine: &Engine, params: Params) -> Result<Response, ApiError> {
     let mut template = TorrentTemplate::from_defaults(
         &engine.settings().integrations.default,
         engine.settings().download_client.client,
@@ -519,11 +515,7 @@ async fn add(engine: &Engine, params: Params, is_get: bool) -> Result<Response, 
         }
         return Ok("Ok.".into_response());
     }
-    if is_get {
-        Err(bad_request("urls is required"))
-    } else {
-        Ok(StatusCode::OK.into_response())
-    }
+    Ok(StatusCode::OK.into_response())
 }
 
 async fn wait(engine: &Engine, id: uuid::Uuid) -> Result<bool, ApiError> {

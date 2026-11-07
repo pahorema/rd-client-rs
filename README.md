@@ -124,6 +124,13 @@ folder as seen by Sonarr/Radarr. When the two tools run on different hosts or
 containers, set the mapped path to the folder they see, or add a remote path
 mapping in Sonarr/Radarr.
 
+Like qBittorrent itself, the API accepts logins and every call that changes
+something (`torrents/add`, `torrents/delete`, `torrents/setCategory`, …) only as
+POST; read calls such as `torrents/info` and `sync/maindata` also accept GET.
+Requests that a browser sends on behalf of another site (an `Origin` or
+`Referer` that does not match the host) are rejected; scripts and tools that
+call the API directly send neither header and are not affected.
+
 ## Building from source
 
 Requirements: Rust (the version in `rust-toolchain.toml`), a C++ compiler (for

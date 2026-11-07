@@ -6,7 +6,7 @@ use axum::{
     Router,
     body::{Body, to_bytes},
     extract::{DefaultBodyLimit, Request},
-    http::{StatusCode, Uri, header},
+    http::{HeaderMap, HeaderName, StatusCode, Uri, header, uri::Authority},
     middleware::{self, Next},
     response::{IntoResponse, Redirect, Response},
     routing::{MethodRouter, get},
@@ -154,6 +154,10 @@ async fn preprocess(request: Request, next: Next, plumbing: Arc<Plumbing>) -> Re
 }
 
 async fn dispatch(mut request: Request, next: Next, plumbing: &Plumbing) -> Response {
+    if !request.method().is_safe() && !same_origin(request.headers()) {
+        return ApiError::new(StatusCode::FORBIDDEN, "Cross-origin request rejected")
+            .into_response();
+    }
     let original_path = request.uri().path().to_owned();
     let path = if !plumbing.base_path.is_empty() && original_path == plumbing.base_path {
         let query = request
@@ -202,6 +206,40 @@ async fn dispatch(mut request: Request, next: Next, plumbing: &Plumbing) -> Resp
         *response.status_mut() = StatusCode::FORBIDDEN;
     }
     response
+}
+
+/// Whether a request was sent by a page of this server, as far as the browser tells.
+///
+/// Browsers name the sending page in `Origin` (or, failing that, `Referer`); its host and
+/// port must match the `Host` the request was sent to, or the `X-Forwarded-Host` a reverse
+/// proxy reports, which pages cannot set. Clients that send neither header, such as
+/// media managers, are not browsers acting for another site and pass.
+fn same_origin(headers: &HeaderMap) -> bool {
+    let Some(source) = headers
+        .get(header::ORIGIN)
+        .or_else(|| headers.get(header::REFERER))
+    else {
+        return true;
+    };
+    let Some(source) = source
+        .to_str()
+        .ok()
+        .and_then(|source| url::Url::parse(source).ok())
+    else {
+        return false;
+    };
+    let (Some(host), Some(port)) = (source.host_str(), source.port_or_known_default()) else {
+        return false;
+    };
+    let default_port = if source.scheme() == "https" { 443 } else { 80 };
+    [header::HOST, HeaderName::from_static("x-forwarded-host")]
+        .iter()
+        .filter_map(|name| headers.get(name)?.to_str().ok())
+        .filter_map(|value| value.split(',').next()?.trim().parse::<Authority>().ok())
+        .any(|target| {
+            target.host().eq_ignore_ascii_case(host)
+                && target.port_u16().unwrap_or(default_port) == port
+        })
 }
 
 fn canonical_pattern(path: &str) -> String {
