@@ -89,6 +89,11 @@ pub(super) async fn current(test: &TestEngine, id: Uuid) -> Torrent {
         .expect("read")
         .expect("torrent")
 }
+/// Truncates an instant to the 100 ns precision of persisted timestamps.
+fn stored_precision(at: Timestamp) -> Timestamp {
+    let nanos = at.as_nanosecond();
+    Timestamp::from_nanosecond(nanos - nanos.rem_euclid(100)).expect("truncated instant")
+}
 pub(super) async fn finish(
     test: &TestEngine,
     factory: &FakeDownloadFactory,
@@ -207,7 +212,10 @@ async fn rate_limited_unrestrict_requeues_at_cooldown_without_consuming_a_retry(
     assert!(download.download_started.is_none());
     assert_eq!(
         download.download_queued,
-        test.engine.rate_limit_status().next_dequeue_time
+        test.engine
+            .rate_limit_status()
+            .next_dequeue_time
+            .map(stored_precision)
     );
     assert_eq!(factory.requests().len(), 0);
     test.engine.shutdown().await;
@@ -323,9 +331,11 @@ async fn completed_error_torrents_are_neither_requeued_nor_deleted_before_retent
         )
         .await
         .expect("queued");
-    let completed = Timestamp::now()
-        .checked_sub(SignedDuration::from_secs(5 * 60))
-        .expect("time");
+    let completed = stored_precision(
+        Timestamp::now()
+            .checked_sub(SignedDuration::from_secs(5 * 60))
+            .expect("time"),
+    );
     test.store
         .torrents()
         .update_complete(
