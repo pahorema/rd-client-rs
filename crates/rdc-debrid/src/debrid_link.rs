@@ -13,6 +13,7 @@ use serde::de::{DeserializeOwned, IgnoredAny};
 use crate::endpoint::Endpoint;
 use crate::error::DebridError;
 use crate::http::ProviderHttp;
+use crate::json;
 use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
 use crate::text_rate_limit::classify_add_error;
 use crate::values::{base_name, non_blank};
@@ -24,7 +25,7 @@ const DELETED: &str = "deleted";
 pub const DEFAULT_BASE_URL: &str = "https://debrid-link.fr/api/v2/";
 
 /// Torrents requested per listing page (the API maximum).
-const PAGE_SIZE: &str = "50";
+const PAGE_SIZE: usize = 50;
 
 /// Client for a Debrid-Link account.
 ///
@@ -73,21 +74,33 @@ impl DebridLink {
         })
     }
 
-    /// Lists every torrent of the seedbox, page by page until an empty page.
+    /// Lists every torrent of the seedbox, page by page.
+    ///
+    /// The listing ends with a page that is not full or when the
+    /// reported next page is not after the current one (`-1` on the last
+    /// page): Debrid-Link keeps answering out-of-range pages with items.
     pub async fn list_torrents(&self) -> Result<Vec<RemoteTorrent>, DebridError> {
         let mut torrents = Vec::new();
-        let mut page: u32 = 0;
+        let mut page: i64 = 0;
         loop {
-            let page_text = page.to_string();
             let request = self
                 .request(Method::GET, "seedbox/list")?
-                .query(&[("page", page_text.as_str()), ("perPage", PAGE_SIZE)]);
-            let items: Vec<SeedboxTorrent> = self.send(request).await?.unwrap_or_default();
-            if items.is_empty() {
+                .query(&[("page", page)])
+                .query(&[("perPage", PAGE_SIZE)]);
+            let Some(answer) = self.exchange::<Vec<SeedboxTorrent>>(request).await? else {
+                return Ok(torrents);
+            };
+            let items = answer.value.unwrap_or_default();
+            let full = items.len() >= PAGE_SIZE;
+            torrents.extend(items.into_iter().map(SeedboxTorrent::into_remote));
+            let next = answer
+                .pagination
+                .and_then(|pagination| pagination.next)
+                .unwrap_or(page + 1);
+            if !full || next <= page {
                 return Ok(torrents);
             }
-            torrents.extend(items.into_iter().map(SeedboxTorrent::into_remote));
-            page += 1;
+            page = next;
         }
     }
 
@@ -207,10 +220,24 @@ impl DebridLink {
         self.endpoint.request(&self.http, method, path)
     }
 
+    /// Sends `request` and returns the value of its envelope; `None`
+    /// without content.
     async fn send<T: DeserializeOwned>(
         &self,
         request: RequestBuilder,
     ) -> Result<Option<T>, DebridError> {
+        Ok(self
+            .exchange(request)
+            .await?
+            .and_then(|envelope| envelope.value))
+    }
+
+    /// Sends `request` and returns its successful envelope; `None` without
+    /// content.
+    async fn exchange<T: DeserializeOwned>(
+        &self,
+        request: RequestBuilder,
+    ) -> Result<Option<Envelope<T>>, DebridError> {
         let response = self.http.send(request).await.inspect_err(|error| {
             if let DebridError::Transport(source) = error
                 && source.is_timeout()
@@ -223,7 +250,7 @@ impl DebridLink {
             return Ok(None);
         }
         let body = response.text().await?;
-        parse_envelope(status, &body)
+        parse_envelope(status, &body).map(Some)
     }
 }
 
@@ -329,12 +356,22 @@ struct Envelope<T> {
     success: bool,
     value: Option<T>,
     error: Option<String>,
+    /// Present on listings.
+    pagination: Option<Pagination>,
 }
 
+#[derive(Debug, Deserialize)]
+struct Pagination {
+    /// The page after this one, `-1` on the last page.
+    #[serde(default, deserialize_with = "json::optional_i64")]
+    next: Option<i64>,
+}
+
+/// Checks a response body; the envelope of a successful answer.
 fn parse_envelope<T: DeserializeOwned>(
     status: StatusCode,
     body: &str,
-) -> Result<Option<T>, DebridError> {
+) -> Result<Envelope<T>, DebridError> {
     let envelope: Envelope<T> = match serde_json::from_str(body) {
         Ok(envelope) => envelope,
         Err(error) if status.is_success() => {
@@ -359,7 +396,7 @@ fn parse_envelope<T: DeserializeOwned>(
     if !status.is_success() {
         return Err(http_error(status));
     }
-    Ok(envelope.value)
+    Ok(envelope)
 }
 
 fn http_error(status: StatusCode) -> DebridError {

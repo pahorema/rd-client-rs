@@ -193,23 +193,48 @@ fn list_page(page: &str, items: &Value) -> Mock {
         .respond_with(ok(items))
 }
 
+/// A full listing page of torrents `<prefix>0` to `<prefix>49` whose
+/// pagination names `next` as the following page.
+fn full_page(page: &str, prefix: &str, next: i64) -> Mock {
+    let items: Vec<Value> = (0..50)
+        .map(|index| seedbox_torrent(&format!("{prefix}{index}")))
+        .collect();
+    Mock::given(method("GET"))
+        .and(path("/seedbox/list"))
+        .and(query_param("page", page))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "value": items,
+            "pagination": { "page": page.parse::<i64>().expect("page"), "pages": 2, "next": next }
+        })))
+}
+
 #[tokio::test]
-async fn listing_reads_pages_until_the_first_empty_one() {
+async fn listing_reads_full_pages_until_a_short_one() {
     let server = MockServer::start().await;
-    list_page("0", &json!([seedbox_torrent("t1"), seedbox_torrent("t2")]))
+    full_page("0", "a", 1).expect(1).mount(&server).await;
+    list_page("1", &json!([seedbox_torrent("t1"), seedbox_torrent("t2")]))
         .expect(1)
         .mount(&server)
         .await;
-    list_page("1", &json!([seedbox_torrent("t3")]))
-        .expect(1)
-        .mount(&server)
-        .await;
-    list_page("2", &json!([])).expect(1).mount(&server).await;
+    list_page("2", &json!([])).expect(0).mount(&server).await;
 
     let torrents = client(&server).list_torrents().await.expect("list");
 
-    let ids: Vec<&str> = torrents.iter().map(|t| t.id.as_str()).collect();
-    assert_eq!(ids, ["t1", "t2", "t3"]);
+    assert_eq!(torrents.len(), 52);
+    assert_eq!(torrents[51].id, "t2");
+}
+
+#[tokio::test]
+async fn listing_stops_on_the_last_page_the_api_reports() {
+    let server = MockServer::start().await;
+    full_page("0", "a", 1).expect(1).mount(&server).await;
+    full_page("1", "b", -1).expect(1).mount(&server).await;
+    full_page("2", "b", -1).expect(0).mount(&server).await;
+
+    let torrents = client(&server).list_torrents().await.expect("list");
+
+    assert_eq!(torrents.len(), 100);
 }
 
 #[tokio::test]
