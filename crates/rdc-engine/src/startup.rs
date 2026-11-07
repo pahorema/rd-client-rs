@@ -1,17 +1,31 @@
 //! Repairs interrupted host work without discarding remote transfer identities.
 
 use crate::EngineError;
+use jiff::Timestamp;
 use rdc_model::settings::Settings;
 use rdc_store::Store;
 
 pub(crate) async fn repair(store: &Store, settings: &Settings) -> Result<(), EngineError> {
     tracing::debug!(?settings, "loaded engine settings");
-    for torrent in store.torrents().list().await? {
-        if torrent.completed.is_some() {
-            continue;
-        }
+    let now = Some(Timestamp::now());
+    for torrent in store.torrents().list_incomplete().await? {
         for download in torrent.downloads {
-            if download.error.is_some() {
+            if download.completed.is_some() {
+                continue;
+            }
+            // Finish transitions that older versions or a crash stored only in part.
+            if download.error.is_some() || download.unpacking_finished.is_some() {
+                store
+                    .downloads()
+                    .update_completed(download.download_id, now)
+                    .await?;
+                continue;
+            }
+            if download.download_finished.is_some() && download.unpacking_queued.is_none() {
+                store
+                    .downloads()
+                    .update_unpacking_queued(download.download_id, now)
+                    .await?;
                 continue;
             }
             if download.download_queued.is_some()
@@ -41,7 +55,6 @@ pub(crate) async fn repair(store: &Store, settings: &Settings) -> Result<(), Eng
 mod tests {
     use super::*;
     use crate::{Engine, testing::FakeDebridProvider};
-    use jiff::Timestamp;
     use rdc_model::{DownloadInfo, Torrent};
     use rdc_store::{NewTorrent, RetryOnError};
 
@@ -159,7 +172,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_does_not_reopen_finished_failed_or_completed_torrent_work() {
+    async fn startup_completes_finished_or_failed_work_without_reopening_it() {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::open(dir.path().join("db.sqlite"))
             .await
@@ -175,7 +188,7 @@ mod tests {
         let engine = Engine::start(store.clone(), FakeDebridProvider::default().options())
             .await
             .expect("engine");
-        for id in ids {
+        for (index, id) in ids.into_iter().enumerate() {
             let download = store
                 .downloads()
                 .get(id)
@@ -185,6 +198,8 @@ mod tests {
                 .download;
             assert!(download.download_started.is_some());
             assert!(download.unpacking_started.is_some());
+            // Work of a completed torrent is left alone.
+            assert_eq!(download.completed.is_some(), index < 2, "{index}");
         }
         engine.shutdown().await;
     }

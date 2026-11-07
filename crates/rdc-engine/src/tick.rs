@@ -396,12 +396,7 @@ impl Engine {
             self.inner
                 .store
                 .downloads()
-                .reset(download.download_id, Some(retry_at))
-                .await?;
-            self.inner
-                .store
-                .downloads()
-                .update_retry_count(download.download_id, download.retry_count)
+                .reset(download.download_id, Some(retry_at), download.retry_count)
                 .await?;
             return Ok(());
         }
@@ -420,23 +415,14 @@ impl Engine {
                 .reset(
                     download.download_id,
                     Some(add_duration(Timestamp::now(), Duration::from_secs(seconds))),
+                    count,
                 )
-                .await?;
-            self.inner
-                .store
-                .downloads()
-                .update_retry_count(download.download_id, count)
                 .await?;
         } else {
             self.inner
                 .store
                 .downloads()
-                .update_error(download.download_id, Some(&error.to_string()))
-                .await?;
-            self.inner
-                .store
-                .downloads()
-                .update_completed(download.download_id, Some(Timestamp::now()))
+                .mark_failed(download.download_id, &error.to_string(), Timestamp::now())
                 .await?;
         }
         Ok(())
@@ -493,22 +479,16 @@ impl Engine {
                     self.inner
                         .store
                         .downloads()
-                        .update_download_finished(id, Some(Timestamp::now()))
-                        .await?;
-                    self.inner
-                        .store
-                        .downloads()
-                        .update_unpacking_queued(id, Some(Timestamp::now()))
+                        .mark_downloaded(id, Timestamp::now())
                         .await?;
                 }
                 Err(error)
                     if record.download.retry_count < record.torrent.download_retry_attempts =>
                 {
-                    self.inner.store.downloads().reset(id, None).await?;
                     self.inner
                         .store
                         .downloads()
-                        .update_retry_count(id, record.download.retry_count.saturating_add(1))
+                        .reset(id, None, record.download.retry_count.saturating_add(1))
                         .await?;
                     tracing::debug!(download_id = %id, %error, "retrying host transfer");
                 }
@@ -516,12 +496,7 @@ impl Engine {
                     self.inner
                         .store
                         .downloads()
-                        .update_error(id, Some(&error))
-                        .await?;
-                    self.inner
-                        .store
-                        .downloads()
-                        .update_completed(id, Some(Timestamp::now()))
+                        .mark_failed(id, &error, Timestamp::now())
                         .await?;
                 }
             }

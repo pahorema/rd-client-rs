@@ -353,6 +353,80 @@ async fn restart_requeues_an_interrupted_transfer_and_adopts_its_remote_identity
 }
 
 #[tokio::test]
+async fn restart_finishes_transitions_that_were_stored_only_in_part() {
+    let (test, _) = fixture().await;
+    let mut ids = Vec::new();
+    for (hash, id) in [
+        ("2123456789012345678901234567890123456789", "queued"),
+        ("3123456789012345678901234567890123456789", "failed"),
+        ("4123456789012345678901234567890123456789", "unpacked"),
+    ] {
+        ids.push(
+            add(&test, hash, id, &["a.bin"], template())
+                .await
+                .torrent_id,
+        );
+    }
+    test.engine.tick_once().await.expect("create");
+    test.engine.shutdown().await;
+    let downloads = test.store.downloads();
+    let now = Some(Timestamp::now());
+    let mut download_ids = Vec::new();
+    for id in &ids {
+        let download = current(&test, *id).await.downloads[0].download_id;
+        downloads
+            .update_link(download, "https://example.invalid/a.bin")
+            .await
+            .expect("link");
+        downloads
+            .update_download_started(download, now)
+            .await
+            .expect("started");
+        download_ids.push(download);
+    }
+    // A finished transfer whose unpacking was never queued.
+    downloads
+        .update_download_finished(download_ids[0], now)
+        .await
+        .expect("finished");
+    // A failure whose completion was never stored.
+    downloads
+        .update_error(download_ids[1], Some("transfer failed"))
+        .await
+        .expect("error");
+    // A finished extraction whose completion was never stored.
+    let unpacked = download_ids[2];
+    downloads
+        .update_download_finished(unpacked, now)
+        .await
+        .expect("finished");
+    downloads
+        .update_unpacking_queued(unpacked, now)
+        .await
+        .expect("unpack queued");
+    downloads
+        .update_unpacking_started(unpacked, now)
+        .await
+        .expect("unpack started");
+    downloads
+        .update_unpacking_finished(unpacked, now)
+        .await
+        .expect("unpacked");
+
+    let engine = Engine::start(test.store.clone(), test.fake.options())
+        .await
+        .expect("restart");
+    engine.tick_once().await.expect("tick");
+    for (index, id) in ids.iter().enumerate() {
+        let torrent = current(&test, *id).await;
+        assert!(torrent.completed.is_some(), "{index}");
+        assert!(torrent.downloads[0].completed.is_some(), "{index}");
+        assert_eq!(torrent.error.is_some(), index == 1, "{index}");
+    }
+    engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn background_tick_loop_advances_torrents_and_stops_on_shutdown() {
     let (test, factory) = fixture().await;
     let torrent = add(&test, HASH, "one", &["a.bin"], template()).await;

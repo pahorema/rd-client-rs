@@ -582,7 +582,7 @@ impl Engine {
         self.inner
             .store
             .downloads()
-            .reset(download_id, None)
+            .reset(download_id, None, 0)
             .await?;
         self.inner
             .store

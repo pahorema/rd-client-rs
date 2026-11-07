@@ -333,7 +333,7 @@ async fn reset_queues_the_download_again_and_keeps_its_identity() {
         .expect("retry count");
 
     let queued = instant("2030-01-01T00:00:00Z");
-    downloads.reset(id, Some(queued)).await.expect("reset");
+    downloads.reset(id, Some(queued), 0).await.expect("reset");
     let download = only_download(&test, torrent.torrent_id).await;
     let expected = Download {
         download_id: id,
@@ -348,15 +348,16 @@ async fn reset_queues_the_download_again_and_keeps_its_identity() {
     assert_eq!(download, expected);
 
     downloads
-        .reset(id, None)
+        .reset(id, None, 3)
         .await
         .expect("reset without a queue time");
     let download = only_download(&test, torrent.torrent_id).await;
     assert_eq!(download.download_queued, Some(download.added));
+    assert_eq!(download.retry_count, 3);
 
     let missing = Uuid::new_v4();
     let error = downloads
-        .reset(missing, None)
+        .reset(missing, None, 0)
         .await
         .expect_err("missing download");
     assert!(
@@ -367,6 +368,69 @@ async fn reset_queues_the_download_again_and_keeps_its_identity() {
         error.to_string(),
         format!("Cannot find download with ID {missing}")
     );
+}
+
+#[tokio::test]
+async fn transitions_set_all_their_columns_at_once() {
+    let test = TestStore::new().await;
+    let torrent = test.add_torrent("hash").await;
+    let downloads = test.store.downloads();
+    for link in ["https://host/a", "https://host/b", "https://host/c"] {
+        downloads
+            .try_add(torrent.torrent_id, &info(link))
+            .await
+            .expect("add");
+    }
+    let ids: Vec<_> = downloads
+        .for_torrent(torrent.torrent_id)
+        .await
+        .expect("downloads")
+        .iter()
+        .map(|download| download.download_id)
+        .collect();
+    let started = instant("2026-05-28T16:00:00Z");
+    let at = instant("2026-05-28T16:30:00Z");
+
+    downloads
+        .mark_downloaded(ids[0], at)
+        .await
+        .expect("downloaded");
+    downloads
+        .update_unpacking_started(ids[1], Some(started))
+        .await
+        .expect("unpack started");
+    downloads.mark_unpacked(ids[1], at).await.expect("unpacked");
+    downloads
+        .mark_failed(ids[2], "boom", at)
+        .await
+        .expect("failed");
+
+    let rows = downloads
+        .for_torrent(torrent.torrent_id)
+        .await
+        .expect("downloads");
+    assert_eq!(rows[0].download_finished, Some(at));
+    assert_eq!(rows[0].unpacking_queued, Some(at));
+    assert_eq!(rows[0].completed, None);
+    assert_eq!(rows[1].unpacking_started, Some(started));
+    assert_eq!(rows[1].unpacking_finished, Some(at));
+    assert_eq!(rows[1].completed, Some(at));
+    assert_eq!(rows[1].error, None);
+    assert_eq!(rows[2].error.as_deref(), Some("boom"));
+    assert_eq!(rows[2].completed, Some(at));
+    assert_eq!(rows[2].download_finished, None);
+
+    downloads.mark_unpacked(ids[0], at).await.expect("skipped");
+    let skipped = &downloads
+        .for_torrent(torrent.torrent_id)
+        .await
+        .expect("downloads")[0];
+    assert_eq!(skipped.unpacking_started, Some(at));
+    assert_eq!(skipped.completed, Some(at));
+    downloads
+        .mark_failed(Uuid::new_v4(), "missing", at)
+        .await
+        .expect("missing downloads are ignored");
 }
 
 #[tokio::test]

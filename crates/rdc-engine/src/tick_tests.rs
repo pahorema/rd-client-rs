@@ -364,7 +364,11 @@ async fn an_outcome_of_a_cancelled_transfer_never_reaches_the_reset_download() {
     };
     tokio::task::yield_now().await;
     test.engine.inner.registry.cancel(id).await;
-    test.store.downloads().reset(id, None).await.expect("reset");
+    test.store
+        .downloads()
+        .reset(id, None, 0)
+        .await
+        .expect("reset");
     drop(retry_guard);
     collector.await.expect("collector").expect("collect");
     let download = current(&test, torrent.torrent_id).await.downloads[0].clone();

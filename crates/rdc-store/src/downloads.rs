@@ -267,6 +267,55 @@ impl<'store> Downloads<'store> {
         self.set_time(id, r#""Completed" = ?"#, at).await
     }
 
+    /// Finishes the transfer and queues unpacking, both at `at`, in one
+    /// statement.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub async fn mark_downloaded(&self, download_id: Uuid, at: Timestamp) -> Result<()> {
+        self.transition(
+            download_id,
+            r#""DownloadFinished" = ?1, "UnpackingQueued" = ?1"#,
+            at,
+            None,
+        )
+        .await
+    }
+
+    /// Finishes unpacking, starting it too when it never started, and
+    /// completes the download, all at `at`, in one statement.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub async fn mark_unpacked(&self, download_id: Uuid, at: Timestamp) -> Result<()> {
+        self.transition(
+            download_id,
+            r#""UnpackingStarted" = COALESCE("UnpackingStarted", ?1),
+               "UnpackingFinished" = ?1, "Completed" = ?1"#,
+            at,
+            None,
+        )
+        .await
+    }
+
+    /// Stores the error shown to the user and completes the download at
+    /// `at`, in one statement.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub async fn mark_failed(&self, download_id: Uuid, error: &str, at: Timestamp) -> Result<()> {
+        self.transition(
+            download_id,
+            r#""Completed" = ?1, "Error" = ?2"#,
+            at,
+            Some(error),
+        )
+        .await
+    }
+
     /// Stores the error shown to the user.
     ///
     /// # Errors
@@ -314,23 +363,29 @@ impl<'store> Downloads<'store> {
     }
 
     /// Queues the download again from scratch: clears the unrestricted
-    /// link, every progress timestamp, the error and the retry count, sets
-    /// `added` to now and `download_queued` to `queued` (now when `None`).
-    /// The restricted link, file name and remote id are kept.
+    /// link, every progress timestamp and the error, stores `retry_count`,
+    /// sets `added` to now and `download_queued` to `queued` (now when
+    /// `None`). The restricted link, file name and remote id are kept.
     ///
     /// # Errors
     ///
     /// Fails with [`StoreError::DownloadNotFound`] when the download does
     /// not exist, and on database errors.
-    pub async fn reset(&self, download_id: Uuid, queued: Option<Timestamp>) -> Result<()> {
+    pub async fn reset(
+        &self,
+        download_id: Uuid,
+        queued: Option<Timestamp>,
+        retry_count: i32,
+    ) -> Result<()> {
         let now = codec::now();
         let updated = sqlx::query(
-            r#"UPDATE "Downloads" SET "RetryCount" = 0, "Link" = NULL, "Added" = ?,
+            r#"UPDATE "Downloads" SET "RetryCount" = ?, "Link" = NULL, "Added" = ?,
                    "DownloadQueued" = ?, "DownloadStarted" = NULL, "DownloadFinished" = NULL,
                    "UnpackingQueued" = NULL, "UnpackingStarted" = NULL,
                    "UnpackingFinished" = NULL, "Completed" = NULL, "Error" = NULL
                WHERE "DownloadId" = ?"#,
         )
+        .bind(retry_count)
         .bind(timestamp_text(now))
         .bind(timestamp_text(queued.unwrap_or(now)))
         .bind(uuid_text(download_id))
@@ -354,6 +409,25 @@ impl<'store> Downloads<'store> {
             optional_timestamp_text(at).as_deref(),
         )
         .await
+    }
+
+    /// Runs `UPDATE "Downloads" SET <assignments> WHERE <download>` with the
+    /// time bound as `?1` and `text` as `?2`.
+    async fn transition(
+        &self,
+        download_id: Uuid,
+        assignments: &str,
+        at: Timestamp,
+        text: Option<&str>,
+    ) -> Result<()> {
+        let sql = format!(r#"UPDATE "Downloads" SET {assignments} WHERE "DownloadId" = ?3"#);
+        sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(timestamp_text(at))
+            .bind(text)
+            .bind(uuid_text(download_id))
+            .execute(self.pool)
+            .await?;
+        Ok(())
     }
 
     /// Runs `UPDATE "Downloads" SET <assignment> WHERE <download>` with one

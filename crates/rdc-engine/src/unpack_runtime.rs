@@ -40,28 +40,22 @@ impl Engine {
             if !registered {
                 continue;
             }
-            if self.inner.store.downloads().get(id).await?.is_some() {
-                match outcome {
-                    Ok(()) => {
-                        self.inner
-                            .store
-                            .downloads()
-                            .update_unpacking_finished(id, Some(Timestamp::now()))
-                            .await?;
-                    }
-                    Err(error) => {
-                        self.inner
-                            .store
-                            .downloads()
-                            .update_error(id, Some(&error))
-                            .await?;
-                    }
+            // A transition of a download deleted meanwhile changes nothing.
+            match outcome {
+                Ok(()) => {
+                    self.inner
+                        .store
+                        .downloads()
+                        .mark_unpacked(id, Timestamp::now())
+                        .await?;
                 }
-                self.inner
-                    .store
-                    .downloads()
-                    .update_completed(id, Some(Timestamp::now()))
-                    .await?;
+                Err(error) => {
+                    self.inner
+                        .store
+                        .downloads()
+                        .mark_failed(id, &error, Timestamp::now())
+                        .await?;
+                }
             }
             self.inner
                 .registry
@@ -280,32 +274,16 @@ impl Engine {
         self.inner
             .store
             .downloads()
-            .update_error(id, Some(error))
-            .await?;
-        self.inner
-            .store
-            .downloads()
-            .update_completed(id, Some(Timestamp::now()))
+            .mark_failed(id, error, Timestamp::now())
             .await?;
         Ok(())
     }
 
     async fn skip_unpack(&self, id: uuid::Uuid) -> Result<(), EngineError> {
-        let now = Some(Timestamp::now());
         self.inner
             .store
             .downloads()
-            .update_unpacking_started(id, now)
-            .await?;
-        self.inner
-            .store
-            .downloads()
-            .update_unpacking_finished(id, now)
-            .await?;
-        self.inner
-            .store
-            .downloads()
-            .update_completed(id, now)
+            .mark_unpacked(id, Timestamp::now())
             .await?;
         Ok(())
     }
