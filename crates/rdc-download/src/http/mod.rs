@@ -3,9 +3,9 @@
 //! A download first probes the link with a `Range: bytes=0-0` request (following redirects)
 //! to learn the file size and whether the server serves byte ranges. It then writes into
 //! `<file>.download` — removing a stale one first — split into chunks fetched over up to
-//! [`InternalConfig::parallel_connections`] connections, and renames the partial file to
-//! `<file>` on success, replacing an existing file. On failure or cancellation the partial file
-//! is removed.
+//! [`InternalConfig::parallel_connections`] connections, and on success flushes it to disk and
+//! renames it to `<file>`, replacing an existing file. On failure or cancellation the partial
+//! file is removed.
 //!
 //! Each read waits at most the configured timeout. When the server serves ranges, a chunk that
 //! fails with a passing error resumes from where it stopped, up to five times, after a random
@@ -236,8 +236,6 @@ async fn download(
     if context.cancel.is_cancelled() {
         return Err(TransferError::Cancelled);
     }
-    tokio::fs::rename(partial, target)
-        .await
-        .map_err(|error| TransferError::io(target, error))?;
+    transfer::move_into_place(partial, target).await?;
     Ok(size)
 }

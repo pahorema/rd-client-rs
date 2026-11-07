@@ -83,17 +83,44 @@ pub(crate) async fn fetch_file(
         Err(error) => return Err(error),
     }
     let received = context.received();
+    let file = OpenOptions::new()
+        .write(true)
+        .open(partial)
+        .await
+        .map_err(|error| TransferError::io(partial, error))?;
     if remote.size.is_none() {
-        let file = OpenOptions::new()
-            .write(true)
-            .open(partial)
-            .await
-            .map_err(|error| TransferError::io(partial, error))?;
         file.set_len(received)
             .await
             .map_err(|error| TransferError::io(partial, error))?;
     }
+    // The file is pre-sized: regions still in the page cache would read back as zeros after
+    // a power loss, once the file is in place and recorded as complete.
+    file.sync_all()
+        .await
+        .map_err(|error| TransferError::io(partial, error))?;
     Ok(remote.size.unwrap_or(received))
+}
+
+/// Moves the finished `partial` file to `target`, then flushes the new directory entry to
+/// disk on Unix (Windows cannot open a directory to flush it; NTFS journals the rename).
+pub(crate) async fn move_into_place(partial: &Path, target: &Path) -> Result<(), TransferError> {
+    tokio::fs::rename(partial, target)
+        .await
+        .map_err(|error| TransferError::io(target, error))?;
+    #[cfg(unix)]
+    if let Some(directory) = target.parent() {
+        let synced = match File::open(directory).await {
+            Ok(directory) => directory.sync_all().await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = synced {
+            tracing::warn!(
+                "Unable to flush the new entry of {} to disk: {error}",
+                target.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Creates (or truncates) the partial file and reserves `size` bytes when known.
