@@ -6,6 +6,7 @@
 	import * as Popover from '#lib/components/ui/popover/index.js';
 	import { Slider } from '#lib/components/ui/slider/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
+	import { Latest } from '#lib/latest.js';
 	import { page } from '$app/state';
 	import GaugeIcon from '@lucide/svelte/icons/gauge';
 
@@ -15,23 +16,31 @@
 	let saving = $state(false);
 	let error = $state<string | null>(null);
 
+	// Settings reads and saves share one sequence: a save supersedes a read still in flight,
+	// so its late reply can't move the slider back.
+	const requests = new Latest();
+
 	// Reload on every navigation so changes made on the settings page show up.
 	$effect(() => {
 		void page.route.id;
-		if (saving) return;
+		const isLatest = requests.next();
 
 		settingsApi
 			.list()
 			.then((settings) => {
+				if (!isLatest()) return;
 				const value = (key: string) => Number(settings?.find((s) => s.key === key)?.value);
 				visible = value('DownloadClient:Client') === DownloadClient.Internal;
 				speed = Math.max(value('DownloadClient:MaxSpeed') || 0, 0);
 				max = Math.max(value('DownloadClient:MaxSpeedSliderMax') || 100, speed, 1);
 			})
-			.catch(() => (visible = false));
+			.catch(() => {
+				if (isLatest()) visible = false;
+			});
 	});
 
 	async function save(value: number) {
+		requests.next();
 		const rounded = Math.round(value);
 		speed = Number.isFinite(rounded) && rounded > 0 ? Math.min(rounded, max) : 0;
 		saving = true;
