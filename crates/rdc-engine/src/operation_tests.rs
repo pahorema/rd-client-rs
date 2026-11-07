@@ -126,6 +126,47 @@ async fn concurrent_additions_share_duplicate_check_and_dispatch() {
 }
 
 #[tokio::test]
+async fn an_add_whose_caller_goes_away_still_stores_the_provider_id() {
+    let test = TestEngine::with_settings(settings()).await.unwrap();
+    test.fake.queue_add(remote("held"));
+    test.fake.hold_adds();
+    let engine = test.engine.clone();
+    let caller =
+        tokio::spawn(async move { engine.add_magnet(MAGNET, TorrentTemplate::default()).await });
+    let adding = |calls: &[ProviderCall]| {
+        calls
+            .iter()
+            .filter(|call| matches!(call, ProviderCall::AddMagnet(_)))
+            .count()
+    };
+    time::timeout(Duration::from_secs(5), async {
+        while adding(&test.fake.calls()) == 0 {
+            time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    caller.abort();
+    assert!(caller.await.unwrap_err().is_cancelled());
+    test.fake.release_adds();
+    let torrents = time::timeout(Duration::from_secs(5), async {
+        loop {
+            let torrents = test.engine.torrents().await.unwrap();
+            if torrents[0].rd_id.is_some() {
+                break torrents;
+            }
+            time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(torrents.len(), 1);
+    assert_eq!(torrents[0].rd_id.as_deref(), Some("held"));
+    assert_eq!(adding(&test.fake.calls()), 1);
+    test.engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn provider_limit_counts_sent_rows_even_before_status_changes() {
     let mut settings = settings();
     settings.provider.max_parallel_downloads = 1;

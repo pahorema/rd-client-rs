@@ -15,6 +15,7 @@ use rdc_model::{Download, DownloadInfo, Provider, Torrent, TorrentStatus, settin
 use rdc_store::Store;
 use rdc_torrent::{MagnetLink, TorrentFile};
 use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{Engine, EngineError, EngineOptions};
@@ -106,11 +107,13 @@ struct FakeState {
     unrestricted: BTreeMap<String, String>,
     file_names: BTreeMap<Uuid, String>,
     statuses: BTreeMap<String, TorrentStatus>,
+    add_gate: Option<CancellationToken>,
 }
 
 /// A cloneable in-memory provider whose controls and call history share one state.
 ///
-/// No method performs network I/O or starts a task. Failures are FIFO per operation,
+/// No method performs network I/O or starts a task; only a held add waits.
+/// Failures are FIFO per operation,
 /// and failed calls are captured without applying their normal state changes.
 /// Remote listing order is deterministic (lexicographically by provider identifier).
 /// Clones share state; [`with_kind`](Self::with_kind) can present that state as another provider.
@@ -263,6 +266,18 @@ impl FakeDebridProvider {
         self.lock().statuses.insert(provider_id, status);
     }
 
+    /// Holds magnet additions after recording their call until [`release_adds`](Self::release_adds).
+    pub fn hold_adds(&self) {
+        self.lock().add_gate = Some(CancellationToken::new());
+    }
+
+    /// Lets held and later magnet additions finish.
+    pub fn release_adds(&self) {
+        if let Some(gate) = self.lock().add_gate.take() {
+            gate.cancel();
+        }
+    }
+
     fn lock(&self) -> MutexGuard<'_, FakeState> {
         self.state
             .lock()
@@ -323,11 +338,18 @@ impl DebridProvider for FakeDebridProvider {
     }
 
     async fn add_magnet(&self, magnet: &str) -> Result<String, DebridError> {
+        let gate = {
+            let mut state = self.lock();
+            state.begin(
+                ProviderOperation::AddMagnet,
+                ProviderCall::AddMagnet(magnet.to_owned()),
+            )?;
+            state.add_gate.clone()
+        };
+        if let Some(gate) = gate {
+            gate.cancelled().await;
+        }
         let mut state = self.lock();
-        state.begin(
-            ProviderOperation::AddMagnet,
-            ProviderCall::AddMagnet(magnet.to_owned()),
-        )?;
         let parsed =
             MagnetLink::parse(magnet).map_err(|error| DebridError::Provider(error.to_string()))?;
         let hash = parsed.info_hash_hex();
