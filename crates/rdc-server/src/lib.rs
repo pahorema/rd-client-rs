@@ -7,4 +7,5 @@ pub mod auth;
 pub mod config;
 pub mod http;
 pub mod logging;
+mod preferences;
 pub mod qbittorrent;
