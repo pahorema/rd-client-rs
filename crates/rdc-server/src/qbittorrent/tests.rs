@@ -945,19 +945,22 @@ async fn auxiliary_endpoints_and_binding_errors_keep_expected_statuses() {
             .status(),
             StatusCode::METHOD_NOT_ALLOWED
         );
-        assert_eq!(
-            call(
-                &app,
-                Method::POST,
-                &format!("{prefix}/torrents/add"),
-                Some(&cookie),
-                None,
-                Body::empty()
-            )
-            .await
-            .status(),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
+        for content_type in [None, Some("application/json")] {
+            assert_eq!(
+                call(
+                    &app,
+                    Method::POST,
+                    &format!("{prefix}/torrents/add"),
+                    Some(&cookie),
+                    content_type,
+                    Body::empty()
+                )
+                .await
+                .status(),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "{content_type:?}"
+            );
+        }
     }
 }
 

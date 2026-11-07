@@ -229,7 +229,10 @@ async fn protected_request(
                     || v.starts_with("application/x-www-form-urlencoded")
             })
     {
-        return Err(internal("A form content type is required"));
+        return Err(ApiError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "A form content type is required",
+        ));
     }
     let scope = CookieScope::of(request.extensions(), request.headers());
     let Some(user) = request.extensions().get::<RequestUser>().cloned() else {
