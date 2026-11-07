@@ -23,7 +23,7 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    sync::{Mutex, broadcast, watch},
+    sync::{Mutex, Notify, broadcast, watch},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -61,6 +61,8 @@ pub(crate) struct Inner {
     pub disk_status: RwLock<Option<DiskSpaceStatus>>,
     pub low_disk: AtomicBool,
     pub rate_observed: std::sync::Mutex<Option<jiff::Timestamp>>,
+    /// Wakes the cooldown-expiry job when a provider cooldown starts or grows.
+    pub rate_changed: Notify,
     pub updater: UpdateChecker,
     options: EngineOptions,
     settings_lock: Mutex<()>,
@@ -104,6 +106,7 @@ impl Engine {
                 low_disk: AtomicBool::new(false),
                 updater: UpdateChecker::new().map_err(|e| EngineError::Message(e.to_string()))?,
                 rate_observed: std::sync::Mutex::new(None),
+                rate_changed: Notify::new(),
                 synology_sessions: rdc_synology::SessionProvider::new(),
                 options,
                 settings_lock: Mutex::new(()),
@@ -312,6 +315,7 @@ impl Engine {
                 .inner
                 .events
                 .send(EngineEvent::RateLimitStatus(self.rate_limit_status()));
+            self.inner.rate_changed.notify_one();
         }
     }
 

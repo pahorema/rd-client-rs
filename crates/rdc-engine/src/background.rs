@@ -168,26 +168,37 @@ fn poll_interval(configured: i32, connected: bool) -> Duration {
     })
 }
 
+/// Without an active cooldown, the expiry job only rechecks for cooldowns that started
+/// without passing through [`Engine::record_provider_error`].
+const IDLE_RATE_CHECK: Duration = Duration::from_secs(5);
+
+/// Broadcasts cooldown changes, sleeping until the current cooldown expires or a new one is
+/// recorded.
 pub(crate) async fn rate_expiry_loop(engine: Engine) {
     loop {
         let status = engine.rate_limit_status();
+        let next = status.next_dequeue_time;
         {
             let mut previous = engine
                 .inner
                 .rate_observed
                 .lock()
                 .expect("rate status lock poisoned");
-            if *previous != status.next_dequeue_time {
-                *previous = status.next_dequeue_time;
+            if *previous != next {
+                *previous = next;
                 let _ = engine
                     .inner
                     .events
                     .send(EngineEvent::RateLimitStatus(status));
             }
         }
+        let wait = next.map_or(IDLE_RATE_CHECK, |at| {
+            Duration::try_from(at.duration_since(jiff::Timestamp::now())).unwrap_or_default()
+        });
         tokio::select! {
             () = engine.inner.cancel.cancelled() => return,
-            () = tokio::time::sleep(Duration::from_millis(100)) => {},
+            () = engine.inner.rate_changed.notified() => {},
+            () = tokio::time::sleep(wait) => {},
         }
     }
 }
@@ -251,6 +262,33 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert!(test.engine.rate_limit_status().next_dequeue_time.is_none());
         let task = tokio::spawn(rate_expiry_loop(test.engine.clone()));
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("expiry timeout")
+            .expect("expiry event");
+        assert_eq!(
+            event,
+            EngineEvent::RateLimitStatus(crate::RateLimitStatus::default())
+        );
+        test.engine.shutdown().await;
+        task.await.expect("expiry job stopped");
+    }
+
+    #[tokio::test]
+    async fn an_idle_expiry_job_wakes_for_a_new_cooldown_and_clears_it_on_time() {
+        let test = crate::testing::TestEngine::new().await.expect("engine");
+        let mut events = test.engine.subscribe();
+        let task = tokio::spawn(rate_expiry_loop(test.engine.clone()));
+        tokio::task::yield_now().await;
+        test.engine
+            .record_provider_error(&rdc_debrid::DebridError::RateLimited {
+                message: "slow down".to_owned(),
+                retry_after: Duration::from_millis(50),
+            });
+        assert!(
+            matches!(events.recv().await.expect("start event"), EngineEvent::RateLimitStatus(status) if status.next_dequeue_time.is_some())
+        );
+        // Well before the idle recheck, the job slept exactly until the cooldown ended.
         let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
             .await
             .expect("expiry timeout")
