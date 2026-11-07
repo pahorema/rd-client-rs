@@ -309,6 +309,10 @@ impl Engine {
                         && self.inner.low_disk.load(Ordering::Relaxed)
                     {
                         active.engine.pause().await;
+                        // A resume that ran while pausing could not resume this transfer.
+                        if !self.inner.low_disk.load(Ordering::Relaxed) {
+                            active.engine.resume().await;
+                        }
                     }
                 }
                 Err(error) => {

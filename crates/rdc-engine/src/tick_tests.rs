@@ -221,6 +221,83 @@ async fn rate_limited_unrestrict_requeues_at_cooldown_without_consuming_a_retry(
     test.engine.shutdown().await;
 }
 
+/// A transfer during whose start free space runs low, and during whose pause it recovers.
+#[derive(Debug, Default)]
+struct DiskEvents {
+    engine: std::sync::OnceLock<Engine>,
+    transfer: FakeDownloadEngine,
+    paused: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl rdc_download::DownloadEngine for DiskEvents {
+    async fn start(&self) -> Result<String, rdc_download::StartError> {
+        // Free space runs low after the start checked it.
+        let engine = self.engine.get().expect("engine");
+        engine.inner.low_disk.store(true, Ordering::Relaxed);
+        self.transfer.start().await
+    }
+    fn progress(&self) -> tokio::sync::watch::Receiver<rdc_download::Progress> {
+        self.transfer.progress()
+    }
+    fn completion(&self) -> rdc_download::Completion {
+        self.transfer.completion()
+    }
+    async fn cancel(&self) {
+        self.transfer.cancel().await;
+    }
+    async fn pause(&self) {
+        // The disk-space job resumes internal transfers while this pause is in flight.
+        let engine = self.engine.get().expect("engine");
+        engine.inner.low_disk.store(false, Ordering::Relaxed);
+        engine.inner.registry.resume_internal().await;
+        self.paused.store(true, Ordering::Relaxed);
+    }
+    async fn resume(&self) {
+        self.paused.store(false, Ordering::Relaxed);
+    }
+}
+
+#[derive(Debug)]
+struct DiskEventsFactory(Arc<DiskEvents>);
+
+#[async_trait::async_trait]
+impl crate::DownloadFactory for DiskEventsFactory {
+    async fn create(
+        &self,
+        _: crate::DownloadRequest,
+    ) -> Result<Arc<dyn rdc_download::DownloadEngine>, EngineError> {
+        Ok(self.0.clone())
+    }
+}
+
+#[tokio::test]
+async fn a_disk_space_resume_during_the_start_pause_leaves_the_transfer_running() {
+    let events = Arc::new(DiskEvents::default());
+    let fake = FakeDebridProvider::default();
+    let mut options = fake.options();
+    options.download_factory = Some(Arc::new(DiskEventsFactory(events.clone())));
+    let mut settings = Settings::default();
+    settings.provider.api_key = "fake-key".to_owned();
+    let test = TestEngine::with_options(settings, fake, options)
+        .await
+        .expect("engine");
+    events
+        .engine
+        .set(test.engine.clone())
+        .expect("engine set once");
+    add(&test, HASH, "one", &["a.bin"], template()).await;
+    test.engine.tick_once().await.expect("create");
+    test.engine.tick_once().await.expect("start");
+    assert_eq!(events.transfer.started(), 1);
+    assert!(!test.engine.inner.low_disk.load(Ordering::Relaxed));
+    assert!(
+        !events.paused.load(Ordering::Relaxed),
+        "transfer left paused"
+    );
+    test.engine.shutdown().await;
+}
+
 #[tokio::test]
 async fn one_tick_cancels_every_transfer_whose_download_is_gone() {
     let (test, _) = fixture().await;
