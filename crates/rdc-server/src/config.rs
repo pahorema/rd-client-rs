@@ -30,6 +30,10 @@ pub struct Config {
     /// Maximum number of log files, including the active file.
     #[arg(long, env = "LOG_MAX_FILES", default_value = "5", value_parser = clap::value_parser!(u32).range(1..), global = true)]
     pub log_max_files: u32,
+    /// Host names, besides IP addresses and localhost, accepted while authentication is
+    /// disabled; comma-separated.
+    #[arg(long, env = "ALLOWED_HOSTS", value_delimiter = ',', global = true)]
+    pub allowed_hosts: Vec<String>,
     /// Operation to execute; omitted means serve.
     #[command(subcommand)]
     pub command: Option<Command>,

@@ -40,7 +40,8 @@ impl Fixture {
         let policy = AuthPolicy::new(
             self.sessions.clone(),
             Arc::new(move || disabled.load(Ordering::Relaxed)),
-        );
+        )
+        .with_allowed_hosts(["rd.example.lan", " "]);
         let protected = Router::new()
             .route(
                 "/api/private",
@@ -111,6 +112,52 @@ async fn sessions_expose_the_requesting_account_name() {
             .await
             .unwrap(),
         None
+    );
+}
+
+#[tokio::test]
+async fn disabled_authentication_accepts_only_known_host_names() {
+    let fixture = Fixture::new().await;
+    let disabled = Arc::new(AtomicBool::new(true));
+    let app = fixture.router("", disabled.clone());
+    let status = |host: Option<&'static str>, cookie: Option<HeaderValue>| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::builder().uri("/api/private");
+            if let Some(host) = host {
+                request = request.header(header::HOST, host);
+            }
+            if let Some(cookie) = cookie {
+                request = request.header(header::COOKIE, cookie);
+            }
+            app.oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    for host in [
+        None,
+        Some("192.168.1.5:6500"),
+        Some("[::1]:6500"),
+        Some("LOCALHOST"),
+        Some("rd.example.lan."),
+        Some("RD.Example.LAN:6500"),
+    ] {
+        assert_eq!(status(host, None).await, StatusCode::OK, "{host:?}");
+    }
+    for host in ["evil.example", "evil.example:6500", "lan", "not a host"] {
+        assert_eq!(
+            status(Some(host), None).await,
+            StatusCode::FORBIDDEN,
+            "{host}"
+        );
+    }
+    disabled.store(false, Ordering::Relaxed);
+    assert_eq!(
+        status(Some("rd.example.com"), Some(fixture.cookie_at(now()))).await,
+        StatusCode::OK,
+        "signed-in requests behind any name"
     );
 }
 

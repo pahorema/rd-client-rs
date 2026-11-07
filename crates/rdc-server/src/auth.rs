@@ -352,6 +352,7 @@ impl Sessions {
 pub struct AuthPolicy {
     sessions: Sessions,
     disabled: Arc<dyn Fn() -> bool + Send + Sync>,
+    allowed_hosts: Arc<[String]>,
 }
 
 impl fmt::Debug for AuthPolicy {
@@ -363,16 +364,67 @@ impl fmt::Debug for AuthPolicy {
 impl AuthPolicy {
     /// Builds the state passed to `axum::middleware::from_fn_with_state`.
     pub fn new(sessions: Sessions, disabled: Arc<dyn Fn() -> bool + Send + Sync>) -> Self {
-        Self { sessions, disabled }
+        Self {
+            sessions,
+            disabled,
+            allowed_hosts: Arc::new([]),
+        }
+    }
+
+    /// Host names accepted in the `Host` header while authentication is disabled, besides
+    /// IP addresses and `localhost`; compared case-insensitively.
+    #[must_use]
+    pub fn with_allowed_hosts(mut self, hosts: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        self.allowed_hosts = hosts
+            .into_iter()
+            .map(|host| {
+                host.as_ref()
+                    .trim()
+                    .trim_end_matches('.')
+                    .to_ascii_lowercase()
+            })
+            .filter(|host| !host.is_empty())
+            .collect();
+        self
     }
 
     /// Reads the current injected setting, including changes after startup.
     pub fn is_disabled(&self) -> bool {
         (self.disabled)()
     }
+
+    /// Whether the `Host` header names this server: an IP address, `localhost` or an
+    /// allowed host name. A page on another domain that resolves to this server (DNS
+    /// rebinding) sends its own name. Requests without the header pass; browsers always
+    /// send it.
+    fn accepts_host(&self, headers: &HeaderMap) -> bool {
+        let Some(host) = headers.get(header::HOST) else {
+            return true;
+        };
+        let Some(authority) = host
+            .to_str()
+            .ok()
+            .and_then(|host| host.parse::<axum::http::uri::Authority>().ok())
+        else {
+            return false;
+        };
+        let name = authority.host().trim_end_matches('.');
+        name.trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<IpAddr>()
+            .is_ok()
+            || name.eq_ignore_ascii_case("localhost")
+            || self
+                .allowed_hosts
+                .iter()
+                .any(|allowed| name.eq_ignore_ascii_case(allowed))
+    }
 }
 
 /// Rejects unauthorized requests with an empty 403, otherwise inserts [`RequestUser`].
+///
+/// While authentication is disabled, requests whose `Host` is not an IP address,
+/// `localhost` or an allowed host name are rejected with 403 instead.
 ///
 /// Mount this inside [`crate::http::AppBuilder`] so [`RequestBasePath`] is available.
 /// Sliding renewal never overwrites an explicit downstream SID login/logout.
@@ -382,6 +434,13 @@ pub async fn require_auth(
     next: Next,
 ) -> Response {
     if policy.is_disabled() {
+        if !policy.accepts_host(request.headers()) {
+            return (
+                StatusCode::FORBIDDEN,
+                "Unknown host name; add it to ALLOWED_HOSTS or enable authentication",
+            )
+                .into_response();
+        }
         request
             .extensions_mut()
             .insert(RequestUser::AuthenticationDisabled);

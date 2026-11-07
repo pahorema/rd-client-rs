@@ -57,7 +57,8 @@ async fn serve(config: &Config) -> anyhow::Result<()> {
         Arc::new(move || {
             auth_engine.settings().general.authentication_type == AuthenticationType::None
         }),
-    );
+    )
+    .with_allowed_hosts(&config.allowed_hosts);
     let shutdown = tokio_util::sync::CancellationToken::new();
     let router = app::build(
         app::Backend {

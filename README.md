@@ -103,6 +103,13 @@ else lives in the database and is edited in the web UI.
 | `--log-file` | `LOG_PATH` | `rd-client.log` beside the database | Log file. |
 | `--log-max-size` | `LOG_MAX_SIZE` | `5242880` | Log size in bytes before rotation. |
 | `--log-max-files` | `LOG_MAX_FILES` | `5` | Log files kept, including the active one. |
+| `--allowed-hosts` | `ALLOWED_HOSTS` | – | Comma-separated host names, such as `rd.example.lan`, that may reach the API while authentication is disabled. |
+
+With authentication disabled, API requests are accepted only when the address
+in the browser (the `Host` header) is an IP address, `localhost` or one of the
+allowed host names; others get 403. This stops a web page from reaching the
+API through a domain of its own that resolves to rd-client (DNS rebinding). If
+you open rd-client by a host name, add that name, or turn authentication on.
 
 `rd-client healthcheck` checks the running server; the Docker image uses it as
 its health check.
