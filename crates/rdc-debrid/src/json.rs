@@ -25,6 +25,12 @@ enum Flag {
 enum OneOrMany<T> {
     Many(Vec<T>),
     One(T),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Lossy<T> {
+    List(OneOrMany<T>),
     Other(IgnoredAny),
 }
 
@@ -47,17 +53,37 @@ pub(crate) fn flag<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D
 }
 
 /// Decodes a list that may also be sent as a single object (a list of one);
-/// `null` and values of any other shape decode as `None`.
+/// `null` decodes as `None` and any other shape, or an unreadable item, is
+/// an error.
 pub(crate) fn one_or_many<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
 {
-    Ok(match Option::<OneOrMany<T>>::deserialize(deserializer)? {
-        Some(OneOrMany::Many(items)) => Some(items),
-        Some(OneOrMany::One(item)) => Some(vec![item]),
-        Some(OneOrMany::Other(_)) | None => None,
+    Ok(Option::<OneOrMany<T>>::deserialize(deserializer)?.map(OneOrMany::into_vec))
+}
+
+/// Like [`one_or_many`], but a value of any other shape or with an
+/// unreadable item decodes as `None`; only for optional details, such as
+/// file trees, that can be fetched again.
+pub(crate) fn lossy_one_or_many<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(match Option::<Lossy<T>>::deserialize(deserializer)? {
+        Some(Lossy::List(list)) => Some(list.into_vec()),
+        Some(Lossy::Other(_)) | None => None,
     })
+}
+
+impl<T> OneOrMany<T> {
+    fn into_vec(self) -> Vec<T> {
+        match self {
+            Self::Many(items) => items,
+            Self::One(item) => vec![item],
+        }
+    }
 }
 
 impl Number {

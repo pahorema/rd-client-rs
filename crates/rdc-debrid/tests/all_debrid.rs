@@ -370,6 +370,41 @@ async fn a_new_full_sync_replaces_the_known_magnets() {
 }
 
 #[tokio::test]
+async fn an_unreadable_listing_is_an_error_and_is_requested_again() {
+    let server = MockServer::start().await;
+    mock_live(
+        &server,
+        0,
+        json!({"counter": 7, "fullsync": true, "magnets": [magnet(1, 1)]}),
+    )
+    .await;
+    let mut unreadable = magnet(2, 1);
+    unreadable["filename"] = json!(["not", "a", "name"]);
+    Mock::given(method("POST"))
+        .and(path("/v4.1/magnet/status"))
+        .and(body_string_contains("counter=7"))
+        .respond_with(success(
+            json!({"counter": 8, "fullsync": true, "magnets": [unreadable]}),
+        ))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let client = client(&server);
+
+    client.list_torrents().await.expect("full sync");
+    let error = client.list_torrents().await.expect_err("unreadable sync");
+    client
+        .list_torrents()
+        .await
+        .expect_err("same counter again");
+
+    assert!(
+        matches!(error, DebridError::InvalidResponse(_)),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn changes_with_a_new_magnet_add_it_to_the_known_ones() {
     let server = MockServer::start().await;
     mock_live(

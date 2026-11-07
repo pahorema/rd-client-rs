@@ -696,7 +696,9 @@ struct Magnet {
     /// Unix seconds, 0 while unfinished.
     #[serde(default, deserialize_with = "json::optional_i64")]
     completion_date: Option<i64>,
-    #[serde(default, deserialize_with = "json::one_or_many")]
+    /// File tree; an unreadable one is left out, as refreshing a ready
+    /// magnet without files loads them from `magnet/files`.
+    #[serde(default, deserialize_with = "json::lossy_one_or_many")]
     files: Option<Vec<FileNode>>,
 }
 
