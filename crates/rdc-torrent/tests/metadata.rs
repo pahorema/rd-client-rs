@@ -187,3 +187,18 @@ fn rejects_malformed_v2_trees_and_total_overflow() {
         Err(ParseTorrentError::SizeOverflow)
     );
 }
+
+#[test]
+fn prefers_the_utf8_name_and_decodes_other_text_leniently() {
+    let bytes = b"d8:announce5:udp:\xff4:infod6:lengthi1e4:name4:caf\xe910:name.utf-85:caf\xc3\xa96:source3:x\xffyee";
+    let parsed = TorrentFile::parse(bytes).unwrap();
+    assert_eq!(parsed.name, "caf\u{e9}");
+    assert_eq!(parsed.files[0].path, ["caf\u{e9}"]);
+    assert_eq!(parsed.source.as_deref(), Some("x\u{fffd}y"));
+    assert_eq!(parsed.announce.as_deref(), Some("udp:\u{fffd}"));
+
+    let bytes = b"d4:infod5:filesld6:lengthi1e4:pathl2:a\xffeee4:name2:n\xffee";
+    let parsed = TorrentFile::parse(bytes).unwrap();
+    assert_eq!(parsed.name, "n\u{fffd}");
+    assert_eq!(parsed.files[0].path, ["a\u{fffd}"]);
+}

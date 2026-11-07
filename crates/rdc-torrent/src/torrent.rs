@@ -13,9 +13,12 @@ pub struct TorrentEntry {
 }
 
 /// Parsed metadata with hashes computed over the exact encoded info dictionary.
+///
+/// Text fields replace invalid UTF-8 with U+FFFD rather than rejecting the torrent: older
+/// clients wrote names and paths in local code pages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TorrentFile {
-    /// Display name from the info dictionary.
+    /// Display name from the info dictionary: `name.utf-8` when it holds UTF-8, else `name`.
     pub name: String,
     /// SHA-1 info hash, when v1 metadata is present.
     pub info_hash_v1: Option<[u8; 20]>,
@@ -43,7 +46,7 @@ pub enum ParseTorrentError {
     /// A required metadata field is absent.
     #[error("missing torrent field '{0}'")]
     Missing(&'static str),
-    /// A field has an invalid type, encoding, or value.
+    /// A field has an invalid type or value.
     #[error("invalid torrent field '{0}'")]
     Invalid(&'static str),
     /// Payload lengths cannot be represented by a u64.
@@ -60,7 +63,14 @@ impl TorrentFile {
             .get(b"info")
             .ok_or(ParseTorrentError::Missing("info"))?;
         dictionary(info, "info")?;
-        let name = text(required(info, b"name", "name")?, "name")?;
+        let name = match info
+            .get(b"name.utf-8")
+            .and_then(Node::bytes)
+            .and_then(|name| std::str::from_utf8(name).ok())
+        {
+            Some(name) => name.to_owned(),
+            None => text(required(info, b"name", "name")?, "name")?,
+        };
         let v2 = match info.get(b"meta version").map(|n| &n.value) {
             None => false,
             Some(Value::Integer(2)) => true,
@@ -154,10 +164,10 @@ fn required<'node, 'src>(
 ) -> Result<&'node Node<'src>, ParseTorrentError> {
     node.get(key).ok_or(ParseTorrentError::Missing(field))
 }
+/// A byte-string field as text, invalid UTF-8 replaced by U+FFFD.
 fn text(node: &Node<'_>, field: &'static str) -> Result<String, ParseTorrentError> {
     node.bytes()
-        .and_then(|s| std::str::from_utf8(s).ok())
-        .map(str::to_owned)
+        .map(|s| String::from_utf8_lossy(s).into_owned())
         .ok_or(ParseTorrentError::Invalid(field))
 }
 fn optional_text(
@@ -196,9 +206,7 @@ fn read_tree(
                 length: length(value)?,
             });
         } else {
-            let component = std::str::from_utf8(key)
-                .map_err(|_| ParseTorrentError::Invalid("file tree path"))?;
-            path.push(component.to_owned());
+            path.push(String::from_utf8_lossy(key).into_owned());
             read_tree(value, path, files)?;
             path.pop();
         }
