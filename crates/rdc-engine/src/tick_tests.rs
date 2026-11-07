@@ -222,6 +222,48 @@ async fn rate_limited_unrestrict_requeues_at_cooldown_without_consuming_a_retry(
 }
 
 #[tokio::test]
+async fn rate_limits_during_selection_or_download_creation_only_postpone_the_torrent() {
+    let (test, _) = fixture().await;
+    let torrent = add(&test, HASH, "one", &["a.bin"], template()).await;
+    let cooldown = Duration::from_millis(50);
+    test.fake
+        .queue_rate_limit(ProviderOperation::SelectFiles, cooldown);
+    test.engine.tick_once().await.expect("selection limited");
+    let postponed = current(&test, torrent.torrent_id).await;
+    assert_eq!(postponed.error, None);
+    assert_eq!(postponed.completed, None);
+    assert_eq!(postponed.retry, None);
+    assert_eq!(postponed.files_selected, None);
+    test.engine.tick_once().await.expect("cooldown pending");
+    let selections = |test: &TestEngine| {
+        test.fake
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, ProviderCall::SelectFiles(_)))
+            .count()
+    };
+    assert_eq!(selections(&test), 1, "no provider work during the cooldown");
+
+    tokio::time::sleep(cooldown * 2).await;
+    test.fake
+        .queue_rate_limit(ProviderOperation::DownloadInfos, cooldown);
+    test.engine.tick_once().await.expect("creation limited");
+    let postponed = current(&test, torrent.torrent_id).await;
+    assert!(postponed.files_selected.is_some());
+    assert_eq!(postponed.downloads, []);
+    assert_eq!(postponed.error, None);
+    assert_eq!(postponed.completed, None);
+
+    tokio::time::sleep(cooldown * 2).await;
+    test.engine.tick_once().await.expect("created");
+    let created = current(&test, torrent.torrent_id).await;
+    assert_eq!(created.downloads.len(), 1);
+    assert_eq!(created.error, None);
+    assert_eq!(test.store.torrents().list().await.expect("list").len(), 1);
+    test.engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn ordinary_unrestrict_failure_uses_backoff_without_aborting_other_phases() {
     let (test, factory) = fixture().await;
     let first = add(&test, HASH, "one", &["a.bin"], template()).await;

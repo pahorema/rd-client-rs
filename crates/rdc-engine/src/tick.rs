@@ -57,22 +57,29 @@ impl Engine {
             .iter()
             .filter(|torrent| torrent.completed.is_none())
         {
-            if let Err(error) = self
+            match self
                 .advance_torrent(torrent, download_limit, unpack_limit, &mut starts_blocked)
                 .await
             {
-                let message = format!("Runner error: {error}");
-                self.inner
-                    .store
-                    .torrents()
-                    .update_complete(
-                        torrent.torrent_id,
-                        Some(&message),
-                        Some(Timestamp::now()),
-                        RetryOnError::Schedule,
-                    )
-                    .await?;
-                tracing::error!(torrent_id = %torrent.torrent_id, %error, "torrent processing failed");
+                Ok(()) => {}
+                // The recorded cooldown pauses provider work of the remaining torrents too.
+                Err(EngineError::Provider(error)) if error.retry_after().is_some() => {
+                    tracing::debug!(torrent_id = %torrent.torrent_id, %error, "provider cooldown");
+                }
+                Err(error) => {
+                    let message = format!("Runner error: {error}");
+                    self.inner
+                        .store
+                        .torrents()
+                        .update_complete(
+                            torrent.torrent_id,
+                            Some(&message),
+                            Some(Timestamp::now()),
+                            RetryOnError::Schedule,
+                        )
+                        .await?;
+                    tracing::error!(torrent_id = %torrent.torrent_id, %error, "torrent processing failed");
+                }
             }
         }
         Ok(())
@@ -106,10 +113,13 @@ impl Engine {
                 .await?;
             return Ok(());
         }
-        if matches!(
-            torrent.rd_status,
-            Some(TorrentStatus::WaitingForFileSelection | TorrentStatus::Finished)
-        ) && torrent.files_selected.is_none()
+        // Provider steps wait for a cooldown; a rate limit is not a torrent failure.
+        if self.inner.coordinator.max_next_allowed_at().is_none()
+            && matches!(
+                torrent.rd_status,
+                Some(TorrentStatus::WaitingForFileSelection | TorrentStatus::Finished)
+            )
+            && torrent.files_selected.is_none()
             && torrent.downloads.is_empty()
         {
             self.select_torrent_files(torrent.torrent_id).await?;
@@ -120,7 +130,8 @@ impl Engine {
         if current.completed.is_some() {
             return Ok(());
         }
-        if current.rd_status == Some(TorrentStatus::Finished)
+        if self.inner.coordinator.max_next_allowed_at().is_none()
+            && current.rd_status == Some(TorrentStatus::Finished)
             && current.downloads.is_empty()
             && current.files_selected.is_some()
             && current.host_download_action == TorrentHostDownloadAction::DownloadAll
