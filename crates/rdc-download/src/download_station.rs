@@ -66,7 +66,8 @@ pub struct DownloadStationRequest {
 ///
 /// The engine then reads the task every second: a task error or a captcha request deletes the
 /// task and fails; a finished task (or one with every byte downloaded) succeeds as soon as the
-/// local file exists (looked for ten times, about 45 s); a task that no longer exists fails.
+/// local file exists (looked for ten times, about 45 s); a task that no longer exists fails, as
+/// does any other call DSM rejects, with its error; unreachable DSMs are asked again.
 /// Pausing and resuming pause and resume the task; cancelling deletes it.
 #[derive(Debug)]
 pub struct DownloadStationDownload {
@@ -401,8 +402,14 @@ impl Polled for Shared {
             .await
         {
             Ok(task) => task,
-            Err(Error::TaskNotFound(_) | Error::Api(_)) => {
+            Err(error) if error.is_task_not_found() => {
                 return Some(Err("Task not found".to_owned()));
+            }
+            // DSM answered, so this is no connection blip that the next poll could outlast
+            // (signing in again after a session error already failed, for example): fail with
+            // the cause rather than follow a task that cannot be read.
+            Err(error @ Error::Api(_)) => {
+                return Some(Err(format!("DownloadStation error: {error}")));
             }
             Err(error) => {
                 tracing::warn!("Unable to read Download Station task {gid}: {error}");

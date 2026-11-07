@@ -2,11 +2,15 @@
 
 use std::fmt;
 
+use crate::api::TASK_API;
 use crate::codes;
 
 /// DSM error codes meaning the session is gone: 106 (timeout), 107 (interrupted by a
 /// duplicate login) and 119 (SID not found). Logging in again usually fixes them.
 pub const SESSION_ERROR_CODES: [i64; 3] = [106, 107, 119];
+
+/// Task API codes for a task id that does not exist; see [`Error::is_task_not_found`].
+const TASK_NOT_FOUND_CODES: [i64; 2] = [404, 544];
 
 /// Failure of a DSM Web API call.
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +64,18 @@ impl Error {
     pub fn is_session_error(&self) -> bool {
         self.api_code()
             .is_some_and(|code| SESSION_ERROR_CODES.contains(&code))
+    }
+
+    /// Whether the task asked for does not exist (or belongs to another account): DSM
+    /// answered without it ([`Error::TaskNotFound`]), or the task API rejected its id with
+    /// code 404 ("Invalid task id") or the undocumented 544 that DSM 7 returns for task ids
+    /// the account cannot see.
+    pub fn is_task_not_found(&self) -> bool {
+        match self {
+            Self::TaskNotFound(_) => true,
+            Self::Api(error) => error.api == TASK_API && TASK_NOT_FOUND_CODES.contains(&error.code),
+            _ => false,
+        }
     }
 }
 
@@ -175,6 +191,19 @@ mod tests {
         assert!(!api.is_session_error());
         assert!(!status.is_session_error());
         assert_eq!(status.api_code(), None);
+    }
+
+    #[test]
+    fn only_a_missing_task_is_task_not_found() {
+        let task = |code| Error::from(ApiError::new(TASK_API, "get", 2, code));
+
+        assert!(Error::TaskNotFound("dbid_1".to_owned()).is_task_not_found());
+        assert!(task(404).is_task_not_found());
+        assert!(task(544).is_task_not_found());
+        assert!(!task(105).is_task_not_found());
+        assert!(!task(119).is_task_not_found());
+        assert!(!Error::from(ApiError::new("SYNO.API.Auth", "login", 6, 404)).is_task_not_found());
+        assert!(!Error::UnexpectedStatus(404).is_task_not_found());
     }
 
     #[test]

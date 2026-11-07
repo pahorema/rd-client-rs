@@ -402,10 +402,32 @@ async fn a_captcha_request_fails() {
 
 #[tokio::test]
 async fn a_vanished_task_fails() {
+    for code in [404, 544] {
+        let fake = FakeDsm::start().await;
+        let engine = followed(&fake, 2, "").await;
+        fake.get.always(Reply::Fail(code));
+        assert_eq!(
+            finish(&engine).await,
+            Err("Task not found".to_owned()),
+            "code {code}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_task_read_dsm_rejects_otherwise_fails_with_its_error() {
     let fake = FakeDsm::start().await;
     let engine = followed(&fake, 2, "").await;
-    fake.get.always(Reply::Fail(544));
-    assert_eq!(finish(&engine).await, Err("Task not found".to_owned()));
+    fake.get.always(Reply::Fail(105));
+    let Err(message) = finish(&engine).await else {
+        panic!("the download must fail");
+    };
+    assert!(
+        message.starts_with("DownloadStation error: SYNO.DownloadStation2.Task.get")
+            && message
+                .ends_with("failed with error 105: The logged in session does not have permission"),
+        "{message}"
+    );
 }
 
 #[tokio::test]
