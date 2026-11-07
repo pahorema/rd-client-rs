@@ -16,10 +16,18 @@ class LiveState {
 
 export const live = new LiveState();
 
-function refreshDiskSpace() {
+/**
+ * Loads both monitor states. The stream only pushes them when they change, so a change
+ * missed while disconnected is only seen this way.
+ */
+function refreshMonitors() {
 	torrentsApi
 		.diskSpaceStatus()
 		.then((status) => (live.diskSpace = status))
+		.catch(() => undefined);
+	torrentsApi
+		.rateLimitStatus()
+		.then((status) => (live.rateLimit = status))
 		.catch(() => undefined);
 }
 
@@ -28,17 +36,13 @@ function refreshDiskSpace() {
  * Returns a function that unsubscribes and clears the state.
  */
 export function startLive(): () => void {
-	refreshDiskSpace();
-	torrentsApi
-		.rateLimitStatus()
-		.then((status) => (live.rateLimit = status))
-		.catch(() => undefined);
+	refreshMonitors();
 
 	const stop = connectEvents({
 		update: (torrents) => (live.torrents = torrents),
 		diskSpaceStatus: (status) => (live.diskSpace = status),
 		rateLimitStatus: (status) => (live.rateLimit = status),
-		reconnected: refreshDiskSpace,
+		reconnected: refreshMonitors,
 		connectionChange: (connected) => (live.connected = connected),
 		// A refused stream usually means the session expired; this request
 		// sends the user to the login or setup page when that is the case.

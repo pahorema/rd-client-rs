@@ -61,14 +61,18 @@ describe('startLive', () => {
 		stop();
 	});
 
-	it('refreshes the disk space status after reconnecting', async () => {
+	it('refreshes both monitor states after reconnecting', async () => {
 		const stop = startLive();
 		api.diskSpaceStatus.mockResolvedValue(paused);
+		// A cooldown that started while disconnected is never pushed afterwards.
+		api.rateLimitStatus.mockResolvedValue(limited);
 
 		stream.handlers!.reconnected();
 
-		await vi.waitFor(() => expect(live.diskSpace).toEqual(paused));
+		await vi.waitFor(() => expect(live.rateLimit).toEqual(limited));
+		expect(live.diskSpace).toEqual(paused);
 		expect(api.diskSpaceStatus).toHaveBeenCalledTimes(2);
+		expect(api.rateLimitStatus).toHaveBeenCalledTimes(2);
 		stop();
 	});
 
