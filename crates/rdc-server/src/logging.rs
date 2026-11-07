@@ -172,7 +172,9 @@ impl Write for OutputGuard<'_> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.0.file_mut()?.flush()?;
+        if let Some(file) = &mut self.0.file {
+            file.flush()?;
+        }
         io::stderr().flush()
     }
 }
@@ -207,15 +209,25 @@ impl Output {
         PathBuf::from(path)
     }
 
+    /// The open log file, reopened for appending after a failure closed it.
     fn file_mut(&mut self) -> io::Result<&mut File> {
+        if self.file.is_none() {
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?;
+            self.size = file.metadata()?.len();
+            self.file = Some(file);
+        }
         self.file
             .as_mut()
             .ok_or_else(|| io::Error::other("log file is unavailable"))
     }
 
     fn rotate(&mut self) -> io::Result<()> {
-        self.file_mut()?.flush()?;
-        drop(self.file.take());
+        if let Some(mut file) = self.file.take() {
+            file.flush()?;
+        }
         if self.max_files > 1 {
             for index in (1..self.max_files - 1).rev() {
                 let source = self.archive_path(index);
@@ -236,14 +248,26 @@ impl Output {
         Ok(())
     }
 
+    /// Writes to the console and the file; a failure of one does not affect the other.
     fn write_event(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let console = io::stderr().write_all(bytes);
+        self.write_file(bytes).and(console)
+    }
+
+    fn write_file(&mut self, bytes: &[u8]) -> io::Result<()> {
         let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if self.size > 0 && self.size.saturating_add(size) > self.max_size {
-            self.rotate()?;
+        if self.size > 0
+            && self.size.saturating_add(size) > self.max_size
+            && let Err(error) = self.rotate()
+        {
+            // Keep appending to the current file and retry after another full file.
+            let _ = writeln!(io::stderr(), "Cannot rotate the log file: {error}");
+            self.file_mut()?;
+            self.size = 0;
         }
         self.file_mut()?.write_all(bytes)?;
         self.size = self.size.saturating_add(size);
-        io::stderr().write_all(bytes)
+        Ok(())
     }
 }
 
@@ -274,5 +298,23 @@ mod tests {
         output.write_event(b"new").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"new");
         assert!(!output.archive_path(1).exists());
+    }
+
+    #[test]
+    fn failed_rotation_keeps_logging_and_retries_later() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("server.log");
+        let mut output = Output::open(&path, 5, 2).unwrap();
+        // A directory in the archive's place makes the rename fail.
+        let blocker = output.archive_path(1);
+        fs::create_dir(&blocker).unwrap();
+        fs::write(blocker.join("entry"), b"").unwrap();
+        output.write_event(b"first").unwrap();
+        output.write_event(b"second").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"firstsecond");
+        fs::remove_dir_all(&blocker).unwrap();
+        output.write_event(b"third").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"third");
+        assert_eq!(fs::read(&blocker).unwrap(), b"firstsecond");
     }
 }
