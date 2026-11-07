@@ -557,6 +557,33 @@ async fn an_added_torrent_file_without_id_is_found_by_hash() {
 }
 
 #[tokio::test]
+async fn an_added_magnet_without_id_or_hash_fails_without_searching() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v4.1/magnet/upload"))
+        .respond_with(success(json!({"magnets": [{"magnet": "magnet:?xt"}]})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v4.1/magnet/status"))
+        .respond_with(success(json!({"magnets": []})))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let error = client(&server)
+        .add_magnet("magnet:?xt")
+        .await
+        .expect_err("no id");
+
+    assert!(
+        matches!(error, DebridError::InvalidResponse(_)),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn rejected_magnets_report_their_error() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

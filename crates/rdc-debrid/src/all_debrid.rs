@@ -18,7 +18,7 @@ use crate::http::ProviderHttp;
 use crate::json;
 use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
 use crate::text_rate_limit::classify_add_error;
-use crate::values::excerpt;
+use crate::values::{excerpt, non_blank};
 
 /// Root of the AllDebrid API.
 pub const DEFAULT_BASE_URL: &str = "https://api.alldebrid.com/v4.1/";
@@ -171,10 +171,15 @@ impl AllDebrid {
             if let Some(error) = entry.error.filter(ApiError::has_message) {
                 return Err(error.into_error());
             }
-            match entry.id.filter(|id| *id != 0) {
-                Some(id) => Ok(id),
-                None => self.find_id(entry.hash.as_deref()).await,
+            if let Some(id) = entry.id.filter(|id| *id != 0) {
+                return Ok(id);
             }
+            let Some(hash) = non_blank(entry.hash.as_deref()) else {
+                return Err(DebridError::InvalidResponse(
+                    "AllDebrid returned neither the id nor the hash of the added magnet".to_owned(),
+                ));
+            };
+            self.find_id(hash).await
         }
         .await
         .map_err(classify_add_error)?;
@@ -183,7 +188,7 @@ impl AllDebrid {
     }
 
     /// Searches the magnet list for the id of the magnet with `hash`.
-    async fn find_id(&self, hash: Option<&str>) -> Result<i64, DebridError> {
+    async fn find_id(&self, hash: &str) -> Result<i64, DebridError> {
         for attempt in 0..=ID_LOOKUP_RETRIES {
             if attempt > 0 {
                 tokio::time::sleep(ID_LOOKUP_INTERVAL).await;
@@ -192,12 +197,10 @@ impl AllDebrid {
                 .call(self.request(Method::GET, "magnet/status")?)
                 .await?;
             let found = list.magnets.unwrap_or_default().into_iter().find(|magnet| {
-                hash.is_some_and(|hash| {
-                    magnet
-                        .hash
-                        .as_deref()
-                        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(hash))
-                })
+                magnet
+                    .hash
+                    .as_deref()
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(hash))
             });
             if let Some(id) = found.and_then(|magnet| magnet.id) {
                 return Ok(id);
