@@ -464,9 +464,15 @@ impl Engine {
 
     /// Requests a manual whole-torrent retry with a fresh retry allowance.
     ///
+    /// A torrent without a usable stored magnet or torrent file is left untouched.
+    ///
     /// # Errors
     /// Returns persistence, missing-payload, invalid-payload or local cleanup errors.
     pub async fn retry(&self, torrent_id: Uuid) -> Result<(), EngineError> {
+        let Some(torrent) = self.inner.store.torrents().get(torrent_id).await? else {
+            return Ok(());
+        };
+        RetryPayload::of(&torrent)?;
         self.inner
             .store
             .torrents()
@@ -475,6 +481,10 @@ impl Engine {
         self.retry_torrent(torrent_id, 0).await
     }
 
+    /// Deletes and re-adds a torrent whose retry is requested.
+    ///
+    /// The stored payload is validated first, so a torrent that cannot be re-added keeps its
+    /// rows, provider torrent and local files.
     pub(crate) async fn retry_torrent(
         &self,
         torrent_id: Uuid,
@@ -487,6 +497,7 @@ impl Engine {
         if torrent.retry.is_none() {
             return Ok(());
         }
+        let payload = RetryPayload::of(&torrent)?;
         self.inner
             .store
             .torrents()
@@ -523,23 +534,16 @@ impl Engine {
             },
         )
         .await?;
-        let payload = torrent
-            .payload
-            .as_deref()
-            .filter(|payload| !payload.trim().is_empty())
-            .ok_or_else(|| {
-                EngineError::Message(
-                    "Cannot re-add this torrent: stored magnet or file not found".into(),
-                )
-            })?;
         let template = TorrentTemplate::from(&torrent);
-        if torrent.is_file {
-            let bytes = BASE64.decode(payload.as_bytes()).map_err(message)?;
-            self.add_file_with_retry_count(&bytes, template, Some(retry_count))
-                .await?;
-        } else {
-            self.add_magnet_with_retry_count(payload, template, Some(retry_count))
-                .await?;
+        match payload {
+            RetryPayload::File(bytes) => {
+                self.add_file_with_retry_count(&bytes, template, Some(retry_count))
+                    .await?;
+            }
+            RetryPayload::Magnet(magnet) => {
+                self.add_magnet_with_retry_count(magnet, template, Some(retry_count))
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -763,6 +767,38 @@ impl Engine {
             biased;
             () = self.inner.cancel.cancelled() => Ok(WaitOutcome::Shutdown),
             result = time::timeout(timeout.min(MAX_DEQUEUE_WAIT), wait) => result.unwrap_or(Ok(WaitOutcome::TimedOut)),
+        }
+    }
+}
+
+/// The stored source of a torrent, checked before a retry deletes anything.
+enum RetryPayload<'torrent> {
+    Magnet(&'torrent str),
+    File(Vec<u8>),
+}
+
+impl<'torrent> RetryPayload<'torrent> {
+    fn of(torrent: &'torrent Torrent) -> Result<Self, EngineError> {
+        let payload = torrent
+            .payload
+            .as_deref()
+            .filter(|payload| !payload.trim().is_empty())
+            .ok_or_else(|| {
+                EngineError::Message(
+                    "Cannot re-add this torrent: stored magnet or file not found".into(),
+                )
+            })?;
+        if torrent.is_file {
+            let bytes = BASE64.decode(payload.as_bytes()).map_err(|error| {
+                EngineError::Message(format!("Cannot re-add this torrent: {error}"))
+            })?;
+            TorrentFile::parse(&bytes).map_err(|error| torrent_parse_error(&error, &bytes))?;
+            Ok(Self::File(bytes))
+        } else {
+            MagnetLink::parse(payload).map_err(|error| {
+                EngineError::Message(format!("{error}, trying to parse {payload}"))
+            })?;
+            Ok(Self::Magnet(payload))
         }
     }
 }

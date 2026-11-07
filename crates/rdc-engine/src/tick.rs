@@ -554,6 +554,7 @@ impl Engine {
                 .retry_torrent(torrent.torrent_id, torrent.retry_count)
                 .await
             {
+                tracing::warn!(torrent_id = %torrent.torrent_id, %error, "torrent retry failed");
                 self.inner
                     .store
                     .torrents()

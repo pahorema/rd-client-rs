@@ -108,6 +108,60 @@ async fn expired_delete_on_error_removes_the_torrent_with_provider_and_local_dat
 }
 
 #[tokio::test]
+async fn retrying_an_imported_torrent_without_payload_deletes_nothing() {
+    let (test, _) = fixture().await;
+    let template = Torrent {
+        rd_name: Some("Example".to_owned()),
+        torrent_retry_attempts: 2,
+        ..Torrent::default()
+    };
+    let torrent = test
+        .store
+        .torrents()
+        .add(&rdc_store::NewTorrent {
+            rd_id: Some("one"),
+            hash: HASH,
+            payload: None,
+            is_file: false,
+            download_client: DownloadClient::Internal,
+            template: &template,
+        })
+        .await
+        .expect("imported torrent");
+    let folder = torrent_folder(&test);
+    fs::create_dir_all(&folder).await.expect("folder");
+    fs::write(folder.join("done.bin"), b"done")
+        .await
+        .expect("downloaded file");
+    test.store
+        .torrents()
+        .update_complete(
+            torrent.torrent_id,
+            Some("Runner error: boom"),
+            Some(Timestamp::now()),
+            RetryOnError::Schedule,
+        )
+        .await
+        .expect("failure schedules a retry");
+    test.engine.tick_once().await.expect("retry tick");
+    let kept = current(&test, torrent.torrent_id).await;
+    assert_eq!(kept.retry, None);
+    assert_eq!(kept.rd_id.as_deref(), Some("one"));
+    assert_eq!(
+        kept.error.as_deref(),
+        Some("Cannot re-add this torrent: stored magnet or file not found")
+    );
+    assert!(folder.join("done.bin").exists());
+    assert_eq!(provider_deletes(&test), 0);
+    let manual = test.engine.retry(torrent.torrent_id).await;
+    assert!(manual.is_err());
+    assert_eq!(current(&test, torrent.torrent_id).await.retry, None);
+    assert!(folder.join("done.bin").exists());
+    assert_eq!(provider_deletes(&test), 0);
+    test.engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn lifetime_expiry_fails_torrents_without_downloads_and_disables_retries() {
     let (test, _) = fixture().await;
     test.fake
