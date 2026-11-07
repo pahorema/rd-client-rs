@@ -9,6 +9,7 @@
 	import * as Alert from '#lib/components/ui/alert/index.js';
 	import { Button } from '#lib/components/ui/button/index.js';
 	import * as Card from '#lib/components/ui/card/index.js';
+	import { Input } from '#lib/components/ui/input/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
 	import * as Table from '#lib/components/ui/table/index.js';
 	import * as Tabs from '#lib/components/ui/tabs/index.js';
@@ -39,6 +40,9 @@
 	let detail = $state<Torrent | null>(null);
 	let loadError = $state<string | null>(null);
 	let copied = $state(false);
+	// Without clipboard access (plain HTTP) the magnet link is shown selected for manual copying.
+	let copyFailure = $state<string | null>(null);
+	let copiedTimer: ReturnType<typeof setTimeout> | undefined;
 	let deleteOpen = $state(false);
 	let retryOpen = $state(false);
 	let settingsOpen = $state(false);
@@ -75,8 +79,25 @@
 	});
 
 	async function copyMagnet(magnet: string) {
-		await navigator.clipboard.writeText(magnet);
-		copied = true;
+		copyFailure = null;
+		clearTimeout(copiedTimer);
+
+		try {
+			if (!('clipboard' in navigator)) {
+				throw new Error('The browser only allows copying on HTTPS or localhost.');
+			}
+			await navigator.clipboard.writeText(magnet);
+			copied = true;
+			copiedTimer = setTimeout(() => (copied = false), 2000);
+		} catch (e) {
+			copied = false;
+			copyFailure = errorMessage(e);
+		}
+	}
+
+	function selectAll(input: HTMLInputElement) {
+		input.focus();
+		input.select();
 	}
 
 	function downloadTorrentFile(current: Torrent) {
@@ -190,6 +211,16 @@
 									>
 										{copied ? 'Copied to clipboard' : 'Copy magnet link'}
 									</Button>
+									{#if copyFailure}
+										<p class="mt-1 text-destructive">Could not copy: {copyFailure} Copy it here:</p>
+										<Input
+											readonly
+											aria-label="Magnet link"
+											value={torrent.fileOrMagnet}
+											class="mt-1"
+											{@attach selectAll}
+										/>
+									{/if}
 								{/if}
 							{/if}
 						</dd>
