@@ -370,6 +370,98 @@ async fn range_refusing_servers_are_probed_again_without_range() {
     assert_downloaded(&run, &data);
 }
 
+fn two_chunks() -> InternalConfig {
+    InternalConfig {
+        chunk_count: 2,
+        ..config()
+    }
+}
+
+/// `request` asking for `range` (`None`: the whole file) instead of what it asked for.
+fn with_range(request: &support::Request, range: Option<String>) -> support::Request {
+    let mut changed = request.clone();
+    changed.headers.retain(|(name, _)| name != "range");
+    if let Some(range) = range {
+        changed.headers.push(("range".to_owned(), range));
+    }
+    changed
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_partial_response_from_the_wrong_offset_fails() {
+    let data = test_data(4096);
+    let server = {
+        let data = Arc::clone(&data);
+        // Like a broken proxy: every range is answered from the start of the file.
+        TestServer::start(move |request| {
+            let from_start = match request.range() {
+                Some((start, Some(end))) => {
+                    with_range(request, Some(format!("bytes=0-{}", end - start)))
+                }
+                _ => request.clone(),
+            };
+            file_reply(&data, &from_start, &FileOptions::default())
+        })
+        .await
+    };
+    let (_run, outcome) = download(&server.url("/file.bin"), two_chunks()).await;
+    assert_eq!(
+        outcome,
+        Err(
+            "The server sent the wrong byte range: asked from byte 2048, got bytes 0-2047/4096."
+                .to_owned()
+        )
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ranged_requests_carry_the_probed_etag() {
+    let data = test_data(4096);
+    let server = {
+        let data = Arc::clone(&data);
+        TestServer::start(move |request| {
+            file_reply(&data, request, &FileOptions::default()).header("ETag", "\"v1\"")
+        })
+        .await
+    };
+    let (run, outcome) = download(&server.url("/file.bin"), two_chunks()).await;
+    assert_eq!(outcome, Ok(()));
+    assert_downloaded(&run, &data);
+    let transfers = server.transfer_requests();
+    assert_eq!(transfers.len(), 2);
+    for request in transfers {
+        assert_eq!(request.header("if-range"), Some("\"v1\""), "{request:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_that_changes_during_the_download_fails() {
+    let data = test_data(4096);
+    let server = {
+        let data = Arc::clone(&data);
+        // The probe sees version 1; by the time the chunks are requested it is version 2,
+        // so the server, honouring If-Range, answers them with the whole new file.
+        TestServer::start(move |request| {
+            if request.range() == Some((0, Some(0))) {
+                return file_reply(&data, request, &FileOptions::default())
+                    .header("ETag", "\"v1\"");
+            }
+            let current = if request.header("if-range") == Some("\"v2\"") {
+                request.clone()
+            } else {
+                with_range(request, None)
+            };
+            file_reply(&data, &current, &FileOptions::default()).header("ETag", "\"v2\"")
+        })
+        .await
+    };
+    let (_run, outcome) = download(&server.url("/file.bin"), two_chunks()).await;
+    assert_eq!(
+        outcome,
+        Err("The file changed on the server during the download.".to_owned())
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn redirects_are_followed() {
     let data = test_data(8192);

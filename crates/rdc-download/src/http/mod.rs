@@ -13,6 +13,10 @@
 //! multi-connection download that fails before any byte arrived is retried once over a single
 //! connection.
 //!
+//! Ranged requests carry the probe's strong `ETag` (else its `Last-Modified`) as `If-Range`, and
+//! their answers must start at the requested offset: a file that changed on the server or a
+//! range served from the wrong place fails the download instead of corrupting it.
+//!
 //! Progress reports bytes written, the expected size (`0` while unknown) and the speed averaged
 //! over the last two seconds. An optional speed limit is shared by all connections of a
 //! download. Pausing stops reading; connections are closed and reopened at the right offset on

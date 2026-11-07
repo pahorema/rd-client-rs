@@ -29,6 +29,16 @@ pub(crate) enum TransferError {
     Incomplete { received: u64, expected: u64 },
     #[error("The server ignored the requested byte range.")]
     RangeIgnored,
+    #[error(
+        "The server sent the wrong byte range: asked from byte {offset}, got {}.",
+        .content_range.as_deref().unwrap_or("no Content-Range")
+    )]
+    RangeMismatch {
+        offset: u64,
+        content_range: Option<String>,
+    },
+    #[error("The file changed on the server during the download.")]
+    FileChanged,
     #[error("The download was interrupted: {0}")]
     Interrupted(String),
     #[error("Invalid proxy server {proxy}: {}", describe(.error))]
@@ -66,6 +76,8 @@ impl TransferError {
             Self::ReadTimeout(_) | Self::HeaderTimeout(_) => true,
             Self::Incomplete { .. }
             | Self::RangeIgnored
+            | Self::RangeMismatch { .. }
+            | Self::FileChanged
             | Self::Proxy { .. }
             | Self::InvalidBindAddress(_)
             | Self::Io { .. }

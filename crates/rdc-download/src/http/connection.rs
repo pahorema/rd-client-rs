@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use reqwest::header::{ACCEPT, ACCEPT_ENCODING, CACHE_CONTROL, RANGE};
+use reqwest::header::{ACCEPT, ACCEPT_ENCODING, CACHE_CONTROL, HeaderValue, IF_RANGE, RANGE};
 use reqwest::{Client, Response, Url, redirect};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -125,6 +125,8 @@ impl Context {
     }
 
     /// Sends a GET for `url`, optionally limited to `range`, and returns a successful response.
+    /// A ranged request carries `if_range` as `If-Range`, so the server answers with the whole
+    /// file instead of the range when the file no longer matches that validator.
     ///
     /// With a bind address configured the request waits until the address is usable and
     /// retries connection failures every second, as long as the download is not cancelled; a
@@ -133,6 +135,7 @@ impl Context {
         &self,
         url: &Url,
         range: Option<ByteRange>,
+        if_range: Option<&HeaderValue>,
         cancel: &CancellationToken,
     ) -> Result<Response, TransferError> {
         loop {
@@ -144,6 +147,9 @@ impl Context {
                 .header(CACHE_CONTROL, "no-cache");
             if let Some(range) = range {
                 request = request.header(RANGE, range.header_value());
+                if let Some(validator) = if_range {
+                    request = request.header(IF_RANGE, validator.clone());
+                }
             }
             let sent = request.send();
             let result = match config.header_timeout() {

@@ -3,7 +3,8 @@
 use std::time::Duration;
 
 use reqwest::header::{
-    ACCEPT_RANGES, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, HeaderMap, HeaderName,
+    ACCEPT_RANGES, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, ETAG, HeaderMap, HeaderName,
+    HeaderValue, LAST_MODIFIED,
 };
 use reqwest::{Response, Url};
 
@@ -28,6 +29,9 @@ pub(crate) struct RemoteFile {
     /// Size in bytes; `None` when unknown.
     pub(crate) size: Option<u64>,
     pub(crate) supports_ranges: bool,
+    /// Validator ranged requests send as `If-Range`, so a file that changes between requests
+    /// is answered in full rather than spliced from two versions.
+    pub(crate) validator: Option<HeaderValue>,
 }
 
 /// Probes `url` with a `Range: bytes=0-0` request.
@@ -62,17 +66,17 @@ fn worth_retrying(error: &TransferError) -> bool {
 
 async fn probe_once(context: &Context, url: &Url) -> Result<RemoteFile, TransferError> {
     let cancel = &context.cancel;
-    match context.get(url, Some(FIRST_BYTE), cancel).await {
+    match context.get(url, Some(FIRST_BYTE), None, cancel).await {
         Ok(response) => Ok(describe(&response)),
         // Some servers refuse range requests (403, 404, 416, 503…) although the file
         // downloads fine without one.
         Err(TransferError::Status(status)) if !status.is_redirection() => {
-            let plain = describe(&context.get(url, None, cancel).await?);
+            let plain = describe(&context.get(url, None, None, cancel).await?);
             if !(status.is_server_error() || is_transient_status(status)) {
                 return Ok(plain);
             }
             // A passing server error says nothing about range support: ask once more.
-            match context.get(url, Some(FIRST_BYTE), cancel).await {
+            match context.get(url, Some(FIRST_BYTE), None, cancel).await {
                 Ok(response) => Ok(describe(&response)),
                 Err(TransferError::Cancelled) => Err(TransferError::Cancelled),
                 Err(_) => Ok(plain),
@@ -88,7 +92,17 @@ fn describe(response: &Response) -> RemoteFile {
         url: response.url().clone(),
         size,
         supports_ranges,
+        validator: range_validator(response.headers()),
     }
+}
+
+/// A strong `ETag`, else `Last-Modified`: `If-Range` does not accept weak entity tags.
+fn range_validator(headers: &HeaderMap) -> Option<HeaderValue> {
+    headers
+        .get(ETAG)
+        .filter(|tag| !tag.as_bytes().starts_with(b"W/"))
+        .or_else(|| headers.get(LAST_MODIFIED))
+        .cloned()
 }
 
 /// Reads the file size and range support from probe response headers.
@@ -128,10 +142,15 @@ fn total_from_content_range(value: &str) -> Option<u64> {
     total.trim().parse().ok()
 }
 
+/// Extracts the first byte position from a `Content-Range` value like `bytes 100-199/1234`.
+pub(crate) fn start_from_content_range(value: &str) -> Option<u64> {
+    let rest = value.trim().strip_prefix("bytes")?;
+    let (start, _) = rest.split_once('-')?;
+    start.trim().parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
-    use reqwest::header::HeaderValue;
-
     use super::*;
 
     fn headers(pairs: &[(HeaderName, &str)]) -> HeaderMap {
@@ -192,5 +211,26 @@ mod tests {
         assert_eq!(total_from_content_range("bytes */42"), Some(42));
         assert_eq!(total_from_content_range("items 0-0/10"), None);
         assert_eq!(total_from_content_range("bytes 0-0"), None);
+    }
+
+    #[test]
+    fn parses_content_range_starts() {
+        assert_eq!(start_from_content_range("bytes 100-199/1234"), Some(100));
+        assert_eq!(start_from_content_range("bytes 5 - 9 / 10"), Some(5));
+        assert_eq!(start_from_content_range("bytes */42"), None);
+        assert_eq!(start_from_content_range("items 0-0/10"), None);
+    }
+
+    #[test]
+    fn ranges_are_validated_by_a_strong_etag_or_the_modification_date() {
+        let date = "Wed, 21 Oct 2015 07:28:00 GMT";
+        let strong = headers(&[(ETAG, "\"v1\""), (LAST_MODIFIED, date)]);
+        assert_eq!(
+            range_validator(&strong),
+            Some(HeaderValue::from_static("\"v1\""))
+        );
+        let weak = headers(&[(ETAG, "W/\"v1\""), (LAST_MODIFIED, date)]);
+        assert_eq!(range_validator(&weak), Some(HeaderValue::from_static(date)));
+        assert_eq!(range_validator(&headers(&[(ETAG, "W/\"v1\"")])), None);
     }
 }

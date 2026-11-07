@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use reqwest::header::CONTENT_RANGE;
 use reqwest::{Response, StatusCode};
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
@@ -16,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use super::connection::{ByteRange, Context};
 use super::error::TransferError;
 use super::plan::{ChunkRange, plan_chunks};
-use super::probe::RemoteFile;
+use super::probe::{RemoteFile, start_from_content_range};
 
 /// Retries of one chunk after a passing failure.
 const MAX_CHUNK_RETRIES: u32 = 5;
@@ -292,12 +293,13 @@ impl ChunkWorker {
             start: offset,
             end: chunk.range.end,
         });
+        let validator = self.remote.validator.as_ref();
         let mut response = self
             .context
-            .get(&self.remote.url, range, &self.cancel)
+            .get(&self.remote.url, range, validator, &self.cancel)
             .await?;
-        if range.is_some() && offset > 0 && response.status() != StatusCode::PARTIAL_CONTENT {
-            return Err(TransferError::RangeIgnored);
+        if range.is_some() {
+            check_range(&response, offset, validator.is_some())?;
         }
         let mut file = OpenOptions::new()
             .write(true)
@@ -360,6 +362,31 @@ impl ChunkWorker {
     fn io_error(&self, error: io::Error) -> TransferError {
         TransferError::io(&self.partial, error)
     }
+}
+
+/// Checks that the answer to a request for the bytes from `offset` starts there: a partial
+/// response must say so in `Content-Range`, and a whole-file response is only usable from the
+/// first byte. `validated` says whether the request carried `If-Range`, so a whole-file answer
+/// means the file changed.
+fn check_range(response: &Response, offset: u64, validated: bool) -> Result<(), TransferError> {
+    if response.status() != StatusCode::PARTIAL_CONTENT {
+        return match offset {
+            0 => Ok(()),
+            _ if validated => Err(TransferError::FileChanged),
+            _ => Err(TransferError::RangeIgnored),
+        };
+    }
+    let content_range = response
+        .headers()
+        .get(CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok());
+    if content_range.and_then(start_from_content_range) == Some(offset) {
+        return Ok(());
+    }
+    Err(TransferError::RangeMismatch {
+        offset,
+        content_range: content_range.map(str::to_owned),
+    })
 }
 
 /// A random delay in `[0, min(10 s, base · 2^(failures − 1))]`.
