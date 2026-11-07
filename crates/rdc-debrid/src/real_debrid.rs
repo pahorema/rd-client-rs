@@ -13,7 +13,7 @@ use tokio::sync::OnceCell;
 
 use crate::endpoint::Endpoint;
 use crate::error::DebridError;
-use crate::http::ProviderHttp;
+use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp};
 use crate::json;
 use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
 use crate::text_rate_limit::classify_add_error;
@@ -23,6 +23,12 @@ pub const DEFAULT_API_HOSTNAME: &str = "api.real-debrid.com";
 
 /// Error code Real-Debrid uses for an unknown torrent or link.
 const RESOURCE_NOT_FOUND: i64 = 7;
+
+/// Error code Real-Debrid uses to ask for fewer requests.
+const SLOW_DOWN: i64 = 5;
+
+/// Error code Real-Debrid uses when too many requests were sent.
+const TOO_MANY_REQUESTS: i64 = 34;
 
 /// Torrents requested per listing page.
 const PAGE_SIZE: usize = 5000;
@@ -577,7 +583,8 @@ struct ErrorBody {
 }
 
 /// Maps an unsuccessful answer: a `{error, error_code}` body becomes the
-/// message of its code, anything else is reported verbatim.
+/// message of its code (codes asking to slow down are two-minute rate
+/// limits), anything else is reported verbatim.
 fn api_error(status: StatusCode, text: &str) -> DebridError {
     match serde_json::from_str::<ErrorBody>(text) {
         Ok(ErrorBody {
@@ -587,10 +594,13 @@ fn api_error(status: StatusCode, text: &str) -> DebridError {
             let message = error_code
                 .and_then(error_message)
                 .map_or(error, str::to_owned);
-            if error_code == Some(RESOURCE_NOT_FOUND) {
-                DebridError::NotFound(message)
-            } else {
-                DebridError::Provider(message)
+            match error_code {
+                Some(RESOURCE_NOT_FOUND) => DebridError::NotFound(message),
+                Some(SLOW_DOWN | TOO_MANY_REQUESTS) => DebridError::RateLimited {
+                    message,
+                    retry_after: DEFAULT_RATE_LIMIT_COOLDOWN,
+                },
+                _ => DebridError::Provider(message),
             }
         }
         _ if text.trim().is_empty() => {
@@ -608,7 +618,7 @@ fn error_message(code: i64) -> Option<&'static str> {
         2 => "Bad parameter value",
         3 => "Unknown method",
         4 => "Method not allowed",
-        5 => "Slow down",
+        SLOW_DOWN => "Slow down",
         6 => "Resource unreachable",
         RESOURCE_NOT_FOUND => "Resource not found",
         8 => "Bad token",
@@ -637,7 +647,7 @@ fn error_message(code: i64) -> Option<&'static str> {
         31 => "Action already done",
         32 => "Image resolution error",
         33 => "Torrent already active",
-        34 => "Too many requests",
+        TOO_MANY_REQUESTS => "Too many requests",
         35 => "Infringing file",
         36 => "Fair Usage Limit",
         _ => return None,

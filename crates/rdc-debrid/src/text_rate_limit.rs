@@ -44,7 +44,7 @@ mod tests {
 
     #[test]
     fn other_errors_are_unchanged() {
-        let error = classify_add_error(DebridError::Provider("Slow down".to_owned()));
+        let error = classify_add_error(DebridError::Provider("Infringing file".to_owned()));
 
         assert!(matches!(error, DebridError::Provider(_)), "{error:?}");
     }

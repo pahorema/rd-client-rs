@@ -137,6 +137,24 @@ async fn known_error_codes_are_reported_with_their_message() {
 }
 
 #[tokio::test]
+async fn slow_down_error_codes_are_two_minute_rate_limits() {
+    for (code, message) in [(5, "Slow down"), (34, "Too many requests")] {
+        let server = MockServer::start().await;
+        let response = ResponseTemplate::new(503)
+            .set_body_json(json!({"error": "slow_down", "error_code": code}));
+
+        let error = user_error(&server, response).await;
+
+        assert_eq!(
+            error.retry_after(),
+            Some(Duration::from_secs(120)),
+            "{code}"
+        );
+        assert_eq!(error.to_string(), message);
+    }
+}
+
+#[tokio::test]
 async fn unknown_error_codes_keep_the_provider_text() {
     let server = MockServer::start().await;
     let response = ResponseTemplate::new(400)
