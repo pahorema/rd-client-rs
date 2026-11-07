@@ -33,6 +33,9 @@ pub struct ApiError {
     message: String,
 }
 
+/// Body of 500 responses whose cause is only logged.
+const INTERNAL_ERROR: &str = "Internal server error";
+
 impl ApiError {
     /// Construct a response with a specific status and unquoted text body.
     pub fn new(status: StatusCode, message: impl Into<String>) -> Self {
@@ -40,6 +43,13 @@ impl ApiError {
             status,
             message: message.into(),
         }
+    }
+
+    /// A 500 response with a generic body. `error` is logged instead of returned, since
+    /// its text can name files, URLs or database details.
+    pub fn internal(error: impl fmt::Display) -> Self {
+        tracing::error!(error = format!("{error:#}"), "Request failed");
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, INTERNAL_ERROR)
     }
 }
 
@@ -53,7 +63,7 @@ impl std::error::Error for ApiError {}
 
 impl From<anyhow::Error> for ApiError {
     fn from(error: anyhow::Error) -> Self {
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        Self::internal(error)
     }
 }
 
@@ -461,8 +471,8 @@ fn panic_response(payload: Box<dyn Any + Send + 'static>) -> Response {
         .downcast_ref::<String>()
         .map(String::as_str)
         .or_else(|| payload.downcast_ref::<&str>().copied())
-        .unwrap_or("Internal server error");
-    ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, message).into_response()
+        .unwrap_or("unknown panic");
+    ApiError::internal(format_args!("Handler panicked: {message}")).into_response()
 }
 
 #[derive(RustEmbed)]

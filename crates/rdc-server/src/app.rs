@@ -1,9 +1,12 @@
 //! HTTP router assembly and shared application dependencies.
 
-use std::fmt::{self, Display};
+use std::{
+    any::Any,
+    fmt::{self, Display},
+};
 
 use axum::{Json, Router, extract::rejection::JsonRejection, http::StatusCode, middleware};
-use rdc_engine::Engine;
+use rdc_engine::{Engine, EngineError};
 use rdc_store::Store;
 use serde::{
     Deserialize, Deserializer,
@@ -46,9 +49,22 @@ pub(crate) struct AppState {
     pub(crate) shutdown: CancellationToken,
 }
 
-/// Map any failure to a 500 response carrying its message.
-pub(crate) fn internal(error: impl Display) -> ApiError {
-    ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+/// Map a failure to a 500 response.
+///
+/// Engine validation and provider messages are written for the user and are returned;
+/// any other cause is logged and answered with a generic text, since it can name files,
+/// URLs or database details.
+pub(crate) fn internal(error: impl Display + 'static) -> ApiError {
+    match (&error as &dyn Any).downcast_ref::<EngineError>() {
+        // Transport errors carry the request URL, which can hold an API key.
+        Some(EngineError::Provider(rdc_debrid::DebridError::Transport(_))) | None => {
+            ApiError::internal(error)
+        }
+        Some(EngineError::Message(_) | EngineError::Provider(_)) => {
+            ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
+        }
+        Some(_) => ApiError::internal(error),
+    }
 }
 
 /// Unwrap a JSON body, answering 400 with an empty body when it does not parse, or 413
@@ -195,4 +211,37 @@ pub fn build(
         )
         .merge(torrent_client, qbittorrent::PATHS)
         .build(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{body::to_bytes, response::IntoResponse};
+
+    use super::*;
+
+    async fn body(error: ApiError) -> (StatusCode, String) {
+        let response = error.into_response();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1024).await.unwrap();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test]
+    async fn internal_errors_hide_details_but_keep_engine_messages() {
+        let failure = std::io::Error::other("/srv/db/rd-client.db is locked");
+        assert_eq!(
+            body(internal(failure)).await,
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_owned()
+            )
+        );
+        let store = EngineError::Io(std::io::Error::other("/srv/downloads"));
+        assert_eq!(body(internal(store)).await.1, "Internal server error");
+        let message = EngineError::Message("Invalid magnet link".to_owned());
+        assert_eq!(body(internal(message)).await.1, "Invalid magnet link");
+        let provider =
+            EngineError::Provider(rdc_debrid::DebridError::Provider("Bad token".to_owned()));
+        assert_eq!(body(internal(provider)).await.1, "Bad token");
+    }
 }

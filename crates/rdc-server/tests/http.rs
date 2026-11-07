@@ -190,16 +190,16 @@ async fn magnet_redirect_preserves_the_encoded_query_under_both_mounts() {
 }
 
 #[tokio::test]
-async fn handler_errors_and_panics_return_plain_text_500() {
+async fn handler_errors_and_panics_return_a_generic_plain_text_500() {
     let app = builder("/base")
         .route(
             "/api/error",
-            get(|| async { Err::<(), _>(ApiError::from(anyhow::anyhow!("handler error"))) }),
+            get(|| async { Err::<(), _>(ApiError::from(anyhow::anyhow!("cannot open /srv/db"))) }),
         )
         .route(
             "/api/panic",
             get(|| async {
-                panic!("handler panic");
+                panic!("handler panic at /srv/db");
                 #[expect(
                     unreachable_code,
                     reason = "give the panicking test handler a concrete response type"
@@ -208,17 +208,14 @@ async fn handler_errors_and_panics_return_plain_text_500() {
             }),
         )
         .build(());
-    for (path, expected) in [
-        ("/base/api/error", "handler error"),
-        ("/api/panic", "handler panic"),
-    ] {
+    for path in ["/base/api/error", "/api/panic"] {
         let response = request(app.clone(), path).await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
             response.headers()[header::CONTENT_TYPE],
             "text/plain; charset=utf-8"
         );
-        assert_eq!(text(response).await, expected);
+        assert_eq!(text(response).await, "Internal server error");
     }
 }
 

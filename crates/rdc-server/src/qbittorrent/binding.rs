@@ -108,7 +108,3 @@ fn multipart_error(error: &MultipartError) -> ApiError {
 pub(super) fn bad_request(error: impl std::fmt::Display) -> ApiError {
     ApiError::new(StatusCode::BAD_REQUEST, error.to_string())
 }
-
-pub(super) fn internal(error: impl std::fmt::Display) -> ApiError {
-    ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
-}

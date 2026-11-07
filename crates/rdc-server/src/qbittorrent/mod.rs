@@ -22,10 +22,11 @@ use rdc_model::TorrentFinishedAction;
 use serde_json::{Value, json};
 
 use crate::{
+    app::internal,
     auth::{AuthPolicy, ClientIp, CookieScope, Login, RequestUser, Sessions, require_auth},
     http::{ApiError, UPLOAD_BODY_LIMIT},
 };
-use binding::{Params, bad_request, internal};
+use binding::{Params, bad_request};
 
 /// All registered templates, including both qBittorrent path prefixes and the version endpoint.
 pub const PATHS: &[&str] = &[
