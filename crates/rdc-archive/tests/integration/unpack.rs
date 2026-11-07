@@ -2,10 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use rdc_archive::{Error, UnpackRequest, unpack};
+use rdc_archive::{Error, UnpackRequest, first_volume, unpack};
 use tokio_util::sync::CancellationToken;
 
-use crate::common::{big_text, copy_fixtures, files_below, fixtures, write_zip};
+use crate::common::{big_text, copy_fixtures, copy_fixtures_as, files_below, fixtures, write_zip};
 
 const MULTI: [&str; 3] = ["multi.part1.rar", "multi.part2.rar", "multi.part3.rar"];
 
@@ -258,6 +258,21 @@ async fn the_archive_is_deleted_after_a_successful_unpack() {
     run(downloads.request(&archive)).await.unwrap();
 
     assert!(!archive.exists());
+    assert_eq!(
+        files_below(&downloads.torrent),
+        ["folder/a.txt", "folder/sub/b.txt", "top.txt"]
+    );
+}
+
+#[tokio::test]
+async fn an_archive_is_unpacked_from_its_first_volume_name_whatever_its_case() {
+    let downloads = Downloads::new();
+    let archive = copy_fixtures_as(&downloads.torrent, &[("nested.rar", "nested.RAR")]);
+
+    run(downloads.request(&first_volume(&archive)))
+        .await
+        .unwrap();
+
     assert_eq!(
         files_below(&downloads.torrent),
         ["folder/a.txt", "folder/sub/b.txt", "top.txt"]

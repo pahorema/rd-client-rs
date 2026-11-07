@@ -6,7 +6,11 @@
 //!   names old-style volumes past `.r99`; `.zNN` is left out because split ZIP archives use
 //!   `name.z01`, `name.z02`, …;
 //! - `name.001`, `name.002`, … (at least three digits).
+//!
+//! Names built from a volume name keep its stem and spell the volume part (`.part1.rar`,
+//! `.r00`) in lower case; files on disk are matched ignoring the case of that part.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Last extension letter of an old-style volume name (`.y99`); see the module documentation.
@@ -22,9 +26,13 @@ pub fn is_non_first_volume(path: &Path) -> bool {
 
 /// Path of the first volume of the multi-volume set `path` is named after.
 ///
-/// Returns `path` itself when it is the first volume or not named like a volume at all, so two
-/// downloads belong to the same set exactly when their first volumes are equal. The check uses
-/// the file name only.
+/// Every volume of a set maps to the same path, whatever the case of its volume part, so two
+/// downloads belong to the same set exactly when their first volumes are equal. That path
+/// spells the volume part in lower case (`Show.R00` and `Show.Rar` give `Show.rar`); [`unpack`]
+/// finds the file whatever the case of that part. A name not shaped like a volume is returned
+/// as is. The check uses the file name only.
+///
+/// [`unpack`]: crate::unpack
 pub fn first_volume(path: &Path) -> PathBuf {
     parse(path)
         .and_then(|volume| volume.path(0))
@@ -33,9 +41,9 @@ pub fn first_volume(path: &Path) -> PathBuf {
 
 /// Existing volumes of the set `path` belongs to, in order, starting at its first volume.
 ///
-/// Volumes are probed on disk one after the other and the list stops at the first missing one.
-/// A file not named like a volume yields just itself. The list is empty when the first volume
-/// does not exist.
+/// Volumes are looked up on disk one after the other, ignoring the case of their volume part,
+/// and the list stops at the first missing one. A file not named like a volume yields just
+/// itself. The list is empty when the first volume does not exist.
 pub fn volume_paths(path: &Path) -> Vec<PathBuf> {
     let Some(volume) = parse(path) else {
         return if path.is_file() {
@@ -44,9 +52,36 @@ pub fn volume_paths(path: &Path) -> Vec<PathBuf> {
             Vec::new()
         };
     };
+    let siblings = sibling_files(path);
     (0..)
         .map_while(|index| volume.path(index))
-        .take_while(|candidate| candidate.is_file())
+        .map_while(|candidate| volume.find(&candidate, &siblings))
+        .collect()
+}
+
+/// The file on disk that `path` names: `path` itself when it exists, otherwise, for a volume
+/// name, the file whose name differs from it only in the case of the volume part.
+pub(crate) fn locate(path: &Path) -> Option<PathBuf> {
+    if path.is_file() {
+        return Some(path.to_path_buf());
+    }
+    let volume = parse(path)?;
+    volume.find(path, &sibling_files(path))
+}
+
+/// Names of the files in the directory of `path` (symbolic links to files included).
+fn sibling_files(path: &Path) -> Vec<String> {
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .filter_map(|entry| entry.file_name().into_string().ok())
         .collect()
 }
 
@@ -56,21 +91,17 @@ struct VolumeName<'a> {
     path: &'a Path,
     /// File name up to and excluding the varying part.
     stem: &'a str,
-    scheme: Scheme<'a>,
+    scheme: Scheme,
     /// Zero-based position in the set.
     index: u32,
 }
 
 #[derive(Debug)]
-enum Scheme<'a> {
-    /// `<stem><part><number><ext>`, e.g. `name` + `.part` + `01` + `.rar`.
-    Part {
-        part: &'a str,
-        ext: &'a str,
-        width: usize,
-    },
-    /// `<stem>.rar`, then `<stem>.r00` …; `upper` keeps the case of the given name.
-    Legacy { upper: bool },
+enum Scheme {
+    /// `<stem>.part<number>.rar`, the number padded to `width` digits.
+    Part { width: usize },
+    /// `<stem>.rar`, then `<stem>.r00` ….
+    Legacy,
     /// `<stem>.<number>` with `width` digits.
     Numeric { width: usize },
 }
@@ -99,8 +130,6 @@ fn parse_part<'a>(path: &'a Path, name: &'a str) -> Option<VolumeName<'a>> {
         path,
         stem,
         scheme: Scheme::Part {
-            part,
-            ext,
             width: digits.len(),
         },
         index: number.checked_sub(1)?,
@@ -128,9 +157,7 @@ fn parse_legacy<'a>(path: &'a Path, name: &'a str) -> Option<VolumeName<'a>> {
     Some(VolumeName {
         path,
         stem,
-        scheme: Scheme::Legacy {
-            upper: ext.as_bytes()[0].is_ascii_uppercase(),
-        },
+        scheme: Scheme::Legacy,
         index,
     })
 }
@@ -164,11 +191,11 @@ impl VolumeName<'_> {
     fn path(&self, index: u32) -> Option<PathBuf> {
         let stem = self.stem;
         let name = match self.scheme {
-            Scheme::Part { part, ext, width } => {
+            Scheme::Part { width } => {
                 let number = index.checked_add(1)?;
-                format!("{stem}{part}{number:0width$}{ext}")
+                format!("{stem}.part{number:0width$}.rar")
             }
-            Scheme::Legacy { upper } => {
+            Scheme::Legacy => {
                 let ext = if index == 0 {
                     "rar".to_owned()
                 } else {
@@ -179,7 +206,6 @@ impl VolumeName<'_> {
                         .filter(|letter| *letter <= LAST_LEGACY_LETTER)?;
                     format!("{}{:02}", char::from(letter), position % 100)
                 };
-                let ext = if upper { ext.to_ascii_uppercase() } else { ext };
                 format!("{stem}.{ext}")
             }
             Scheme::Numeric { width } => {
@@ -188,6 +214,22 @@ impl VolumeName<'_> {
             }
         };
         Some(self.path.with_file_name(name))
+    }
+
+    /// The file among the sibling `files` that `candidate`, a path built by [`Self::path`],
+    /// names: an exact match first, otherwise one differing only in the case of the volume part.
+    fn find(&self, candidate: &Path, files: &[String]) -> Option<PathBuf> {
+        let wanted = candidate.file_name()?.to_str()?;
+        let (stem, volume_part) = wanted.split_at_checked(self.stem.len())?;
+        let same_volume = |name: &&String| {
+            name.strip_prefix(stem)
+                .is_some_and(|rest| rest.eq_ignore_ascii_case(volume_part))
+        };
+        let found = files
+            .iter()
+            .find(|name| *name == wanted)
+            .or_else(|| files.iter().find(same_volume))?;
+        Some(candidate.with_file_name(found))
     }
 }
 
@@ -232,9 +274,10 @@ mod tests {
     fn first_volume_maps_every_scheme_to_its_first_name() {
         let cases = [
             ("dir/show.part07.rar", "dir/show.part01.rar"),
-            ("dir/Show.Part3.Rar", "dir/Show.Part1.Rar"),
+            ("dir/Show.Part3.Rar", "dir/Show.part1.rar"),
             ("dir/show.r00", "dir/show.rar"),
-            ("dir/SHOW.R42", "dir/SHOW.RAR"),
+            ("dir/SHOW.R42", "dir/SHOW.rar"),
+            ("dir/Show.RAR", "dir/Show.rar"),
             ("dir/show.s00", "dir/show.rar"),
             ("dir/show.007", "dir/show.001"),
             ("dir/show.rar", "dir/show.rar"),
@@ -243,6 +286,43 @@ mod tests {
         for (name, first) in cases {
             assert_eq!(first_volume(Path::new(name)), Path::new(first), "{name}");
         }
+    }
+
+    #[test]
+    fn volumes_differing_in_case_share_their_first_volume() {
+        for set in [
+            ["dir/Show.Rar", "dir/Show.r00", "dir/Show.R01"],
+            [
+                "dir/Show.part1.rar",
+                "dir/Show.PART2.RAR",
+                "dir/Show.Part3.Rar",
+            ],
+        ] {
+            let firsts: Vec<PathBuf> = set
+                .iter()
+                .map(|name| first_volume(Path::new(name)))
+                .collect();
+            assert!(firsts.iter().all(|first| *first == firsts[0]), "{firsts:?}");
+        }
+    }
+
+    #[test]
+    fn volumes_are_found_on_disk_whatever_the_case_of_their_volume_part() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["Show.Rar", "Show.R00", "Show.r01"] {
+            fs::write(dir.path().join(name), name).unwrap();
+        }
+
+        let paths = volume_paths(&dir.path().join("Show.r01"));
+        let located = locate(&first_volume(&dir.path().join("Show.R00"))).unwrap();
+
+        let expected: Vec<PathBuf> = ["Show.Rar", "Show.R00", "Show.r01"]
+            .iter()
+            .map(|name| dir.path().join(name))
+            .collect();
+        assert_eq!(paths, expected);
+        assert_eq!(fs::read_to_string(located).unwrap(), "Show.Rar");
+        assert_eq!(locate(&dir.path().join("Other.rar")), None);
     }
 
     #[test]

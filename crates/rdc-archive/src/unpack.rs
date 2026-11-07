@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::extract::{VolumeRole, extract, inspect};
 use crate::path::join_name;
+use crate::volume::locate;
 use crate::{Error, volume_paths};
 
 /// Delays before the retries of a failed delete. A freshly written file may still be held
@@ -43,9 +44,11 @@ pub struct UnpackRequest {
 /// Unpacks a downloaded archive next to the torrent's other files, then deletes it.
 ///
 /// The steps, in order:
-/// 1. A missing archive file is not an error: there is nothing to do (it was most likely
-///    unpacked and deleted before a restart). The same holds for a RAR volume other than the
-///    first one of its set, which is unpacked together with the first volume.
+/// 1. The archive is looked up ignoring the case of its volume part (`.rar`, `.part1.rar`), as
+///    named by [`first_volume`](crate::first_volume). A missing archive file is not an error:
+///    there is nothing to do (it was most likely unpacked and deleted before a restart). The
+///    same holds for a RAR volume other than the first one of its set, which is unpacked
+///    together with the first volume.
 /// 2. When every entry sits below a folder named like the torrent (`<name>/…` or `<name>\…`),
 ///    the archive is extracted into `destination`; otherwise into `destination/<name>`, so no
 ///    entry can reach the files of other torrents in `destination`.
@@ -107,10 +110,11 @@ where
         torrent_name,
         flatten_hash_dir,
     } = request;
-    if !archive.is_file() {
+    let Some(archive) = locate(archive) else {
         debug!(archive = %archive.display(), "archive to unpack is gone, nothing to do");
         return Ok(());
-    }
+    };
+    let archive = archive.as_path();
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
     }
