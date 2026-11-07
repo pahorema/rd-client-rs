@@ -74,7 +74,7 @@ async fn a_hash_folder_is_flattened_into_the_torrent_folder() {
 }
 
 #[tokio::test]
-async fn outside_the_torrent_folder_the_hash_folder_receives_the_content() {
+async fn a_hash_folder_next_to_the_torrent_folder_is_flattened_inside_the_torrent_folder() {
     let downloads = Downloads::new();
     let archive = downloads.torrent.join("show.zip");
     write_zip(
@@ -89,7 +89,7 @@ async fn outside_the_torrent_folder_the_hash_folder_receives_the_content() {
 
     assert_eq!(
         files_below(&downloads.destination),
-        [format!("{HASH}/episode.mkv"), "Show/readme.txt".to_owned()]
+        ["Show/Show/readme.txt", "Show/episode.mkv"]
     );
 }
 
@@ -167,6 +167,37 @@ async fn content_with_a_root_folder_named_like_the_torrent_is_extracted_in_place
     run(downloads.request(&archive)).await.unwrap();
 
     assert_eq!(files_below(&downloads.destination), ["Show/episode.mkv"]);
+}
+
+#[tokio::test]
+async fn entries_beside_the_torrent_root_folder_stay_inside_the_torrent_folder() {
+    let downloads = Downloads::new();
+    let other = downloads.destination.join("Other");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("Other.mkv"), "finished download").unwrap();
+    let archive = downloads.torrent.join("show.zip");
+    write_zip(
+        &archive,
+        &[
+            ("Show/readme.txt", b"read me"),
+            ("Other/Other.mkv", b"replacement"),
+        ],
+    );
+
+    run(downloads.request(&archive)).await.unwrap();
+
+    assert_eq!(
+        fs::read_to_string(other.join("Other.mkv")).unwrap(),
+        "finished download"
+    );
+    assert_eq!(
+        files_below(&downloads.destination),
+        [
+            "Other/Other.mkv",
+            "Show/Other/Other.mkv",
+            "Show/Show/readme.txt"
+        ]
+    );
 }
 
 #[tokio::test]

@@ -46,9 +46,9 @@ pub struct UnpackRequest {
 /// 1. A missing archive file is not an error: there is nothing to do (it was most likely
 ///    unpacked and deleted before a restart). The same holds for a RAR volume other than the
 ///    first one of its set, which is unpacked together with the first volume.
-/// 2. When some entry already sits below a folder named like the torrent (`<name>/…` or
-///    `<name>\…`), the archive is extracted into `destination`; otherwise into
-///    `destination/<name>`.
+/// 2. When every entry sits below a folder named like the torrent (`<name>/…` or `<name>\…`),
+///    the archive is extracted into `destination`; otherwise into `destination/<name>`, so no
+///    entry can reach the files of other torrents in `destination`.
 /// 3. When an entry name contains `.r00`, the archive wraps an old-style RAR set: it is
 ///    extracted into a fresh temporary folder inside the extraction folder and deleted, then
 ///    each wrapped set (found through its `.r00` volume at the top of that folder) is
@@ -121,12 +121,13 @@ where
         return Ok(());
     }
 
-    let rooted = inspection.entries.iter().any(|entry| {
-        entry
-            .name
-            .strip_prefix(torrent_name.as_str())
-            .is_some_and(|rest| rest.starts_with(['/', '\\']))
-    });
+    let rooted = !inspection.entries.is_empty()
+        && inspection.entries.iter().all(|entry| {
+            entry
+                .name
+                .strip_prefix(torrent_name.as_str())
+                .is_some_and(|rest| rest.starts_with(['/', '\\']))
+        });
     let extract_path = if rooted {
         destination.clone()
     } else {
