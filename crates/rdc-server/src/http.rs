@@ -488,8 +488,11 @@ pub async fn serve(
     shutdown: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
             shutdown_signal().await;
             shutdown.cancel();
         })

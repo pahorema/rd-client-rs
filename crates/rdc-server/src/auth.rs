@@ -12,13 +12,14 @@ use std::{
     fmt,
     fs::OpenOptions,
     io::{self, Read, Seek, SeekFrom, Write},
+    net::{IpAddr, SocketAddr},
     path::Path,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
-    extract::{FromRequestParts, Request, State},
+    extract::{ConnectInfo, FromRequestParts, Request, State},
     http::{Extensions, HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -30,7 +31,10 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
 
-use crate::http::RequestBasePath;
+use crate::{
+    http::RequestBasePath,
+    throttle::{Attempt, LoginThrottle},
+};
 
 /// Persistent lifetime; refresh begins strictly after the midpoint.
 const LIFETIME: u64 = 14 * 24 * 60 * 60;
@@ -77,6 +81,18 @@ pub enum RequestUser {
     AuthenticationDisabled,
 }
 
+/// Outcome of [`Sessions::login`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Login {
+    /// The credentials match; append this persistent `SID` Set-Cookie header.
+    SignedIn(HeaderValue),
+    /// Unknown credentials, a locked account or blank input.
+    Failed,
+    /// Too many recent failures from this client or for this name; retry after this delay.
+    Throttled(Duration),
+}
+
 /// Cheaply cloned session signer and short-lived security-stamp cache.
 #[derive(Clone)]
 pub struct Sessions(Arc<Inner>);
@@ -85,6 +101,7 @@ struct Inner {
     store: Store,
     signer: Signature,
     stamp: Mutex<Option<CachedStamp>>,
+    throttle: LoginThrottle,
 }
 
 struct CachedStamp {
@@ -122,14 +139,16 @@ impl Sessions {
             store,
             signer: Signature::new_from_slice(&key).expect("HMAC accepts a 32-byte key"),
             stamp: Mutex::new(None),
+            throttle: LoginThrottle::default(),
         })))
     }
 
     /// Verifies credentials and returns a persistent `SID` Set-Cookie header.
     ///
     /// Blank user names and empty passwords fail without accessing the store.
-    /// Unknown credentials and locked accounts return `None`. This does not
-    /// honor the disabled switch: anonymous login endpoints decide that policy.
+    /// Failures back off exponentially per client network and per name, on
+    /// every login endpoint. This does not honor the disabled switch:
+    /// anonymous login endpoints decide that policy.
     ///
     /// # Errors
     /// Fails on user-store errors or an invalid base path.
@@ -137,11 +156,16 @@ impl Sessions {
         &self,
         user_name: &str,
         password: &str,
+        client: ClientIp,
         scope: &CookieScope,
-    ) -> Result<Option<HeaderValue>, AuthError> {
+    ) -> Result<Login, AuthError> {
         if user_name.trim().is_empty() || password.is_empty() {
-            return Ok(None);
+            return Ok(Login::Failed);
         }
+        let attempt = match self.0.throttle.begin(client.0, user_name) {
+            Ok(attempt) => attempt,
+            Err(wait) => return Ok(Login::Throttled(wait)),
+        };
         let LoginOutcome::Success(user) = self
             .0
             .store
@@ -149,9 +173,23 @@ impl Sessions {
             .verify_login(user_name, password)
             .await?
         else {
-            return Ok(None);
+            return Ok(Login::Failed);
         };
-        self.sign_in(&user, scope).await
+        attempt.succeeded();
+        Ok(self
+            .sign_in(&user, scope)
+            .await?
+            .map_or(Login::Failed, Login::SignedIn))
+    }
+
+    /// Admits a check of the password of account `user_id` from `client`,
+    /// sharing the backoff of [`Self::login`], or returns how long to wait.
+    pub(crate) fn begin_password_check(
+        &self,
+        client: ClientIp,
+        user_id: &str,
+    ) -> Result<Attempt<'_>, Duration> {
+        self.0.throttle.begin(client.0, user_id)
     }
 
     /// Returns a persistent `SID` Set-Cookie header for an account the caller
@@ -384,6 +422,32 @@ fn sid(headers: &HeaderMap) -> Option<&str> {
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(';'))
         .find_map(|part| part.trim().strip_prefix("SID="))
+}
+
+/// The peer address of a request, when the server recorded it.
+///
+/// Behind a reverse proxy this is the proxy's address; forwarding headers are
+/// not trusted because any client can set them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientIp(pub Option<IpAddr>);
+
+impl ClientIp {
+    /// Reads the address recorded by a server built with connect info.
+    pub fn of(extensions: &Extensions) -> Self {
+        Self(
+            extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|ConnectInfo(address)| address.ip()),
+        )
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self::of(&parts.extensions))
+    }
 }
 
 /// Where and how a request's session cookie is set.

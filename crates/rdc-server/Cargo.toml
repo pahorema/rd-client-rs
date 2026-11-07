@@ -32,7 +32,7 @@ serde_json.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "process", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "process", "sync", "time"] }
 tokio-stream.workspace = true
 tokio-util.workspace = true
 tower-http = { workspace = true, features = ["catch-panic"] }
@@ -44,6 +44,7 @@ uuid = { workspace = true, features = ["serde"] }
 [dev-dependencies]
 rdc-engine = { path = "../rdc-engine", features = ["testing"] }
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true, features = ["util"] }
 wiremock.workspace = true
 

@@ -119,11 +119,10 @@ async fn login(
     scope: CookieScope,
 ) -> Response {
     let value = sessions
-        .login("alice", "Passw0rd!", &scope)
+        .login("alice", "Passw0rd!", ClientIp(None), &scope)
         .await
-        .unwrap()
         .unwrap();
-    ([(header::SET_COOKIE, value)], StatusCode::OK).into_response()
+    ([(header::SET_COOKIE, signed_in(value))], StatusCode::OK).into_response()
 }
 
 async fn logout(
@@ -135,6 +134,13 @@ async fn logout(
         StatusCode::OK,
     )
         .into_response()
+}
+
+fn signed_in(login: Login) -> HeaderValue {
+    match login {
+        Login::SignedIn(cookie) => cookie,
+        other => panic!("expected a session cookie, got {other:?}"),
+    }
 }
 
 fn root_scope() -> CookieScope {
@@ -304,11 +310,10 @@ async fn credential_changes_and_invalidation_reject_previously_cached_cookies() 
         };
         let old = fixture
             .sessions
-            .login("alice", current, &root_scope())
+            .login("alice", current, ClientIp(None), &root_scope())
             .await
-            .unwrap()
             .unwrap();
-        let old = headers(cookie(&old));
+        let old = headers(cookie(&signed_in(old)));
         assert!(fixture.sessions.is_authenticated(&old).await);
         let user = fixture
             .store
@@ -411,11 +416,14 @@ async fn concurrent_key_initializers_share_one_key_and_invalid_keys_are_not_repl
     );
     let (first, second) = (first.unwrap(), second.unwrap());
     let set_cookie = first
-        .login("alice", "Passw0rd!", &root_scope())
+        .login("alice", "Passw0rd!", ClientIp(None), &root_scope())
         .await
-        .unwrap()
         .unwrap();
-    assert!(second.is_authenticated(&headers(cookie(&set_cookie))).await);
+    assert!(
+        second
+            .is_authenticated(&headers(cookie(&signed_in(set_cookie))))
+            .await
+    );
     let bad_path = fixture.directory.path().join("bad.key");
     std::fs::write(&bad_path, b"invalid").unwrap();
     assert!(matches!(
@@ -430,14 +438,14 @@ async fn blank_credentials_fail_without_accessing_the_closed_store() {
     let fixture = Fixture::new().await;
     fixture.store.close().await;
     for (name, password) in [("", "Passw0rd!"), (" \t", "Passw0rd!"), ("alice", "")] {
-        assert!(
+        assert!(matches!(
             fixture
                 .sessions
-                .login(name, password, &root_scope())
+                .login(name, password, ClientIp(None), &root_scope())
                 .await
-                .unwrap()
-                .is_none()
-        );
+                .unwrap(),
+            Login::Failed
+        ));
     }
 }
 
@@ -446,14 +454,14 @@ async fn wrong_credentials_fail_and_malformed_mount_paths_are_rejected() {
     let fixture = Fixture::new().await;
     let root = root_scope();
     for (name, password) in [("alice", "wrong"), ("missing", "Passw0rd!")] {
-        assert!(
+        assert!(matches!(
             fixture
                 .sessions
-                .login(name, password, &root)
+                .login(name, password, ClientIp(None), &root)
                 .await
-                .unwrap()
-                .is_none()
-        );
+                .unwrap(),
+            Login::Failed
+        ));
     }
     for path in ["relative", "/mount; HttpOnly", "/mount\r\n"] {
         assert!(matches!(

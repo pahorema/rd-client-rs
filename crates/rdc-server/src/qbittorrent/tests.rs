@@ -876,3 +876,25 @@ async fn failed_provider_state_returns_fails_after_dequeue() {
     .await;
     assert_eq!(text(response).await, "Fails.");
 }
+
+#[tokio::test]
+async fn repeated_failed_logins_lock_the_name_out_even_with_the_right_password() {
+    let fixture = Fixture::new(Settings::default()).await;
+    let app = fixture.app("");
+    let attempt = |password: &'static str| {
+        call(
+            &app,
+            Method::POST,
+            "/api/v2/auth/login",
+            None,
+            Some("application/x-www-form-urlencoded"),
+            format!("username=alice&password={password}"),
+        )
+    };
+    for _ in 0..5 {
+        assert_eq!(text(attempt("guess").await).await, "Fails.");
+    }
+    let locked = attempt("Passw0rd%21").await;
+    assert_eq!(locked.status(), StatusCode::FORBIDDEN);
+    assert!(!locked.headers().contains_key(header::SET_COOKIE));
+}

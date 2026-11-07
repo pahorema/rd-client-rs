@@ -1,5 +1,7 @@
 //! Account setup, session and credential endpoints for the web UI.
 
+use std::time::Duration;
+
 use axum::{
     Extension, Json, Router,
     extract::{State, rejection::JsonRejection},
@@ -12,7 +14,7 @@ use serde::Deserialize;
 
 use crate::{
     app::{AppState, CaseInsensitive, internal, required},
-    auth::{CookieScope, RequestUser},
+    auth::{ClientIp, CookieScope, Login, RequestUser},
     http::ApiError,
 };
 
@@ -125,6 +127,7 @@ async fn create(
 async fn login(
     State(state): State<AppState>,
     scope: CookieScope,
+    client: ClientIp,
     input: Result<Json<Option<CaseInsensitive<Credentials>>>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let credentials = required(input)?.0;
@@ -146,18 +149,32 @@ async fn login(
             "Invalid credentials",
         ));
     }
-    let Some(cookie) = state
+    match state
         .sessions
-        .login(user_name, password, &scope)
+        .login(user_name, password, client, &scope)
         .await
         .map_err(internal)?
-    else {
-        return Err(ApiError::new(
+    {
+        Login::SignedIn(cookie) => {
+            Ok(([(header::SET_COOKIE, cookie)], StatusCode::OK).into_response())
+        }
+        Login::Throttled(wait) => Ok(throttled(wait)),
+        _ => Err(ApiError::new(
             StatusCode::BAD_REQUEST,
             "Invalid credentials",
-        ));
-    };
-    Ok(([(header::SET_COOKIE, cookie)], StatusCode::OK).into_response())
+        )),
+    }
+}
+
+/// 429 telling the client when its next password check is admitted.
+fn throttled(wait: Duration) -> Response {
+    let seconds = (wait.as_secs() + u64::from(wait.subsec_nanos() > 0)).max(1);
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, format!("{seconds}"))],
+        format!("Too many failed attempts; try again in {seconds} seconds."),
+    )
+        .into_response()
 }
 
 /// Signs out everywhere: a cookie copied elsewhere stops working along with this browser's.
@@ -199,8 +216,9 @@ async fn setup_provider(
 async fn update(
     State(state): State<AppState>,
     Extension(user): Extension<RequestUser>,
+    client: ClientIp,
     input: Result<Json<Option<CaseInsensitive<Credentials>>>, JsonRejection>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Response, ApiError> {
     let credentials = required(input)?.0;
     let user_name = credentials.user_name.as_deref().unwrap_or_default();
     let password = credentials.password.as_deref().unwrap_or_default();
@@ -222,13 +240,20 @@ async fn update(
                 .id
         }
     };
+    let attempt = match state.sessions.begin_password_check(client, &user_id) {
+        Ok(attempt) => attempt,
+        Err(wait) => return Ok(throttled(wait)),
+    };
     let current = credentials.current_password.as_deref().unwrap_or_default();
-    let user = users
+    let result = users
         .update_credentials(&user_id, current, user_name, password)
-        .await
-        .map_err(user_error)?;
+        .await;
+    if matches!(result, Ok(_) | Err(UserError::Rejected(_))) {
+        attempt.succeeded();
+    }
+    let user = result.map_err(user_error)?;
     state.sessions.invalidate(&user.id).await;
-    Ok(StatusCode::OK)
+    Ok(StatusCode::OK.into_response())
 }
 
 fn user_error(error: UserError) -> ApiError {
@@ -695,6 +720,58 @@ mod tests {
                 .await
                 .status(),
             StatusCode::OK
+        );
+        fixture.test.engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn repeated_failures_lock_out_login_and_credential_changes() {
+        let fixture = Fixture::new("").await;
+        let root = "/api/authentication/";
+        let sid = cookie(
+            &fixture
+                .send(
+                    "POST",
+                    &format!("{root}Create"),
+                    Some(json!({"userName":"alice","password":"Passw0rd!"})),
+                    None,
+                )
+                .await,
+        );
+        let login = |name: &'static str, password: &'static str| {
+            fixture.send(
+                "POST",
+                "/api/authentication/login",
+                Some(json!({"userName": name, "password": password})),
+                None,
+            )
+        };
+        for _ in 0..5 {
+            assert_eq!(login("alice", "guess").await.status(), StatusCode::BAD_REQUEST);
+        }
+        for name in ["alice", "ALICE"] {
+            let locked = login(name, "Passw0rd!").await;
+            assert_eq!(locked.status(), StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(locked.headers()[header::RETRY_AFTER], "1");
+            assert!(!locked.headers().contains_key(header::SET_COOKIE));
+        }
+
+        let change = |current: &'static str| {
+            fixture.send(
+                "POST",
+                "/api/authentication/update",
+                Some(json!({
+                    "currentPassword": current, "userName": "alice", "password": "NewPassw0rd!"
+                })),
+                Some(&sid),
+            )
+        };
+        for _ in 0..5 {
+            assert_eq!(change("guess").await.status(), StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(
+            change("Passw0rd!").await.status(),
+            StatusCode::TOO_MANY_REQUESTS
         );
         fixture.test.engine.shutdown().await;
     }

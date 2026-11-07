@@ -22,7 +22,7 @@ use rdc_model::TorrentFinishedAction;
 use serde_json::{Value, json};
 
 use crate::{
-    auth::{AuthPolicy, CookieScope, RequestUser, Sessions, require_auth},
+    auth::{AuthPolicy, ClientIp, CookieScope, Login, RequestUser, Sessions, require_auth},
     http::ApiError,
 };
 use binding::{Params, bad_request, internal};
@@ -190,14 +190,16 @@ async fn public_request(
         "app/buildinfo" => Ok(Json(json!({"bitness":64,"boost":"1.75.0","libtorrent":"1.2.11.0","openssl":"1.1.1i","qt":"5.15.2","zlib":"1.2.11"})).into_response()),
         "auth/login" => {
             let scope = CookieScope::of(request.extensions(), request.headers());
+            let client = ClientIp::of(request.extensions());
             let params = Params::read(request, false).await?;
             if state.policy.is_disabled() { return Ok("Ok.".into_response()); }
             let user = params.get("username").unwrap_or_default();
             let pass = params.get("password").unwrap_or_default();
-            let Some(cookie) = state.sessions.login(user,pass,&scope).await.map_err(internal)? else {
-                return Ok("Fails.".into_response());
-            };
-            Ok(([(header::SET_COOKIE,cookie)],"Ok.").into_response())
+            match state.sessions.login(user,pass,client,&scope).await.map_err(internal)? {
+                Login::SignedIn(cookie) => Ok(([(header::SET_COOKIE,cookie)],"Ok.").into_response()),
+                Login::Throttled(_) => Ok((StatusCode::FORBIDDEN,"Your IP address has been banned after too many failed authentication attempts.").into_response()),
+                _ => Ok("Fails.".into_response()),
+            }
         }
         _ => Ok(StatusCode::NOT_FOUND.into_response()),
     }
