@@ -352,9 +352,60 @@ fn sensitive(key: &str) -> bool {
 fn redact_pairs(value: &str) -> String {
     let mut output = url::form_urlencoded::Serializer::new(String::new());
     for (key, value) in url::form_urlencoded::parse(value.as_bytes()) {
-        output.append_pair(&key, if sensitive(&key) { "*****" } else { &value });
+        if sensitive(&key) {
+            output.append_pair(&key, "*****");
+        } else {
+            output.append_pair(&key, &redact_links(&value));
+        }
     }
     output.finish()
+}
+
+/// Hides the query and password of every HTTP link in `value`, and the trackers of magnet
+/// links: private trackers put passkeys there, for example in `torrents/add` URLs.
+fn redact_links(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for piece in value.split_inclusive(char::is_whitespace) {
+        let link = piece.trim_end_matches(char::is_whitespace);
+        if let Some(url) = redact_link(link) {
+            output.push_str(url.as_str());
+            output.push_str(&piece[link.len()..]);
+        } else {
+            output.push_str(piece);
+        }
+    }
+    output
+}
+
+/// `link` with its secrets hidden; `None` when it is not an HTTP or magnet link.
+fn redact_link(link: &str) -> Option<url::Url> {
+    let mut url = url::Url::parse(link).ok()?;
+    match url.scheme() {
+        "http" | "https" => {
+            if url.query().is_some() {
+                url.set_query(Some("*****"));
+            }
+            if url.password().is_some() {
+                let _ = url.set_password(Some("*****"));
+            }
+        }
+        "magnet" => {
+            let pairs: Vec<(String, String)> = url
+                .query_pairs()
+                .map(|(key, value)| {
+                    let value = if key.eq_ignore_ascii_case("tr") {
+                        "*****".to_owned()
+                    } else {
+                        value.into_owned()
+                    };
+                    (key.into_owned(), value)
+                })
+                .collect();
+            url.query_pairs_mut().clear().extend_pairs(pairs);
+        }
+        _ => return None,
+    }
+    Some(url)
 }
 
 fn redact_json(value: &mut serde_json::Value) {
@@ -369,6 +420,7 @@ fn redact_json(value: &mut serde_json::Value) {
             }
         }
         serde_json::Value::Array(values) => values.iter_mut().for_each(redact_json),
+        serde_json::Value::String(text) => *text = redact_links(text),
         _ => {}
     }
 }
@@ -446,7 +498,7 @@ async fn log_multipart(bytes: &axum::body::Bytes, content_type: &str) -> String 
                     "*****".to_owned()
                 } else {
                     match field.text().await {
-                        Ok(value) => value,
+                        Ok(value) => redact_links(&value),
                         Err(_) => return "[invalid multipart]".to_owned(),
                     }
                 };

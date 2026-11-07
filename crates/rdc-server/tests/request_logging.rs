@@ -67,6 +67,16 @@ async fn requests_redact_query_form_json_and_dynamic_secrets_without_changing_bo
             "multipart/form-data; boundary=testboundary",
             "--testboundary\r\nContent-Disposition: form-data; name=\"Password\"\r\n\r\nmultipart-password\r\n--testboundary\r\nContent-Disposition: form-data; name=\"visible\"\r\n\r\nvisible-multipart\r\n--testboundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"private-file\"\r\n\r\nprivate-file-data\r\n--testboundary--\r\n",
         ),
+        (
+            "/api/v2/auth/login",
+            "application/x-www-form-urlencoded",
+            "urls=https%3A%2F%2Fuser%3Aurl-password%40tracker.example%2Fdl%3Fid%3D1%26passkey%3Dform-passkey%0Amagnet%3A%3Fxt%3Durn%3Abtih%3Avisible-hash%26tr%3Dhttps%253A%252F%252Fprivate.example%252Fmagnet-passkey%252Fannounce",
+        ),
+        (
+            "/api/torrents",
+            "application/json",
+            r#"{"magnetLink":"https://tracker.example/get?key=json-passkey"}"#,
+        ),
     ] {
         let response = app
             .clone()
@@ -113,6 +123,10 @@ async fn requests_redact_query_form_json_and_dynamic_secrets_without_changing_bo
         "alias-password",
         "multipart-password",
         "private-file-data",
+        "url-password",
+        "form-passkey",
+        "magnet-passkey",
+        "json-passkey",
     ] {
         assert!(!output.contains(secret), "leaked {secret}: {output}");
     }
@@ -124,6 +138,8 @@ async fn requests_redact_query_form_json_and_dynamic_secrets_without_changing_bo
         "HTTP response",
         "403",
         "*****",
+        "tracker.example",
+        "visible-hash",
     ] {
         assert!(output.contains(visible), "missing {visible}: {output}");
     }
