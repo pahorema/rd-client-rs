@@ -353,11 +353,12 @@ impl DownloadEngine for Transfer {
         {
             return Err(state.fail(error.to_string()).await);
         }
-        let result = tokio::select! {
-            biased;
-            () = state.cancel.cancelled() => Err(StartError::new(rdc_download::CANCELLED_MESSAGE)),
-            result = state.backend.start() => result,
-        };
+        // Never drop a backend start halfway: a remote job it created would be left behind.
+        // `cancel` signals the backend, which stops starting and removes what it created.
+        let result = state.backend.start().await;
+        if state.cancel.is_cancelled() {
+            return Err(state.fail(rdc_download::CANCELLED_MESSAGE.to_owned()).await);
+        }
         match result {
             Ok(id) if !id.trim().is_empty() => {
                 tokio::spawn(state.clone().monitor());

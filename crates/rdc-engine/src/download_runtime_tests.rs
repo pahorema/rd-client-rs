@@ -4,6 +4,7 @@ use crate::testing::{
     downloads::{FakeDownloadEngine, FakeDownloadFactory},
 };
 use rdc_model::settings::Settings;
+use std::time::Duration;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{any, method},
@@ -70,6 +71,91 @@ async fn successful_internal_completion_checks_the_expected_file_size() {
     backend.complete(Ok(()));
     let error = transfer.completion().wait().await.expect_err("wrong size");
     assert!(error.contains("outside the expected range"));
+}
+
+/// A remote job whose creation ignores cancellation, like an aria2 `addUri` call in flight:
+/// it removes itself only if its start runs to the end or it is cancelled after creation.
+#[derive(Debug)]
+struct RemoteJob {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    created: AtomicBool,
+    cancelled: AtomicBool,
+    removed: AtomicBool,
+    progress: watch::Sender<Progress>,
+    completion: CompletionSender,
+}
+
+impl RemoteJob {
+    fn new() -> Self {
+        Self {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+            created: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+            removed: AtomicBool::new(false),
+            progress: watch::Sender::new(Progress::default()),
+            completion: completion_channel().0,
+        }
+    }
+}
+
+#[async_trait]
+impl DownloadEngine for RemoteJob {
+    async fn start(&self) -> Result<String, StartError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        self.created.store(true, Ordering::SeqCst);
+        if self.cancelled.load(Ordering::SeqCst) {
+            self.removed.store(true, Ordering::SeqCst);
+            return Err(StartError::new(rdc_download::CANCELLED_MESSAGE));
+        }
+        Ok("gid".to_owned())
+    }
+    fn progress(&self) -> watch::Receiver<Progress> {
+        self.progress.subscribe()
+    }
+    fn completion(&self) -> Completion {
+        self.completion.subscribe()
+    }
+    async fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        if self.created.load(Ordering::SeqCst) {
+            self.removed.store(true, Ordering::SeqCst);
+        }
+    }
+    async fn pause(&self) {}
+    async fn resume(&self) {}
+}
+
+#[tokio::test]
+async fn cancelling_during_start_lets_the_backend_remove_the_job_it_creates() {
+    let backend = Arc::new(RemoteJob::new());
+    let transfer = Arc::new(Transfer::new(
+        backend.clone(),
+        PathBuf::new(),
+        None,
+        0,
+        false,
+    ));
+    let start = tokio::spawn({
+        let transfer = transfer.clone();
+        async move { transfer.start().await }
+    });
+    backend.entered.notified().await;
+    transfer.cancel().await;
+    backend.release.notify_one();
+    let started = tokio::time::timeout(Duration::from_secs(2), start)
+        .await
+        .expect("start finishes")
+        .expect("start task");
+    assert!(started.is_err());
+    assert!(backend.created.load(Ordering::SeqCst));
+    assert!(
+        backend.removed.load(Ordering::SeqCst),
+        "the created job is removed"
+    );
+    assert!(transfer.completion().wait().await.is_err());
 }
 
 #[tokio::test]
@@ -150,13 +236,10 @@ async fn configured_internal_engine_downloads_without_a_custom_factory() {
         .await
         .expect("prepare");
     transfer.start().await.expect("start");
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        transfer.completion().wait(),
-    )
-    .await
-    .expect("timeout")
-    .expect("download");
+    tokio::time::timeout(Duration::from_secs(5), transfer.completion().wait())
+        .await
+        .expect("timeout")
+        .expect("download");
     assert_eq!(fs::read(output).await.expect("file"), b"hello");
     test.engine.shutdown().await;
 }

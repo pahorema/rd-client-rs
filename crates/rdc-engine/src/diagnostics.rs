@@ -156,10 +156,23 @@ async fn run_speed_probe(
     transfer: &Arc<dyn DownloadEngine>,
     cancel: &CancellationToken,
 ) -> Result<u64, EngineError> {
-    let id = tokio::select! {
-        () = cancel.cancelled() => return Err(EngineError::Message("The download was cancelled".to_owned())),
-        result = transfer.start() => result.map_err(|error| EngineError::Message(error.to_string()))?,
+    let start = transfer.start();
+    tokio::pin!(start);
+    // A dropped start could leave a remote job behind; cancelling lets the backend stop
+    // starting and clean up, and the start is still awaited.
+    let started = tokio::select! {
+        result = &mut start => result,
+        () = cancel.cancelled() => {
+            transfer.cancel().await;
+            start.await
+        }
     };
+    if cancel.is_cancelled() {
+        return Err(EngineError::Message(
+            "The download was cancelled".to_owned(),
+        ));
+    }
+    let id = started.map_err(|error| EngineError::Message(error.to_string()))?;
     if id.trim().is_empty() {
         return Err(EngineError::Message(
             "No remote ID received from download client".to_owned(),
