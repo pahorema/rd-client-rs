@@ -543,6 +543,29 @@ async fn add_uri_rejects_an_empty_uri_list_without_calling_aria2() {
 }
 
 #[tokio::test]
+async fn add_uri_that_may_have_reached_aria2_is_not_sent_again() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(result(&json!("gid")).set_delay(Duration::from_secs(5)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = Client::builder(rpc_url(&server))
+        .timeout(Duration::from_millis(200))
+        .retry_count(3)
+        .retry_delay(Duration::from_millis(1))
+        .build()
+        .unwrap();
+
+    let error = client
+        .add_uri(&["https://host/file.mkv"], &AddUriOptions::default())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, Error::Transport(_)), "{error:?}");
+}
+
+#[tokio::test]
 async fn force_remove_sends_the_gid() {
     let server = MockServer::start().await;
     expect_call(

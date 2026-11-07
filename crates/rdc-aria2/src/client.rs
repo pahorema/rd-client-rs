@@ -63,7 +63,9 @@ impl ClientBuilder {
     }
 
     /// How many times a request is retried after a transport failure (connection refused,
-    /// timeout, truncated body). aria2 errors and HTTP error statuses are never retried.
+    /// timeout, truncated body). aria2 errors and HTTP error statuses are never retried, and
+    /// `aria2.addUri` is retried only when the connection could not be established: once
+    /// sent, it may have added the download even if the response never arrived.
     pub fn retry_count(mut self, retry_count: u32) -> Self {
         self.retry_count = retry_count;
         self
@@ -218,6 +220,11 @@ impl Client {
     /// `aria2.addUri`: queues a new download of the resource reachable at every URI of
     /// `uris` and returns its GID.
     ///
+    /// Transport failures are retried only when the connection could not be established, so
+    /// one call never adds the download twice. After any other [`Error::Transport`] aria2 may
+    /// or may not have added it; look it up (for example with [`Client::tell_all`]) before
+    /// adding it again.
+    ///
     /// # Errors
     ///
     /// [`Error::EmptyUriList`] when `uris` is empty, or any [`Error`] of the round trip.
@@ -227,8 +234,8 @@ impl Client {
         }
         let options =
             serde_json::to_value(options).expect("download options always serialize to JSON");
-        self.call("aria2.addUri", vec![Value::from(uris), options])
-            .await
+        let args = self.with_token(vec![Value::from(uris), options]);
+        self.invoke("aria2.addUri", &args, Retry::Connect).await
     }
 
     /// `aria2.tellStatus`: the status of the download `gid`.
@@ -338,7 +345,8 @@ impl Client {
 
     /// Calls `method` with the secret token (when configured) followed by `args`.
     async fn call<T: DeserializeOwned>(&self, method: &str, args: Vec<Value>) -> Result<T, Error> {
-        self.invoke(method, &self.with_token(args)).await
+        self.invoke(method, &self.with_token(args), Retry::Transport)
+            .await
     }
 
     /// Runs several calls in one `system.multicall` request. The token goes into each call's
@@ -352,7 +360,7 @@ impl Client {
             .map(|(method, args)| json!({"methodName": method, "params": self.with_token(args)}))
             .collect();
         let entries: Vec<MulticallEntry<T>> = self
-            .invoke("system.multicall", &[Value::Array(calls)])
+            .invoke("system.multicall", &[Value::Array(calls)], Retry::Transport)
             .await?;
         entries
             .into_iter()
@@ -368,8 +376,9 @@ impl Client {
         &self,
         method: &str,
         params: &[Value],
+        retry: Retry,
     ) -> Result<T, Error> {
-        let body = self.post(method, params).await?;
+        let body = self.post(method, params, retry).await?;
         let response: Response<T> = decode(&body)?;
         if let Some(error) = response.error {
             return Err(error.into());
@@ -390,14 +399,14 @@ impl Client {
     }
 
     /// Posts one JSON-RPC request and returns the non-empty body of a successful response.
-    async fn post(&self, method: &str, params: &[Value]) -> Result<String, Error> {
+    async fn post(&self, method: &str, params: &[Value], retry: Retry) -> Result<String, Error> {
         let request = Request {
             jsonrpc: "2.0",
             id: REQUEST_ID,
             method,
             params,
         };
-        let (status, body) = self.send_with_retries(&request).await?;
+        let (status, body) = self.send_with_retries(&request, retry).await?;
         if !status.is_success() {
             if let Ok(ErrorResponse { error: Some(error) }) = serde_json::from_str(&body) {
                 return Err(error.into());
@@ -416,12 +425,13 @@ impl Client {
     async fn send_with_retries(
         &self,
         request: &Request<'_>,
+        policy: Retry,
     ) -> Result<(StatusCode, String), Error> {
         let mut retry: u32 = 0;
         loop {
             match self.send(request).await {
                 Ok(response) => return Ok(response),
-                Err(error) if retry < self.retry_count => {
+                Err(error) if retry < self.retry_count && policy.allows(&error) => {
                     retry += 1;
                     tracing::debug!(
                         method = request.method,
@@ -441,6 +451,24 @@ impl Client {
         let status = response.status();
         let body = response.text().await?;
         Ok((status, body))
+    }
+}
+
+/// Which transport failures of a request are retried.
+#[derive(Clone, Copy)]
+enum Retry {
+    /// Every failure: repeating the call has no effect beyond the first one.
+    Transport,
+    /// Only failures to connect, after which aria2 has certainly not received the request.
+    Connect,
+}
+
+impl Retry {
+    fn allows(self, error: &reqwest::Error) -> bool {
+        match self {
+            Self::Transport => true,
+            Self::Connect => error.is_connect(),
+        }
     }
 }
 
