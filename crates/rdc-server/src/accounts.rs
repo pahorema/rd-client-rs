@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 use crate::{
     app::{AppState, CaseInsensitive, internal, required},
+    auth::RequestUser,
     http::{ApiError, RequestBasePath},
 };
 
@@ -50,6 +51,9 @@ struct Credentials {
     #[serde(rename = "username")]
     user_name: Option<String>,
     password: Option<String>,
+    /// Authorizes a credential change.
+    #[serde(rename = "currentpassword")]
+    current_password: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -186,8 +190,12 @@ async fn setup_provider(
     Ok(StatusCode::OK)
 }
 
+/// Changes the credentials of the signed-in account after checking its current password.
+/// With authentication disabled there is no signed-in account, so the only account is
+/// changed; the current password still proves ownership.
 async fn update(
     State(state): State<AppState>,
+    Extension(user): Extension<RequestUser>,
     input: Result<Json<Option<CaseInsensitive<Credentials>>>, JsonRejection>,
 ) -> Result<StatusCode, ApiError> {
     let credentials = required(input)?.0;
@@ -199,15 +207,23 @@ async fn update(
             "Invalid UserName or Password",
         ));
     }
-    let user = state
-        .store
-        .users()
-        .update_credentials(user_name, password)
+    let users = state.store.users();
+    let user_id = match user {
+        RequestUser::Authenticated { user_id } => user_id,
+        RequestUser::AuthenticationDisabled => {
+            users
+                .first()
+                .await
+                .map_err(internal)?
+                .ok_or_else(|| user_error(UserError::NoUser))?
+                .id
+        }
+    };
+    let current = credentials.current_password.as_deref().unwrap_or_default();
+    let user = users
+        .update_credentials(&user_id, current, user_name, password)
         .await
-        .map_err(|error| match error {
-            UserError::NoUser => internal("No logged in user found"),
-            other => user_error(other),
-        })?;
+        .map_err(user_error)?;
     state.sessions.invalidate(&user.id).await;
     Ok(StatusCode::OK)
 }
@@ -215,6 +231,8 @@ async fn update(
 fn user_error(error: UserError) -> ApiError {
     match error {
         UserError::Rejected(reason) => ApiError::new(StatusCode::BAD_REQUEST, reason),
+        UserError::IncorrectPassword => ApiError::new(StatusCode::BAD_REQUEST, error.to_string()),
+        UserError::NoUser => ApiError::new(StatusCode::BAD_REQUEST, "No account exists"),
         UserError::AccountExists => ApiError::new(StatusCode::FORBIDDEN, ""),
         other => internal(other),
     }
@@ -556,7 +574,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn credential_update_reports_invalid_names_and_invalidates_old_cookie() {
+    async fn credential_update_needs_the_current_password_and_invalidates_old_cookie() {
         let fixture = Fixture::new("").await;
         let root = "/api/authentication/";
         let created = fixture
@@ -575,6 +593,7 @@ mod tests {
                 "POST",
                 &format!("{root}Update"),
                 Some(json!({
+                    "currentPassword":"Passw0rd!",
                     "userName":"invalid name", "password":"NewPassw0rd!"
                 })),
                 Some(&sid),
@@ -582,12 +601,37 @@ mod tests {
             .await;
         assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
         assert_ne!(text(invalid).await, "");
+        for current in [None, Some("wrong-Passw0rd")] {
+            let mut change = json!({"userName":"newname","password":"NewPassw0rd!"});
+            if let Some(current) = current {
+                change["currentPassword"] = current.into();
+            }
+            let refused = fixture
+                .send("POST", &format!("{root}Update"), Some(change), Some(&sid))
+                .await;
+            assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(text(refused).await, "The current password is incorrect.");
+        }
+        assert_eq!(
+            fixture
+                .send(
+                    "GET",
+                    &format!("{root}IsLoggedIn"),
+                    None,
+                    Some(&sid)
+                )
+                .await
+                .status(),
+            StatusCode::OK,
+            "refused changes keep the session"
+        );
         assert_eq!(
             fixture
                 .send(
                     "POST",
                     &format!("{root}Update"),
                     Some(json!({
+                        "currentPassword":"Passw0rd!",
                         "userName":"newname","password":"NewPassw0rd!"
                     })),
                     Some(&sid)

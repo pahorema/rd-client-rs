@@ -56,7 +56,7 @@ describe('auth', () => {
 	it.each([
 		['create', () => auth.create('admin', 'pass1'), 'Api/Authentication/Create'],
 		['login', () => auth.login('admin', 'pass1'), 'Api/Authentication/Login'],
-		['update', () => auth.update('admin', 'pass1'), 'Api/Authentication/Update']
+		['update', () => auth.update('current1', 'admin', 'pass1'), 'Api/Authentication/Update']
 	])('%s posts the credentials', async (_name, call, url) => {
 		await call();
 
@@ -65,6 +65,12 @@ describe('auth', () => {
 			method: 'POST',
 			json: { userName: 'admin', password: 'pass1' }
 		});
+	});
+
+	it('authorizes a credential change with the current password', async () => {
+		await auth.update('current1', 'admin', 'pass1');
+
+		expect(lastCall()).toMatchObject({ json: { currentPassword: 'current1' } });
 	});
 
 	it('checks the session', async () => {

@@ -22,7 +22,7 @@ use rdc_model::TorrentFinishedAction;
 use serde_json::{Value, json};
 
 use crate::{
-    auth::{AuthPolicy, Sessions, require_auth},
+    auth::{AuthPolicy, RequestUser, Sessions, require_auth},
     http::{ApiError, RequestBasePath},
 };
 use binding::{Params, bad_request, internal};
@@ -231,6 +231,9 @@ async fn protected_request(
         .get::<RequestBasePath>()
         .cloned()
         .unwrap_or(RequestBasePath(String::new()));
+    let Some(user) = request.extensions().get::<RequestUser>().cloned() else {
+        return Ok(StatusCode::FORBIDDEN.into_response());
+    };
     let form_only = matches!(
         name.as_str(),
         "torrents/createcategory" | "torrents/removecategories"
@@ -255,7 +258,7 @@ async fn protected_request(
             engine,
             &state
                 .sessions
-                .user_name()
+                .user_name(&user)
                 .await
                 .map_err(internal)?
                 .unwrap_or_default(),

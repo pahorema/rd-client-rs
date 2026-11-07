@@ -43,8 +43,11 @@ export const auth = {
 	login: (userName: string, password: string) =>
 		request<null>('Api/Authentication/Login', { method: 'POST', json: { userName, password } }),
 	logout: () => request<null>('Api/Authentication/Logout', { method: 'POST', json: {} }),
-	update: (userName: string, password: string) =>
-		request<null>('Api/Authentication/Update', { method: 'POST', json: { userName, password } })
+	update: (currentPassword: string, userName: string, password: string) =>
+		request<null>('Api/Authentication/Update', {
+			method: 'POST',
+			json: { currentPassword, userName, password }
+		})
 };
 
 /** Settings, profile and diagnostics endpoints. */

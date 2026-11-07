@@ -58,6 +58,9 @@ pub enum UserError {
     /// An account already exists, so no other can be created.
     #[error("an account already exists")]
     AccountExists,
+    /// The current password given to authorize a change does not match.
+    #[error("The current password is incorrect.")]
+    IncorrectPassword,
     /// The store failed.
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -115,6 +118,15 @@ impl<'store> Users<'store> {
         Ok(self.first_account().await?.map(|account| account.user))
     }
 
+    /// The account with this id.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors and undecodable rows.
+    pub async fn get(&self, user_id: &str) -> Result<Option<User>> {
+        Ok(self.find_by_id(user_id).await?.map(|account| account.user))
+    }
+
     /// The security stamp of the account with this id; `None` when the
     /// account does not exist or has no stamp.
     ///
@@ -128,6 +140,25 @@ impl<'store> Users<'store> {
                 .fetch_optional(self.pool)
                 .await?;
         Ok(stamp.flatten())
+    }
+
+    /// Gives the account a new security stamp, ending every session issued
+    /// for it; returns whether the account exists.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub async fn rotate_security_stamp(&self, user_id: &str) -> Result<bool> {
+        let updated = sqlx::query(
+            r#"UPDATE "AspNetUsers" SET "SecurityStamp" = ?, "ConcurrencyStamp" = ?
+               WHERE "Id" = ?"#,
+        )
+        .bind(new_security_stamp())
+        .bind(Uuid::new_v4().to_string())
+        .bind(user_id)
+        .execute(self.pool)
+        .await?;
+        Ok(updated.rows_affected() == 1)
     }
 
     /// Creates the account, unless one exists.
@@ -235,23 +266,39 @@ impl<'store> Users<'store> {
         Ok(LoginOutcome::Success(account.user))
     }
 
-    /// Changes the name and password of the account; a blank name or
-    /// password keeps the current one. Both are validated like in
+    /// Changes the name and password of the account with id `user_id`
+    /// after checking its `current_password`; a blank name or password
+    /// keeps the current one. Both are validated like in
     /// [`create`](Self::create) before anything is written.
     /// Changing either credential rotates the security stamp; supplying an
     /// unchanged name with a blank password leaves the account untouched.
     ///
     /// # Errors
     ///
-    /// Fails with [`UserError::NoUser`] without an account,
-    /// [`UserError::Rejected`] when a rule is violated or the account
+    /// Fails with [`UserError::NoUser`] when the account does not exist,
+    /// [`UserError::IncorrectPassword`] when `current_password` does not
+    /// match, [`UserError::Rejected`] when a rule is violated or the account
     /// changed concurrently, or on database errors.
     pub async fn update_credentials(
         &self,
+        user_id: &str,
+        current_password: &str,
         user_name: &str,
         password: &str,
     ) -> Result<User, UserError> {
-        let mut account = self.first_account().await?.ok_or(UserError::NoUser)?;
+        let mut account = self.find_by_id(user_id).await?.ok_or(UserError::NoUser)?;
+        let verification = match account.password_hash.as_deref() {
+            Some(hash) if !current_password.is_empty() => {
+                password::verify(hash, current_password).await
+            }
+            _ => {
+                password::verify_dummy(current_password).await;
+                Verification::Failed
+            }
+        };
+        if verification == Verification::Failed {
+            return Err(UserError::IncorrectPassword);
+        }
         let new_name =
             !user_name.trim().is_empty() && account.user.user_name.as_deref() != Some(user_name);
         let new_password = !password.trim().is_empty();
@@ -305,6 +352,18 @@ impl<'store> Users<'store> {
             account_columns!(),
             r#" FROM "AspNetUsers" ORDER BY "Id" LIMIT 1"#
         ))
+        .fetch_optional(self.pool)
+        .await?;
+        row.as_ref().map(account_from_row).transpose()
+    }
+
+    async fn find_by_id(&self, user_id: &str) -> Result<Option<Account>> {
+        let row = sqlx::query(concat!(
+            "SELECT ",
+            account_columns!(),
+            r#" FROM "AspNetUsers" WHERE "Id" = ?"#
+        ))
+        .bind(user_id)
         .fetch_optional(self.pool)
         .await?;
         row.as_ref().map(account_from_row).transpose()

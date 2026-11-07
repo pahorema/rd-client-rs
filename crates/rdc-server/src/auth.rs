@@ -163,18 +163,18 @@ impl Sessions {
         .map(Some)
     }
 
-    /// Returns the first account name for torrent-client preference responses.
+    /// Returns the requesting account's name for torrent-client preference responses;
+    /// with authentication disabled, the name of the only account.
     ///
     /// # Errors
     /// Returns store access or row decoding errors.
-    pub async fn user_name(&self) -> Result<Option<String>, AuthError> {
-        Ok(self
-            .0
-            .store
-            .users()
-            .first()
-            .await?
-            .and_then(|user| user.user_name))
+    pub async fn user_name(&self, user: &RequestUser) -> Result<Option<String>, AuthError> {
+        let users = self.0.store.users();
+        let account = match user {
+            RequestUser::Authenticated { user_id } => users.get(user_id).await?,
+            RequestUser::AuthenticationDisabled => users.first().await?,
+        };
+        Ok(account.and_then(|user| user.user_name))
     }
 
     /// Returns an expiring `SID` Set-Cookie header at this request's mount path.

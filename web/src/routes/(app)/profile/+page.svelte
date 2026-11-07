@@ -18,6 +18,7 @@
 
 	let profile = $state<Profile | null>(null);
 	let profileError = $state<string | null>(null);
+	let currentPassword = $state('');
 	let userName = $state('');
 	let password = $state('');
 	let saving = $state(false);
@@ -40,8 +41,9 @@
 		saveError = null;
 
 		try {
-			await auth.update(userName, password);
+			await auth.update(currentPassword, userName, password);
 			saved = true;
+			currentPassword = '';
 			password = '';
 		} catch (e) {
 			saveError = errorMessage(e);
@@ -117,6 +119,16 @@
 		<Card.Content>
 			<form onsubmit={save}>
 				<Field.Group>
+					<Field.Field>
+						<Field.Label for="currentPassword">Current password</Field.Label>
+						<Input
+							id="currentPassword"
+							type="password"
+							autocomplete="current-password"
+							required
+							bind:value={currentPassword}
+						/>
+					</Field.Field>
 					<Field.Field>
 						<Field.Label for="userName">Username</Field.Label>
 						<Input id="userName" autocomplete="username" required bind:value={userName} />

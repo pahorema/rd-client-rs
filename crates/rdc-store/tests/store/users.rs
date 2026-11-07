@@ -288,7 +288,11 @@ async fn updating_credentials_changes_name_and_password() {
     let users = test.store.users();
     let created = users.create("admin", "secret123").await.expect("create");
 
-    let renamed = users.update_credentials("Owner", "").await.expect("rename");
+    let id = created.id.clone();
+    let renamed = users
+        .update_credentials(&id, "secret123", "Owner", "")
+        .await
+        .expect("rename");
     assert_eq!(renamed.user_name.as_deref(), Some("Owner"));
     assert_ne!(
         renamed.security_stamp, created.security_stamp,
@@ -301,7 +305,7 @@ async fn updating_credentials_changes_name_and_password() {
     ));
 
     let changed = users
-        .update_credentials(" ", "better234")
+        .update_credentials(&id, "secret123", " ", "better234")
         .await
         .expect("new password");
     assert_eq!(changed.user_name.as_deref(), Some("Owner"));
@@ -317,15 +321,37 @@ async fn updating_credentials_changes_name_and_password() {
     );
 
     let unchanged = users
-        .update_credentials("", "")
+        .update_credentials(&id, "better234", "", "")
         .await
         .expect("nothing to change");
     assert_eq!(unchanged, changed);
     let unchanged = users
-        .update_credentials("Owner", "")
+        .update_credentials(&id, "better234", "Owner", "")
         .await
         .expect("unchanged name");
     assert_eq!(unchanged, changed);
+    assert_eq!(users.get(&id).await.expect("get"), Some(changed));
+    assert_eq!(users.get("missing").await.expect("get"), None);
+}
+
+#[tokio::test]
+async fn rotating_the_security_stamp_ends_sessions_but_keeps_credentials() {
+    let test = TestStore::new().await;
+    let users = test.store.users();
+    let created = users.create("admin", "secret123").await.expect("create");
+    assert!(
+        users
+            .rotate_security_stamp(&created.id)
+            .await
+            .expect("rotate")
+    );
+    let stamp = users.security_stamp(&created.id).await.expect("stamp");
+    assert_ne!(stamp, created.security_stamp);
+    assert!(matches!(
+        login(&test, "admin", "secret123").await,
+        LoginOutcome::Success(user) if user.security_stamp == stamp
+    ));
+    assert!(!users.rotate_security_stamp("missing").await.expect("rotate"));
 }
 
 #[tokio::test]
@@ -333,14 +359,21 @@ async fn rejected_credential_updates_change_nothing() {
     let test = TestStore::new().await;
     let users = test.store.users();
     let error = users
-        .update_credentials("admin", "secret123")
+        .update_credentials("missing", "secret123", "admin", "secret123")
         .await
         .expect_err("no account");
     assert!(matches!(error, UserError::NoUser), "{error:?}");
 
     let created = users.create("admin", "secret123").await.expect("create");
+    for current in ["", "secret124"] {
+        let error = users
+            .update_credentials(&created.id, current, "owner", "better234")
+            .await
+            .expect_err("wrong current password");
+        assert!(matches!(error, UserError::IncorrectPassword), "{error:?}");
+    }
     let error = users
-        .update_credentials("bad name", "better234")
+        .update_credentials(&created.id, "secret123", "bad name", "better234")
         .await
         .expect_err("bad name");
     assert_eq!(
@@ -348,7 +381,7 @@ async fn rejected_credential_updates_change_nothing() {
         "Username 'bad name' is invalid, can only contain letters or digits."
     );
     let error = users
-        .update_credentials("owner", "weak")
+        .update_credentials(&created.id, "secret123", "owner", "weak")
         .await
         .expect_err("weak password");
     assert_eq!(rejected(error), "Passwords must be at least 8 characters.");

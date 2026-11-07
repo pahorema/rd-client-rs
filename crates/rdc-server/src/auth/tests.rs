@@ -74,11 +74,28 @@ impl Fixture {
         cookie(&set_cookie)
     }
 }
+
 #[tokio::test]
-async fn sessions_expose_first_account_name() {
+async fn sessions_expose_the_requesting_account_name() {
     let fixture = Fixture::new().await;
+    let signed_in = RequestUser::Authenticated {
+        user_id: fixture.user.id.clone(),
+    };
     assert_eq!(
-        fixture.sessions.user_name().await.unwrap().as_deref(),
+        fixture.sessions.user_name(&signed_in).await.unwrap().as_deref(),
+        Some("alice")
+    );
+    let unknown = RequestUser::Authenticated {
+        user_id: "missing".to_owned(),
+    };
+    assert_eq!(fixture.sessions.user_name(&unknown).await.unwrap(), None);
+    assert_eq!(
+        fixture
+            .sessions
+            .user_name(&RequestUser::AuthenticationDisabled)
+            .await
+            .unwrap()
+            .as_deref(),
         Some("alice")
     );
     let directory = tempfile::tempdir().unwrap();
@@ -88,7 +105,13 @@ async fn sessions_expose_first_account_name() {
     let sessions = Sessions::open(empty, &directory.path().join("session.key"))
         .await
         .unwrap();
-    assert_eq!(sessions.user_name().await.unwrap(), None);
+    assert_eq!(
+        sessions
+            .user_name(&RequestUser::AuthenticationDisabled)
+            .await
+            .unwrap(),
+        None
+    );
 }
 
 async fn login(
@@ -245,17 +268,14 @@ async fn disabled_switch_is_live_and_passes_without_a_cookie() {
 async fn credential_changes_and_invalidation_reject_previously_cached_cookies() {
     let fixture = Fixture::new().await;
     for (user_name, password) in [("alice", "Changed1!"), ("bob", "")] {
+        let current = if user_name == "alice" {
+            "Passw0rd!"
+        } else {
+            "Changed1!"
+        };
         let old = fixture
             .sessions
-            .login(
-                "alice",
-                if user_name == "alice" {
-                    "Passw0rd!"
-                } else {
-                    "Changed1!"
-                },
-                &RequestBasePath(String::new()),
-            )
+            .login("alice", current, &RequestBasePath(String::new()))
             .await
             .unwrap()
             .unwrap();
@@ -264,7 +284,7 @@ async fn credential_changes_and_invalidation_reject_previously_cached_cookies() 
         let user = fixture
             .store
             .users()
-            .update_credentials(user_name, password)
+            .update_credentials(&fixture.user.id, current, user_name, password)
             .await
             .unwrap();
         fixture.sessions.clone().invalidate(&user.id).await;
