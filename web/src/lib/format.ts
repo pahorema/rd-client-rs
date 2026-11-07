@@ -27,9 +27,23 @@ export function formatSpeed(bytesPerSecond: number | null | undefined): string {
 	return `${formatSize(bytesPerSecond)}/s`;
 }
 
+const numberFormats = new Map<number, Intl.NumberFormat>();
+const dateTimeFormat = new Intl.DateTimeFormat(undefined, {
+	dateStyle: 'medium',
+	timeStyle: 'medium'
+});
+const dateFormat = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' });
+
 /** Formats a number with the user's locale grouping. */
 export function formatNumber(value: number | null | undefined, maximumFractionDigits = 0): string {
-	return (value ?? 0).toLocaleString(undefined, { maximumFractionDigits });
+	let format = numberFormats.get(maximumFractionDigits);
+
+	if (!format) {
+		format = new Intl.NumberFormat(undefined, { maximumFractionDigits });
+		numberFormats.set(maximumFractionDigits, format);
+	}
+
+	return format.format(value ?? 0);
 }
 
 /**
@@ -48,17 +62,16 @@ export function parseTimestamp(timestamp: Timestamp | null | undefined): Date | 
 
 /** Formats a timestamp as a medium date and time in the user's locale. */
 export function formatDateTime(timestamp: Timestamp | null | undefined): string {
-	return (
-		parseTimestamp(timestamp)?.toLocaleString(undefined, {
-			dateStyle: 'medium',
-			timeStyle: 'medium'
-		}) ?? ''
-	);
+	const date = parseTimestamp(timestamp);
+
+	return date ? dateTimeFormat.format(date) : '';
 }
 
 /** Formats a timestamp as a date in the user's locale. */
 export function formatDate(timestamp: Timestamp | null | undefined): string {
-	return parseTimestamp(timestamp)?.toLocaleDateString(undefined, { dateStyle: 'medium' }) ?? '';
+	const date = parseTimestamp(timestamp);
+
+	return date ? dateFormat.format(date) : '';
 }
 
 /** Decodes a percent-encoded URL for display, returning it unchanged when malformed. */
