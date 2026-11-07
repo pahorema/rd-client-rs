@@ -19,7 +19,7 @@ use unrar_ng::{
 };
 
 use crate::Error;
-use crate::extract::{Entry, Inspection, VolumeRole};
+use crate::extract::{Entry, Inspection, VolumeRole, ensure_within_limit};
 use crate::path::{create_entry_directory, entry_destination, prepare_file_target};
 use crate::progress::Progress;
 
@@ -99,6 +99,11 @@ pub(crate) fn inspect(archive: &Path) -> Result<Inspection, Error> {
     Ok(Inspection { entries, volume })
 }
 
+/// The unpacked size the library reports for an entry whose header says it is unknown
+/// (`INT64NDF` in the library's `rartypes.hpp`): such an entry is decompressed until its data
+/// ends, whatever size that turns out to be.
+const UNKNOWN_SIZE: u64 = 0x7fff_ffff_7fff_ffff;
+
 /// Validates every entry against `destination` and returns the total uncompressed size.
 fn scan(archive: &Path, destination: &Path) -> Result<u64, Error> {
     let listing = Archive::new(archive)
@@ -111,6 +116,12 @@ fn scan(archive: &Path, destination: &Path) -> Result<u64, Error> {
         entry_destination(destination, &name)?;
         ensure_extractable(&header, &name)?;
         if header.is_file() {
+            if header.unpacked_size == UNKNOWN_SIZE {
+                return Err(Error::UnsupportedEntry {
+                    entry: name.into_owned(),
+                    reason: "its unpacked size is not recorded",
+                });
+            }
             total = total.saturating_add(header.unpacked_size);
         }
     }
@@ -119,17 +130,20 @@ fn scan(archive: &Path, destination: &Path) -> Result<u64, Error> {
 
 /// Extracts every entry of `archive` (and of its following volumes) below `destination`.
 ///
-/// All entries are validated before anything is written. Cancellation is checked between
-/// entries: the library writes one entry in a single call that cannot be interrupted.
+/// All entries, and their total uncompressed size against `limit`, are validated before anything
+/// is written. Cancellation is checked between entries: the library writes one entry in a single
+/// call that cannot be interrupted.
 pub(crate) fn extract(
     archive: &Path,
     destination: &Path,
+    limit: u64,
     on_progress: &mut (dyn FnMut(u8) + Send),
     cancel: &CancellationToken,
 ) -> Result<(), Error> {
     ensure_no_nul(archive)?;
     ensure_no_nul(destination)?;
     let total = scan(archive, destination)?;
+    ensure_within_limit(total, limit)?;
 
     let mut progress = Progress::new(total, on_progress);
     let mut open = Archive::new(archive)

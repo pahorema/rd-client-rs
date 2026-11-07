@@ -3,7 +3,7 @@ use std::fs;
 use rdc_archive::{Error, extract, list_entries};
 use tokio_util::sync::CancellationToken;
 
-use crate::common::{files_below, write_zip};
+use crate::common::{files_below, write_zip, write_zip_declaring};
 
 #[test]
 fn zip_with_nested_folders_is_extracted() {
@@ -212,4 +212,20 @@ fn damaged_archives_are_reported_as_unreadable() {
     .unwrap_err();
 
     assert!(matches!(error, Error::Read { .. }), "{error}");
+}
+
+#[test]
+fn a_zip_declaring_far_more_data_than_its_size_is_refused_before_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("bomb.zip");
+    write_zip_declaring(&archive, "bomb.bin", b"tiny", 0xF000_0000);
+    let destination = dir.path().join("out");
+
+    let error = extract(&archive, &destination, |_| {}, &CancellationToken::new()).unwrap_err();
+
+    assert!(
+        matches!(error, Error::TooLarge { unpacked: 0xF000_0000, limit } if limit == 1 << 30),
+        "{error}"
+    );
+    assert!(!destination.exists());
 }

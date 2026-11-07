@@ -19,8 +19,9 @@ const HEAD_END: u64 = 5;
 const HFL_EXTRA: u64 = 0x1;
 const HFL_DATA: u64 = 0x2;
 
-/// File flag: the data CRC32 is present.
+/// File flags: the data CRC32 is present / the unpacked size is unknown.
 const FHFL_CRC32: u64 = 0x4;
+const FHFL_UNPUNKNOWN: u64 = 0x8;
 
 /// Extra record types of a file header: encryption / file-system redirection.
 const FHEXTRA_CRYPT: u64 = 0x1;
@@ -38,6 +39,17 @@ pub(crate) enum Redirect {
     Junction = 3,
     HardLink = 4,
     FileCopy = 5,
+}
+
+/// Unpacked size recorded in a file header.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Size {
+    /// The length of the stored data.
+    Actual,
+    /// A size unrelated to the stored data.
+    Declared(u64),
+    /// The "unpacked size unknown" flag.
+    Unknown,
 }
 
 /// A RAR 5 archive under construction.
@@ -59,7 +71,12 @@ impl Rar5 {
 
     /// Adds a stored file.
     pub(crate) fn file(self, name: &str, data: &[u8]) -> Self {
-        self.entry(name, data, &[])
+        self.entry(name, data, Size::Actual, &[])
+    }
+
+    /// Adds a stored file whose header records `size` as its unpacked size.
+    pub(crate) fn file_with_size(self, name: &str, data: &[u8], size: Size) -> Self {
+        self.entry(name, data, size, &[])
     }
 
     /// Adds an entry redirecting to `target` instead of holding data.
@@ -70,7 +87,7 @@ impl Rar5 {
         vint(0, &mut record);
         vint(len(target.as_bytes()), &mut record);
         record.extend_from_slice(target.as_bytes());
-        self.entry(name, &[], &extra_record(&record))
+        self.entry(name, &[], Size::Actual, &extra_record(&record))
     }
 
     /// Adds a file marked as AES-256 encrypted (version 0, no password check, 2^15 key
@@ -82,7 +99,7 @@ impl Rar5 {
         vint(0, &mut record);
         record.push(15);
         record.extend_from_slice(&[0x5a; 32]);
-        self.entry(name, data, &extra_record(&record))
+        self.entry(name, data, Size::Actual, &extra_record(&record))
     }
 
     /// Ends the archive and writes it to `path`.
@@ -95,7 +112,7 @@ impl Rar5 {
         fs::write(path, self.bytes).expect("RAR fixture can be written");
     }
 
-    fn entry(mut self, name: &str, data: &[u8], extra: &[u8]) -> Self {
+    fn entry(mut self, name: &str, data: &[u8], size: Size, extra: &[u8]) -> Self {
         let mut flags = 0;
         if !extra.is_empty() {
             flags |= HFL_EXTRA;
@@ -103,6 +120,15 @@ impl Rar5 {
         if !data.is_empty() {
             flags |= HFL_DATA;
         }
+        let mut file_flags = FHFL_CRC32;
+        let unpacked = match size {
+            Size::Actual => len(data),
+            Size::Declared(size) => size,
+            Size::Unknown => {
+                file_flags |= FHFL_UNPUNKNOWN;
+                0
+            }
+        };
         let mut header = Vec::new();
         vint(HEAD_FILE, &mut header);
         vint(flags, &mut header);
@@ -112,8 +138,8 @@ impl Rar5 {
         if !data.is_empty() {
             vint(len(data), &mut header);
         }
-        vint(FHFL_CRC32, &mut header);
-        vint(len(data), &mut header);
+        vint(file_flags, &mut header);
+        vint(unpacked, &mut header);
         vint(REGULAR_FILE_MODE, &mut header);
         header.extend_from_slice(&crc32(data).to_le_bytes());
         vint(0, &mut header);

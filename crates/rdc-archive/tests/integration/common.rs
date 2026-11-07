@@ -25,6 +25,64 @@ pub(crate) fn write_zip(path: &Path, entries: &[(&str, &[u8])]) {
     zip.finish().expect("zip fixture can be finished");
 }
 
+/// Writes a ZIP archive at `path` with one stored entry whose headers declare `declared` bytes
+/// of uncompressed data, whatever the length of `content`.
+///
+/// The bytes follow the local file header, central directory header and end of central
+/// directory record layouts of the ZIP specification (APPNOTE.TXT, sections 4.3.7, 4.3.12 and
+/// 4.3.16); the CRC is left at zero because the data is never read.
+pub(crate) fn write_zip_declaring(path: &Path, name: &str, content: &[u8], declared: u32) {
+    fn u16_le(value: usize) -> [u8; 2] {
+        u16::try_from(value)
+            .expect("fixture field fits 16 bits")
+            .to_le_bytes()
+    }
+    fn u32_le(value: usize) -> [u8; 4] {
+        u32::try_from(value)
+            .expect("fixture field fits 32 bits")
+            .to_le_bytes()
+    }
+    const VERSION: [u8; 2] = 20_u16.to_le_bytes();
+    const STORED: [u8; 2] = [0, 0];
+    const DOS_DATE: [u8; 4] = [0, 0, 0x21, 0];
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&0x0403_4b50_u32.to_le_bytes());
+    bytes.extend_from_slice(&VERSION);
+    bytes.extend_from_slice(&[0, 0]);
+    bytes.extend_from_slice(&STORED);
+    bytes.extend_from_slice(&DOS_DATE);
+    bytes.extend_from_slice(&[0; 4]);
+    bytes.extend_from_slice(&u32_le(content.len()));
+    bytes.extend_from_slice(&declared.to_le_bytes());
+    bytes.extend_from_slice(&u16_le(name.len()));
+    bytes.extend_from_slice(&[0, 0]);
+    bytes.extend_from_slice(name.as_bytes());
+    bytes.extend_from_slice(content);
+    let directory = bytes.len();
+    bytes.extend_from_slice(&0x0201_4b50_u32.to_le_bytes());
+    bytes.extend_from_slice(&VERSION);
+    bytes.extend_from_slice(&VERSION);
+    bytes.extend_from_slice(&[0, 0]);
+    bytes.extend_from_slice(&STORED);
+    bytes.extend_from_slice(&DOS_DATE);
+    bytes.extend_from_slice(&[0; 4]);
+    bytes.extend_from_slice(&u32_le(content.len()));
+    bytes.extend_from_slice(&declared.to_le_bytes());
+    bytes.extend_from_slice(&u16_le(name.len()));
+    bytes.extend_from_slice(&[0; 12]);
+    bytes.extend_from_slice(&[0; 4]);
+    bytes.extend_from_slice(name.as_bytes());
+    let directory_size = bytes.len() - directory;
+    bytes.extend_from_slice(&0x0605_4b50_u32.to_le_bytes());
+    bytes.extend_from_slice(&[0; 4]);
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&1_u16.to_le_bytes());
+    bytes.extend_from_slice(&u32_le(directory_size));
+    bytes.extend_from_slice(&u32_le(directory));
+    bytes.extend_from_slice(&[0, 0]);
+    fs::write(path, bytes).expect("zip fixture can be written");
+}
+
 /// Directory holding the committed RAR fixtures (see `tests/fixtures/generate.sh`).
 pub(crate) fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")

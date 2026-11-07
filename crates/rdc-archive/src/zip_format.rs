@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use zip::ZipArchive;
 
 use crate::Error;
-use crate::extract::Entry;
+use crate::extract::{Entry, ensure_within_limit};
 use crate::path::{create_entry_directory, entry_destination, prepare_file_target};
 use crate::progress::Progress;
 
@@ -42,11 +42,12 @@ pub(crate) fn list(archive: &Path) -> Result<Vec<Entry>, Error> {
 
 /// Extracts every entry of `archive` below `destination`.
 ///
-/// All entry names are validated before anything is written, so an archive with an escaping
-/// entry leaves the destination untouched.
+/// All entry names, and the total uncompressed size against `limit`, are validated before
+/// anything is written, so an archive with an escaping entry leaves the destination untouched.
 pub(crate) fn extract(
     archive: &Path,
     destination: &Path,
+    limit: u64,
     on_progress: &mut (dyn FnMut(u8) + Send),
     cancel: &CancellationToken,
 ) -> Result<(), Error> {
@@ -59,6 +60,7 @@ pub(crate) fn extract(
             total = total.saturating_add(file.size());
         }
     }
+    ensure_within_limit(total, limit)?;
 
     let mut progress = Progress::new(total, on_progress);
     let mut buffer = vec![0; COPY_BUFFER];

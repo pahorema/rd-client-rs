@@ -38,6 +38,16 @@ pub enum Error {
         /// Why the entry is refused, e.g. `"it is a hard link"`.
         reason: &'static str,
     },
+    /// The archive declares more uncompressed data than allowed for its size on disk.
+    #[error(
+        "the archive would unpack to {unpacked} bytes, more than the {limit} bytes allowed for its size"
+    )]
+    TooLarge {
+        /// Total uncompressed size declared by the archive's entries.
+        unpacked: u64,
+        /// Largest uncompressed size allowed for the archive.
+        limit: u64,
+    },
     /// A name used as a directory below the destination is absolute or climbs out of it.
     #[error("{name:?} cannot be used as a folder name inside the download directory")]
     UnsafeName {

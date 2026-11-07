@@ -4,7 +4,7 @@ use rdc_archive::{Error, extract, list_entries};
 use tokio_util::sync::CancellationToken;
 
 use crate::common::{big_text, copy_fixtures, copy_fixtures_as, files_below};
-use crate::rar5::{Rar5, Redirect};
+use crate::rar5::{Rar5, Redirect, Size};
 
 const MULTI: [&str; 3] = ["multi.part1.rar", "multi.part2.rar", "multi.part3.rar"];
 const LEGACY: [&str; 3] = ["legacy.rar", "legacy.r00", "legacy.r01"];
@@ -315,6 +315,44 @@ fn encrypted_rar_entries_are_refused_before_anything_is_written() {
 
     assert!(
         matches!(&error, Error::UnsupportedEntry { entry, reason } if entry == "Movie.mkv" && reason.contains("encrypted")),
+        "{error}"
+    );
+    assert!(!destination.exists());
+}
+
+#[test]
+fn a_rar_declaring_far_more_data_than_its_size_is_refused_before_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("bomb.rar");
+    Rar5::new()
+        .file("readme.txt", b"harmless")
+        .file_with_size("bomb.bin", b"tiny", Size::Declared(2 << 40))
+        .write(&archive);
+    let destination = dir.path().join("out");
+
+    let error = extract_all(&archive, &destination).unwrap_err();
+
+    assert!(
+        matches!(error, Error::TooLarge { unpacked, limit } if unpacked == (2 << 40) + 8 && limit == 1 << 30),
+        "{error}"
+    );
+    assert!(!destination.exists());
+}
+
+#[test]
+fn a_rar_entry_of_unknown_size_is_refused_before_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("unknown.rar");
+    Rar5::new()
+        .file("readme.txt", b"harmless")
+        .file_with_size("stream.bin", b"data", Size::Unknown)
+        .write(&archive);
+    let destination = dir.path().join("out");
+
+    let error = extract_all(&archive, &destination).unwrap_err();
+
+    assert!(
+        matches!(&error, Error::UnsupportedEntry { entry, .. } if entry == "stream.bin"),
         "{error}"
     );
     assert!(!destination.exists());
