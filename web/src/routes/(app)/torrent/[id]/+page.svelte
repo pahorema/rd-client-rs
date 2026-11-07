@@ -304,13 +304,25 @@
 					</Table.Header>
 					<Table.Body>
 						{#each torrent.downloads as download (download.downloadId)}
+							<!-- The whole row toggles for pointer users; the button serves keyboards and screen readers. -->
 							<Table.Row class="cursor-pointer" onclick={() => toggle(download)}>
 								<Table.Cell>
-									{#if expanded.has(download.downloadId)}
-										<ChevronDownIcon class="size-4" />
-									{:else}
-										<ChevronRightIcon class="size-4" />
-									{/if}
+									<Button
+										variant="ghost"
+										size="icon-sm"
+										aria-expanded={expanded.has(download.downloadId)}
+										aria-label="Show details"
+										onclick={(event: MouseEvent) => {
+											event.stopPropagation();
+											toggle(download);
+										}}
+									>
+										{#if expanded.has(download.downloadId)}
+											<ChevronDownIcon />
+										{:else}
+											<ChevronRightIcon />
+										{/if}
+									</Button>
 								</Table.Cell>
 								<Table.Cell class="break-all whitespace-normal">
 									{decodeUrl(download.link ?? download.path)}
@@ -384,10 +396,7 @@
 										<Button
 											size="sm"
 											variant="outline"
-											onclick={(event: MouseEvent) => {
-												event.stopPropagation();
-												retryDownloadId = download.downloadId;
-											}}
+											onclick={() => (retryDownloadId = download.downloadId)}
 										>
 											<RotateCcwIcon />
 											Retry download
