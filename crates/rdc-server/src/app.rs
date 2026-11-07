@@ -1,7 +1,7 @@
 //! HTTP router assembly and shared application dependencies.
 
 use std::{
-    fmt::Display,
+    fmt::{self, Display},
     sync::{Arc, Mutex},
 };
 
@@ -10,9 +10,8 @@ use rdc_engine::Engine;
 use rdc_store::Store;
 use serde::{
     Deserialize, Deserializer,
-    de::{DeserializeOwned, Error as _},
+    de::{DeserializeOwned, DeserializeSeed, IntoDeserializer, MapAccess, Visitor},
 };
-use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -55,13 +54,18 @@ pub(crate) fn internal(error: impl Display) -> ApiError {
     ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, error.to_string())
 }
 
-/// Unwrap a JSON body, answering 400 with an empty body when it does not parse.
+/// Unwrap a JSON body, answering 400 with an empty body when it does not parse, or 413
+/// when it exceeds the route's body limit.
 pub(crate) fn body<T: DeserializeOwned>(
     input: Result<Json<T>, JsonRejection>,
 ) -> Result<T, ApiError> {
-    input
-        .map(|Json(value)| value)
-        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, ""))
+    input.map(|Json(value)| value).map_err(|rejection| {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::new(rejection.status(), rejection.body_text())
+        } else {
+            ApiError::new(StatusCode::BAD_REQUEST, "")
+        }
+    })
 }
 
 /// Unwrap a JSON body that must not be `null`.
@@ -72,21 +76,81 @@ pub(crate) fn required<T: DeserializeOwned>(
 }
 
 /// A JSON object whose property names match the target fields regardless of case.
+///
+/// Top-level keys are lowercased while the object is read, so field names of `T` must be
+/// lowercase; values and unknown fields stream through without building a JSON tree.
 #[derive(Debug)]
 pub(crate) struct CaseInsensitive<T>(pub(crate) T);
 
-impl<'de, T: DeserializeOwned> Deserialize<'de> for CaseInsensitive<T> {
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for CaseInsensitive<T> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let Value::Object(fields) = Value::deserialize(deserializer)? else {
-            return Err(D::Error::custom("expected a JSON object"));
+        T::deserialize(LowercaseKeys(deserializer)).map(Self)
+    }
+}
+
+/// Deserializer presenting an object with lowercase keys.
+struct LowercaseKeys<D>(D);
+
+impl<'de, D: Deserializer<'de>> Deserializer<'de> for LowercaseKeys<D> {
+    type Error = D::Error;
+
+    fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, D::Error> {
+        self.0.deserialize_map(ObjectVisitor(visitor))
+    }
+
+    fn deserialize_struct<V: Visitor<'de>>(
+        self,
+        _name: &'static str,
+        _fields: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, D::Error> {
+        self.0.deserialize_map(ObjectVisitor(visitor))
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf
+        option unit unit_struct newtype_struct seq tuple tuple_struct map enum identifier
+        ignored_any
+    }
+}
+
+/// Accepts only objects and hands them on with lowercase keys.
+struct ObjectVisitor<V>(V);
+
+impl<'de, V: Visitor<'de>> Visitor<'de> for ObjectVisitor<V> {
+    type Value = V::Value;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+        self.0.visit_map(LowercaseMap(map))
+    }
+}
+
+struct LowercaseMap<A>(A);
+
+impl<'de, A: MapAccess<'de>> MapAccess<'de> for LowercaseMap<A> {
+    type Error = A::Error;
+
+    fn next_key_seed<K: DeserializeSeed<'de>>(
+        &mut self,
+        seed: K,
+    ) -> Result<Option<K::Value>, A::Error> {
+        let Some(key) = self.0.next_key::<String>()? else {
+            return Ok(None);
         };
-        let normalized = fields
-            .into_iter()
-            .map(|(key, value)| (key.to_ascii_lowercase(), value))
-            .collect();
-        serde_json::from_value(Value::Object(normalized))
-            .map(Self)
-            .map_err(D::Error::custom)
+        seed.deserialize(key.to_ascii_lowercase().into_deserializer())
+            .map(Some)
+    }
+
+    fn next_value_seed<S: DeserializeSeed<'de>>(&mut self, seed: S) -> Result<S::Value, A::Error> {
+        self.0.next_value_seed(seed)
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        self.0.size_hint()
     }
 }
 

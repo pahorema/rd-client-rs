@@ -445,8 +445,11 @@ impl ClientIp {
 impl<S: Send + Sync> FromRequestParts<S> for ClientIp {
     type Rejection = Infallible;
 
-    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        Ok(Self::of(&parts.extensions))
+    fn from_request_parts(
+        parts: &mut Parts,
+        _: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(Ok(Self::of(&parts.extensions)))
     }
 }
 
@@ -483,8 +486,11 @@ impl CookieScope {
 impl<S: Send + Sync> FromRequestParts<S> for CookieScope {
     type Rejection = Infallible;
 
-    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
-        Ok(Self::of(&parts.extensions, &parts.headers))
+    fn from_request_parts(
+        parts: &mut Parts,
+        _: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        std::future::ready(Ok(Self::of(&parts.extensions, &parts.headers)))
     }
 }
 

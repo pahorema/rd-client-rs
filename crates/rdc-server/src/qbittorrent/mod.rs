@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 
 use axum::{
     Json, Router,
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{StatusCode, header},
     middleware,
     response::{IntoResponse, Response},
@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 
 use crate::{
     auth::{AuthPolicy, ClientIp, CookieScope, Login, RequestUser, Sessions, require_auth},
-    http::ApiError,
+    http::{ApiError, UPLOAD_BODY_LIMIT},
 };
 use binding::{Params, bad_request, internal};
 
@@ -152,7 +152,6 @@ pub fn router<S: Clone + Send + Sync + 'static>(
             "torrents/resume",
             "torrents/setsharelimits",
             "torrents/delete",
-            "torrents/add",
             "torrents/fileprio",
             "torrents/setcategory",
             "torrents/createcategory",
@@ -163,6 +162,10 @@ pub fn router<S: Clone + Send + Sync + 'static>(
         ] {
             protected = protected.route(&format!("{prefix}{name}"), post(protected_request));
         }
+        protected = protected.route(
+            &format!("{prefix}torrents/add"),
+            post(protected_request).layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
+        );
     }
     public
         .merge(protected.route_layer(middleware::from_fn_with_state(policy, require_auth)))

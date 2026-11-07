@@ -232,12 +232,11 @@ impl<'store> Users<'store> {
         if locked {
             return Ok(LoginOutcome::LockedOut);
         }
-        let verification = match account.password_hash.as_deref() {
-            Some(hash) => password::verify(hash, password).await,
-            None => {
-                password::verify_dummy(password).await;
-                Verification::Failed
-            }
+        let verification = if let Some(hash) = account.password_hash.as_deref() {
+            password::verify(hash, password).await
+        } else {
+            password::verify_dummy(password).await;
+            Verification::Failed
         };
         match verification {
             Verification::Failed => return Ok(LoginOutcome::Failed),

@@ -660,12 +660,7 @@ mod tests {
         }
         assert_eq!(
             fixture
-                .send(
-                    "GET",
-                    &format!("{root}IsLoggedIn"),
-                    None,
-                    Some(&sid)
-                )
+                .send("GET", &format!("{root}IsLoggedIn"), None, Some(&sid))
                 .await
                 .status(),
             StatusCode::OK,
@@ -747,7 +742,10 @@ mod tests {
             )
         };
         for _ in 0..5 {
-            assert_eq!(login("alice", "guess").await.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                login("alice", "guess").await.status(),
+                StatusCode::BAD_REQUEST
+            );
         }
         for name in ["alice", "ALICE"] {
             let locked = login(name, "Passw0rd!").await;
@@ -776,6 +774,28 @@ mod tests {
         fixture.test.engine.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn oversized_login_bodies_are_rejected_before_parsing() {
+        let fixture = Fixture::new("").await;
+        let padding = "0,".repeat(64 * 1024);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/authentication/login")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(format!(
+                r#"{{"userName":"a","x":[{padding}0]}}"#
+            )))
+            .expect("valid request");
+        let response = fixture
+            .router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("router responds");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        fixture.test.engine.shutdown().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_setup_requests_create_a_single_account() {
         let fixture = Arc::new(Fixture::new("").await);
@@ -796,7 +816,10 @@ mod tests {
         }
         let statuses = requests.join_all().await;
         assert_eq!(
-            statuses.iter().filter(|status| **status == StatusCode::OK).count(),
+            statuses
+                .iter()
+                .filter(|status| **status == StatusCode::OK)
+                .count(),
             1,
             "{statuses:?}"
         );

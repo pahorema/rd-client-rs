@@ -224,7 +224,11 @@ mod tests {
                 Verification::SuccessRehashNeeded,
                 "{hashed}"
             );
-            assert_eq!(verify_now(hashed, "wrong1"), Verification::Failed, "{hashed}");
+            assert_eq!(
+                verify_now(hashed, "wrong1"),
+                Verification::Failed,
+                "{hashed}"
+            );
         }
     }
 

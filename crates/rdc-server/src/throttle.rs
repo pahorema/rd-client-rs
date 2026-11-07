@@ -20,9 +20,9 @@ const FREE_ATTEMPTS: u32 = 5;
 /// Block after the first failure beyond the free ones.
 const FIRST_DELAY: Duration = Duration::from_secs(1);
 /// Longest block.
-const MAX_DELAY: Duration = Duration::from_secs(15 * 60);
+const MAX_DELAY: Duration = Duration::from_mins(15);
 /// Idle time after which a key's failures are forgotten.
-const FORGET_AFTER: Duration = Duration::from_secs(60 * 60);
+const FORGET_AFTER: Duration = Duration::from_hours(1);
 /// Tracked keys; when full after dropping forgotten keys, new keys go untracked.
 const MAX_KEYS: usize = 65_536;
 
@@ -182,7 +182,10 @@ mod tests {
         assert_eq!(throttle.begin(CLIENT, "admin").err(), Some(FIRST_DELAY * 2));
         tokio::time::advance(FORGET_AFTER).await;
         fail(&throttle, CLIENT, "admin");
-        assert!(throttle.begin(CLIENT, "admin").is_ok(), "failures were forgotten");
+        assert!(
+            throttle.begin(CLIENT, "admin").is_ok(),
+            "failures were forgotten"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -204,16 +207,27 @@ mod tests {
             fail(&throttle, CLIENT, "admin");
         }
         let other_client = Some("198.51.100.1".parse().expect("address"));
-        assert!(throttle.begin(other_client, "ADMIN").is_err(), "name is blocked");
-        assert!(throttle.begin(CLIENT, "other").is_err(), "client is blocked");
+        assert!(
+            throttle.begin(other_client, "ADMIN").is_err(),
+            "name is blocked"
+        );
+        assert!(
+            throttle.begin(CLIENT, "other").is_err(),
+            "client is blocked"
+        );
 
         for host in 1..=FREE_ATTEMPTS {
             let host = u16::try_from(host).expect("small");
-            let client = Some(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 0, 0, 0, host)));
+            let client = Some(IpAddr::V6(Ipv6Addr::new(
+                0x2001, 0xdb8, 0, 1, 0, 0, 0, host,
+            )));
             fail(&throttle, client, &format!("name{host}"));
         }
         let same_network = Some("2001:db8:0:1::ffff".parse().expect("address"));
-        assert!(throttle.begin(same_network, "fresh").is_err(), "IPv6 /64 is one client");
+        assert!(
+            throttle.begin(same_network, "fresh").is_err(),
+            "IPv6 /64 is one client"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -222,7 +236,10 @@ mod tests {
         for _ in 0..FREE_ATTEMPTS - 1 {
             fail(&throttle, CLIENT, "admin");
         }
-        throttle.begin(CLIENT, "admin").expect("admitted").succeeded();
+        throttle
+            .begin(CLIENT, "admin")
+            .expect("admitted")
+            .succeeded();
         for _ in 0..FREE_ATTEMPTS - 1 {
             fail(&throttle, CLIENT, "admin");
         }

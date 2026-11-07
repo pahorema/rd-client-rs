@@ -110,7 +110,11 @@ async fn creating_rejects_weak_passwords_and_bad_names() {
     let test = TestStore::new().await;
     let users = test.store.users();
     let cases = [
-        ("admin", "abcdef1", "Passwords must be at least 8 characters."),
+        (
+            "admin",
+            "abcdef1",
+            "Passwords must be at least 8 characters.",
+        ),
         (
             "admin",
             "password",
@@ -163,14 +167,20 @@ async fn only_one_account_can_ever_be_created() {
         .collect();
     let users = test.store.users();
     assert_eq!(created.len(), 1, "exactly one concurrent creation wins");
-    assert_eq!(users.first().await.expect("first"), Some(created[0].clone()));
+    assert_eq!(
+        users.first().await.expect("first"),
+        Some(created[0].clone())
+    );
     let raw = test.raw().await;
     let count: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "AspNetUsers""#)
         .fetch_one(&raw)
         .await
         .expect("count");
     assert_eq!(count, 1);
-    let error = users.create("ADMIN", "secret234").await.expect_err("exists");
+    let error = users
+        .create("ADMIN", "secret234")
+        .await
+        .expect_err("exists");
     assert!(matches!(error, UserError::AccountExists), "{error:?}");
 }
 
@@ -298,7 +308,10 @@ async fn updating_credentials_changes_name_and_password() {
         renamed.security_stamp, created.security_stamp,
         "names end sessions"
     );
-    assert_eq!(login(&test, "admin", "secret123").await, LoginOutcome::Failed);
+    assert_eq!(
+        login(&test, "admin", "secret123").await,
+        LoginOutcome::Failed
+    );
     assert!(matches!(
         login(&test, "owner", "secret123").await,
         LoginOutcome::Success(_)
@@ -314,7 +327,10 @@ async fn updating_credentials_changes_name_and_password() {
         "passwords end sessions"
     );
     assert_eq!(users.first().await.expect("first"), Some(changed.clone()));
-    assert_eq!(login(&test, "owner", "secret123").await, LoginOutcome::Failed);
+    assert_eq!(
+        login(&test, "owner", "secret123").await,
+        LoginOutcome::Failed
+    );
     assert_eq!(
         login(&test, "owner", "better234").await,
         LoginOutcome::Success(changed.clone())
@@ -351,7 +367,12 @@ async fn rotating_the_security_stamp_ends_sessions_but_keeps_credentials() {
         login(&test, "admin", "secret123").await,
         LoginOutcome::Success(user) if user.security_stamp == stamp
     ));
-    assert!(!users.rotate_security_stamp("missing").await.expect("rotate"));
+    assert!(
+        !users
+            .rotate_security_stamp("missing")
+            .await
+            .expect("rotate")
+    );
 }
 
 #[tokio::test]

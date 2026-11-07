@@ -946,17 +946,32 @@ async fn state_changes_need_a_same_origin_post() {
         let response = set_category(Some(source.clone()), "planted").await.unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN, "{source:?}");
     }
-    let stored = fixture.test.engine.torrent(torrent.torrent_id).await.unwrap().unwrap();
+    let stored = fixture
+        .test
+        .engine
+        .torrent(torrent.torrent_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(stored.category, None, "rejected requests change nothing");
 
     for (source, category) in [
         (Some((header::ORIGIN, "http://rdclient.lan:6500")), "ui"),
-        (Some((header::REFERER, "http://RDCLIENT.lan:6500/#/torrents")), "referred"),
+        (
+            Some((header::REFERER, "http://RDCLIENT.lan:6500/#/torrents")),
+            "referred",
+        ),
         (None, "sonarr"),
     ] {
         let response = set_category(source, category).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK, "{category}");
-        let stored = fixture.test.engine.torrent(torrent.torrent_id).await.unwrap().unwrap();
+        let stored = fixture
+            .test
+            .engine
+            .torrent(torrent.torrent_id)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(stored.category.as_deref(), Some(category));
     }
 }

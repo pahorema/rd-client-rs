@@ -299,6 +299,44 @@ async fn torrent_file_uploads_and_availability_checks() {
     let result: Value = serde_json::from_str(&body).expect("regex response");
     assert_ne!(result["includeError"].as_str().expect("error"), "");
     assert_eq!(result["selectedFiles"], json!([]));
+
+    // Torrent uploads may exceed the 64 KiB limit of every other route.
+    let pieces = 8 * 1024;
+    let mut large = format!(
+        "d4:infod6:lengthi{}e4:name5:Large12:piece lengthi16384e6:pieces{}:",
+        pieces * 16384,
+        pieces * 20
+    )
+    .into_bytes();
+    large.extend(std::iter::repeat_n(7_u8, pieces * 20));
+    large.extend_from_slice(b"ee");
+    let mut payload = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"formData\"\r\n\r\n\
+         {{\"torrent\":{{}}}}\r\n--{boundary}\r\n\
+         Content-Disposition: form-data; name=\"file\"; filename=\"large.torrent\"\r\n\r\n"
+    )
+    .into_bytes();
+    payload.extend_from_slice(&large);
+    payload.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let upload = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/Api/Torrents/UploadFile",
+            Body::from(payload),
+            Some(&format!("multipart/form-data; boundary={boundary}")),
+        ))
+        .await
+        .expect("upload response");
+    assert_eq!(upload.status(), StatusCode::OK);
+    let (status, _) = response(
+        &router,
+        "POST",
+        "/Api/Torrents/UploadMagnet",
+        json!({"magnetLink": format!("{MAGNET}&tr={}", "x".repeat(70 * 1024)), "torrent": {}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 #[tokio::test]

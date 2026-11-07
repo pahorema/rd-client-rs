@@ -2,7 +2,7 @@
 
 use axum::{
     Json, Router,
-    extract::{Multipart, Path, State, rejection::JsonRejection},
+    extract::{DefaultBodyLimit, Multipart, Path, State, rejection::JsonRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::{
     app::{self, AppState},
     dto::{TorrentDto, Variant},
-    http::ApiError,
+    http::{ApiError, UPLOAD_BODY_LIMIT},
 };
 
 /// Literal routes used by base-path and case-insensitive request handling.
@@ -51,9 +51,15 @@ pub(crate) fn routes() -> Router<AppState> {
         .route(PATHS[3], get(rate))
         .route(PATHS[4], get(tick))
         .route(PATHS[5], post(upload_magnet))
-        .route(PATHS[6], post(upload_file))
+        .route(
+            PATHS[6],
+            post(upload_file).layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
+        )
         .route(PATHS[7], post(check_magnet))
-        .route(PATHS[8], post(check_file))
+        .route(
+            PATHS[8],
+            post(check_file).layer(DefaultBodyLimit::max(UPLOAD_BODY_LIMIT)),
+        )
         .route(PATHS[9], post(verify_regex))
         .route(PATHS[10], post(delete))
         .route(PATHS[11], post(retry))

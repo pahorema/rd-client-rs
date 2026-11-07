@@ -4,7 +4,7 @@ use std::{any::Any, fmt, sync::Arc};
 
 use axum::{
     Router,
-    body::{Body, to_bytes},
+    body::{Body, HttpBody, to_bytes},
     extract::{DefaultBodyLimit, Request},
     http::{HeaderMap, HeaderName, StatusCode, Uri, header, uri::Authority},
     middleware::{self, Next},
@@ -16,7 +16,12 @@ use tower_http::catch_panic::CatchPanicLayer;
 
 use crate::{config::normalize_base_path, logging::LogControl};
 
-const MAX_BODY_SIZE: usize = 30_000_000;
+/// Request body limit of every route without a larger one of its own.
+const DEFAULT_BODY_LIMIT: usize = 64 * 1024;
+/// Request body limit of the routes receiving `.torrent` files.
+pub(crate) const UPLOAD_BODY_LIMIT: usize = 30_000_000;
+/// Largest request body echoed by debug request logging.
+const LOGGED_BODY_LIMIT: u64 = 64 * 1024;
 
 /// Plain-text handler error retaining its body under every application prefix.
 #[derive(Debug)]
@@ -122,7 +127,7 @@ where
         let inner = self
             .router
             .with_state(state)
-            .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
+            .layer(DefaultBodyLimit::max(DEFAULT_BODY_LIMIT))
             .layer(CatchPanicLayer::custom(panic_response));
         let plumbing = Arc::new(Plumbing {
             patterns: self.patterns,
@@ -368,31 +373,40 @@ async fn log_request(request: Request, logs: &LogControl) -> Result<Request, Api
         .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("application/json"));
     let form = content_type.starts_with("application/x-www-form-urlencoded");
     let multipart = content_type.starts_with("multipart/form-data");
+    let length = HttpBody::size_hint(&body).exact();
     let mut logged_body = String::new();
-    let body = if json || form || multipart {
-        let bytes = to_bytes(body, MAX_BODY_SIZE).await.map_err(|_| {
-            ApiError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "Request body too large or unreadable",
-            )
-        })?;
-        if json {
-            // Never echo malformed JSON: credentials may be present even when parsing fails.
-            logged_body = serde_json::from_slice(&bytes).map_or_else(
-                |_| "[invalid JSON]".to_owned(),
-                |mut value| {
-                    redact_json(&mut value);
-                    value.to_string()
-                },
-            );
-        } else if multipart {
-            logged_body = log_multipart(&bytes, content_type).await;
-        } else {
-            logged_body = redact_pairs(&String::from_utf8_lossy(&bytes));
+    // Bodies are logged before authentication, so only small ones are buffered.
+    let body = match length {
+        Some(length) if (json || form || multipart) && length <= LOGGED_BODY_LIMIT => {
+            let limit = usize::try_from(LOGGED_BODY_LIMIT).expect("small limit");
+            let bytes = to_bytes(body, limit)
+                .await
+                .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "Request body unreadable"))?;
+            if json {
+                // Never echo malformed JSON: credentials may be present even when parsing fails.
+                logged_body = serde_json::from_slice(&bytes).map_or_else(
+                    |_| "[invalid JSON]".to_owned(),
+                    |mut value| {
+                        redact_json(&mut value);
+                        value.to_string()
+                    },
+                );
+            } else if multipart {
+                logged_body = log_multipart(&bytes, content_type).await;
+            } else {
+                logged_body = redact_pairs(&String::from_utf8_lossy(&bytes));
+            }
+            Body::from(bytes)
         }
-        Body::from(bytes)
-    } else {
-        body
+        _ => {
+            if json || form || multipart {
+                logged_body = length.map_or_else(
+                    || "[body of unknown length not logged]".to_owned(),
+                    |length| format!("[{length} bytes not logged]"),
+                );
+            }
+            body
+        }
     };
     tracing::debug!(method = %parts.method, path = %logs.redact(parts.uri.path()), query = %logs.redact(&redact_pairs(parts.uri.query().unwrap_or(""))), body = %logs.redact(&logged_body), "HTTP request");
     Ok(Request::from_parts(parts, body))
@@ -531,10 +545,10 @@ pub async fn serve(
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            shutdown.cancel();
-        })
-        .await?;
+        shutdown_signal().await;
+        shutdown.cancel();
+    })
+    .await?;
     Ok(())
 }
 

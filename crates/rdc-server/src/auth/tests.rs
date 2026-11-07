@@ -64,12 +64,7 @@ impl Fixture {
         let digest = Sha256::digest(self.user.security_stamp.as_ref().unwrap().as_bytes()).into();
         let set_cookie = self
             .sessions
-            .issue(
-                &self.user.id,
-                &digest,
-                issued,
-                &root_scope(),
-            )
+            .issue(&self.user.id, &digest, issued, &root_scope())
             .unwrap();
         cookie(&set_cookie)
     }
@@ -82,7 +77,12 @@ async fn sessions_expose_the_requesting_account_name() {
         user_id: fixture.user.id.clone(),
     };
     assert_eq!(
-        fixture.sessions.user_name(&signed_in).await.unwrap().as_deref(),
+        fixture
+            .sessions
+            .user_name(&signed_in)
+            .await
+            .unwrap()
+            .as_deref(),
         Some("alice")
     );
     let unknown = RequestUser::Authenticated {
@@ -114,10 +114,7 @@ async fn sessions_expose_the_requesting_account_name() {
     );
 }
 
-async fn login(
-    State(sessions): State<Sessions>,
-    scope: CookieScope,
-) -> Response {
+async fn login(State(sessions): State<Sessions>, scope: CookieScope) -> Response {
     let value = sessions
         .login("alice", "Passw0rd!", ClientIp(None), &scope)
         .await
@@ -125,10 +122,7 @@ async fn login(
     ([(header::SET_COOKIE, signed_in(value))], StatusCode::OK).into_response()
 }
 
-async fn logout(
-    State(sessions): State<Sessions>,
-    scope: CookieScope,
-) -> Response {
+async fn logout(State(sessions): State<Sessions>, scope: CookieScope) -> Response {
     (
         [(header::SET_COOKIE, sessions.logout(&scope).unwrap())],
         StatusCode::OK,

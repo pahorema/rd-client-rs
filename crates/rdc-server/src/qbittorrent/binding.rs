@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use axum::{
-    body::to_bytes,
-    extract::{FromRequest, Multipart, Request},
+    body::Bytes,
+    extract::{FromRequest, Multipart, Request, multipart::MultipartError},
     http::{Method, StatusCode, header},
 };
 
@@ -60,11 +60,18 @@ impl Params {
         if content_type.starts_with("multipart/form-data") {
             let mut multipart = Multipart::from_request(request, &())
                 .await
-                .map_err(bad_request)?;
-            while let Some(field) = multipart.next_field().await.map_err(bad_request)? {
+                .map_err(|rejection| ApiError::new(rejection.status(), rejection.body_text()))?;
+            while let Some(field) = multipart
+                .next_field()
+                .await
+                .map_err(|error| multipart_error(&error))?
+            {
                 let name = field.name().unwrap_or_default().to_ascii_lowercase();
                 let file = field.file_name().is_some();
-                let bytes = field.bytes().await.map_err(bad_request)?;
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|error| multipart_error(&error))?;
                 if file {
                     if !bytes.is_empty() {
                         result.files.push(bytes.to_vec());
@@ -75,9 +82,10 @@ impl Params {
                 }
             }
         } else if content_type.starts_with("application/x-www-form-urlencoded") {
-            let bytes = to_bytes(request.into_body(), 30_000_000)
+            // The extractor honours the route's body limit.
+            let bytes = Bytes::from_request(request, &())
                 .await
-                .map_err(bad_request)?;
+                .map_err(|rejection| ApiError::new(rejection.status(), rejection.body_text()))?;
             result.decode(&bytes);
         }
         Ok(result)
@@ -90,6 +98,11 @@ impl Params {
                 .or_insert_with(|| value.into_owned());
         }
     }
+}
+
+/// Keeps the status of multipart failures, such as 413 for a body over the route's limit.
+fn multipart_error(error: &MultipartError) -> ApiError {
+    ApiError::new(error.status(), error.body_text())
 }
 
 pub(super) fn bad_request(error: impl std::fmt::Display) -> ApiError {
