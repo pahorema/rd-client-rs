@@ -94,6 +94,31 @@ async fn a_hash_folder_next_to_the_torrent_folder_is_flattened_inside_the_torren
 }
 
 #[tokio::test]
+async fn a_category_folder_ending_with_the_torrent_name_is_not_taken_for_the_torrent_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let category = dir.path().join("tv");
+    let inner = category.join(HASH).join("Inner");
+    fs::create_dir_all(&inner).unwrap();
+    fs::write(inner.join("episode.mkv"), "video").unwrap();
+    fs::create_dir_all(category.join("v")).unwrap();
+    let archive = category.join("v").join("v.zip");
+    write_zip(&archive, &[("v/notes.txt", b"notes")]);
+    let request = UnpackRequest {
+        archive: archive.clone(),
+        destination: category.clone(),
+        torrent_name: "v".to_owned(),
+        flatten_hash_dir: Some(HASH.to_owned()),
+    };
+
+    run(request).await.unwrap();
+
+    assert_eq!(
+        files_below(&category),
+        [format!("{HASH}/episode.mkv"), "v/notes.txt".to_owned()]
+    );
+}
+
+#[tokio::test]
 async fn a_hash_folder_with_other_content_is_kept_after_flattening() {
     let downloads = Downloads::new();
     let archive = downloads.torrent.join("show.zip");

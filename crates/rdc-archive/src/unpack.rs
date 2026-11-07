@@ -58,7 +58,7 @@ pub struct UnpackRequest {
 ///    volumes are deleted as well.
 /// 5. With [`flatten_hash_dir`](UnpackRequest::flatten_hash_dir) set and a `<hash>` folder in
 ///    the extraction folder, the content of its first sub-folder is moved up: into the
-///    extraction folder when that is the torrent folder (its path ends with the torrent name),
+///    extraction folder when that is the torrent folder (step 2 chose `destination/<name>`),
 ///    otherwise into the `<hash>` folder. The emptied folders are removed.
 ///
 /// `on_progress` receives an increasing percentage of the whole procedure, ending with 100 on
@@ -174,15 +174,15 @@ where
         delete_archive(archive, inspection.volume)?;
     }
     if let Some(hash) = flatten_hash_dir {
-        flatten(&extract_path, torrent_name, hash)?;
+        flatten(&extract_path, hash, !rooted)?;
     }
     progress.report(100);
     Ok(())
 }
 
 /// Moves the content of `<extract_path>/<hash>/<first sub-folder>/` up one or two levels, see
-/// step 5 of [`unpack`].
-fn flatten(extract_path: &Path, torrent_name: &str, hash: &str) -> Result<(), Error> {
+/// step 5 of [`unpack`]; `into_torrent_folder` tells whether `extract_path` is the torrent folder.
+fn flatten(extract_path: &Path, hash: &str, into_torrent_folder: bool) -> Result<(), Error> {
     let hash_dir = join_name(extract_path, hash)?;
     if !hash_dir.is_dir() {
         return Ok(());
@@ -195,7 +195,6 @@ fn flatten(extract_path: &Path, torrent_name: &str, hash: &str) -> Result<(), Er
         debug!(folder = %hash_dir.display(), "hash folder has no sub-folder to flatten");
         return Ok(());
     };
-    let into_torrent_folder = extract_path.to_string_lossy().ends_with(torrent_name);
     let target = if into_torrent_folder {
         extract_path
     } else {
