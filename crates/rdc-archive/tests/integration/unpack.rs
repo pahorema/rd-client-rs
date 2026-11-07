@@ -336,6 +336,20 @@ async fn an_archive_wrapping_an_old_style_set_is_unpacked_through_the_set() {
 }
 
 #[tokio::test]
+async fn a_name_merely_containing_r00_is_not_taken_for_a_wrapped_set() {
+    let downloads = Downloads::new();
+    let archive = downloads.torrent.join("show.zip");
+    write_zip(&archive, &[("Mr.r00ney/episode.mkv", b"video")]);
+
+    run(downloads.request(&archive)).await.unwrap();
+
+    assert_eq!(
+        files_below(&downloads.destination),
+        ["Show/Mr.r00ney/episode.mkv"]
+    );
+}
+
+#[tokio::test]
 async fn a_wrapper_without_a_top_level_set_keeps_its_extracted_content() {
     let downloads = Downloads::new();
     let archive = downloads.torrent.join("wrapper.zip");

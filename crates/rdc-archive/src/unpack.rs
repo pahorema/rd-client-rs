@@ -22,9 +22,9 @@ const DELETE_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(3),
 ];
 
-/// Extension of the second volume of an old-style RAR set; an archive whose entries contain
-/// it wraps such a set.
-const WRAPPED_SET_MARKER: &str = ".r00";
+/// Extension of the second volume of an old-style RAR set; an archive with an entry of this
+/// extension wraps such a set.
+const WRAPPED_SET_EXTENSION: &str = "r00";
 
 /// What to unpack and where.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +49,7 @@ pub struct UnpackRequest {
 /// 2. When every entry sits below a folder named like the torrent (`<name>/…` or `<name>\…`),
 ///    the archive is extracted into `destination`; otherwise into `destination/<name>`, so no
 ///    entry can reach the files of other torrents in `destination`.
-/// 3. When an entry name contains `.r00`, the archive wraps an old-style RAR set: it is
+/// 3. When an entry has the `.r00` extension, the archive wraps an old-style RAR set: it is
 ///    extracted into a fresh temporary folder inside the extraction folder and deleted, then
 ///    each wrapped set (found through its `.r00` volume at the top of that folder) is
 ///    extracted from its `.rar` volume, and the temporary folder is removed. Without any
@@ -138,7 +138,7 @@ where
     let wraps_set = inspection
         .entries
         .iter()
-        .any(|entry| entry.name.contains(WRAPPED_SET_MARKER));
+        .any(|entry| Path::new(&entry.name).extension() == Some(WRAPPED_SET_EXTENSION.as_ref()));
     if wraps_set {
         let temp = extract_path.join(Uuid::new_v4().to_string());
         fs::create_dir_all(&temp).map_err(Error::io("create directory", &temp))?;
@@ -238,7 +238,7 @@ fn wrapped_sets(dir: &Path) -> Result<Vec<PathBuf>, Error> {
         let entry = entry.map_err(Error::io("list directory", dir))?;
         let path = entry.path();
         let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
-        if is_file && path.extension().is_some_and(|ext| ext == "r00") {
+        if is_file && path.extension() == Some(WRAPPED_SET_EXTENSION.as_ref()) {
             found.push(path);
         }
     }
