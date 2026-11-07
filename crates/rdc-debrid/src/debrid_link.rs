@@ -1,6 +1,5 @@
 //! Client for the Debrid-Link seedbox API (`https://debrid-link.fr/api/v2/`).
 
-use std::fmt;
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -11,6 +10,7 @@ use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
 use serde::de::{DeserializeOwned, IgnoredAny};
 
+use crate::endpoint::Endpoint;
 use crate::error::DebridError;
 use crate::http::ProviderHttp;
 use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
@@ -30,20 +30,10 @@ const PAGE_SIZE: &str = "50";
 ///
 /// Every response is wrapped in a `{success, value, error}` envelope; a
 /// failed envelope becomes a [`DebridError::Provider`] carrying the API error code.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct DebridLink {
     http: ProviderHttp,
-    api_key: String,
-    base_url: String,
-}
-
-impl fmt::Debug for DebridLink {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DebridLink")
-            .field("api_key", &"<redacted>")
-            .field("base_url", &self.base_url)
-            .finish_non_exhaustive()
-    }
+    endpoint: Endpoint,
 }
 
 impl DebridLink {
@@ -51,19 +41,14 @@ impl DebridLink {
     pub fn new(config: &ProviderConfig, http: ProviderHttp) -> Self {
         Self {
             http,
-            api_key: config.api_key.trim().to_owned(),
-            base_url: DEFAULT_BASE_URL.to_owned(),
+            endpoint: Endpoint::new("Debrid-Link", DEFAULT_BASE_URL, config),
         }
     }
 
     /// Sends requests to `base_url` instead of the public API.
     #[must_use]
     pub fn with_base_url(mut self, base_url: &str) -> Self {
-        self.base_url = if base_url.ends_with('/') {
-            base_url.to_owned()
-        } else {
-            format!("{base_url}/")
-        };
+        self.endpoint.set_base_url(base_url);
         self
     }
 
@@ -219,16 +204,7 @@ impl DebridLink {
     }
 
     fn request(&self, method: Method, path: &str) -> Result<RequestBuilder, DebridError> {
-        if self.api_key.trim().is_empty() {
-            return Err(DebridError::NotConfigured(
-                "The Debrid-Link API key is not set in the settings".to_owned(),
-            ));
-        }
-        Ok(self
-            .http
-            .client()
-            .request(method, format!("{}{path}", self.base_url))
-            .bearer_auth(&self.api_key))
+        self.endpoint.request(&self.http, method, path)
     }
 
     async fn send<T: DeserializeOwned>(

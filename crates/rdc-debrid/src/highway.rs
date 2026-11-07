@@ -4,7 +4,6 @@
 //! parameters. Only torrent transfers are managed.
 
 use std::collections::HashMap;
-use std::fmt;
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -17,6 +16,7 @@ use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 
+use crate::endpoint::Endpoint;
 use crate::error::DebridError;
 use crate::http::ProviderHttp;
 use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
@@ -49,20 +49,10 @@ pub fn is_spool_id(id: &str) -> bool {
 }
 
 /// Client for a HIGHWAY account.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Highway {
     http: ProviderHttp,
-    api_key: String,
-    endpoint: String,
-}
-
-impl fmt::Debug for Highway {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Highway")
-            .field("api_key", &"<redacted>")
-            .field("endpoint", &self.endpoint)
-            .finish_non_exhaustive()
-    }
+    endpoint: Endpoint,
 }
 
 impl Highway {
@@ -70,15 +60,14 @@ impl Highway {
     pub fn new(config: &ProviderConfig, http: ProviderHttp) -> Self {
         Self {
             http,
-            api_key: config.api_key.trim().to_owned(),
-            endpoint: DEFAULT_ENDPOINT.to_owned(),
+            endpoint: Endpoint::resource("HIGHWAY", DEFAULT_ENDPOINT, config),
         }
     }
 
     /// Sends requests to `endpoint` instead of the public API.
     #[must_use]
     pub fn with_endpoint(mut self, endpoint: &str) -> Self {
-        endpoint.clone_into(&mut self.endpoint);
+        self.endpoint.set_resource_url(endpoint);
         self
     }
 
@@ -297,17 +286,7 @@ impl Highway {
         method: Method,
         query: &[(&str, &str)],
     ) -> Result<RequestBuilder, DebridError> {
-        if self.api_key.trim().is_empty() {
-            return Err(DebridError::NotConfigured(
-                "The HIGHWAY API token is not set (provider API key)".to_owned(),
-            ));
-        }
-        Ok(self
-            .http
-            .client()
-            .request(method, &self.endpoint)
-            .query(query)
-            .bearer_auth(&self.api_key))
+        Ok(self.endpoint.request(&self.http, method, "")?.query(query))
     }
 
     /// Sends a request; `None` for 404 and empty bodies.

@@ -19,6 +19,7 @@ use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::Deserialize;
 use serde::de::{DeserializeOwned, IgnoredAny};
 
+use crate::endpoint::Endpoint;
 use crate::error::DebridError;
 use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp};
 use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
@@ -46,19 +47,10 @@ const RATE_LIMIT_MARKERS: [&str; 14] = [
 ];
 
 /// Client for a Premiumize.me account.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Premiumize {
     http: ProviderHttp,
-    base_url: String,
-    api_key: String,
-}
-
-impl fmt::Debug for Premiumize {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Premiumize")
-            .field("base_url", &self.base_url)
-            .finish_non_exhaustive()
-    }
+    endpoint: Endpoint,
 }
 
 impl Premiumize {
@@ -66,19 +58,15 @@ impl Premiumize {
     pub fn new(config: &ProviderConfig, http: ProviderHttp) -> Self {
         Self {
             http,
-            base_url: DEFAULT_BASE_URL.to_owned(),
-            api_key: config.api_key.trim().to_owned(),
+            endpoint: Endpoint::new("Premiumize", DEFAULT_BASE_URL, config)
+                .with_query_key("apikey"),
         }
     }
 
     /// Sends requests to `base_url` instead of [`DEFAULT_BASE_URL`].
     #[must_use]
     pub fn with_base_url(mut self, base_url: &str) -> Self {
-        self.base_url = if base_url.ends_with('/') {
-            base_url.to_owned()
-        } else {
-            format!("{base_url}/")
-        };
+        self.endpoint.set_base_url(base_url);
         self
     }
 
@@ -265,29 +253,17 @@ impl Premiumize {
         Ok(list.transfers.unwrap_or_default())
     }
 
-    fn api_key(&self) -> Result<&str, DebridError> {
-        if self.api_key.trim().is_empty() {
-            return Err(DebridError::NotConfigured(
-                "Premiumize API key not set in the settings".to_owned(),
-            ));
-        }
-        Ok(&self.api_key)
-    }
-
-    /// Builds a request for `path` with `params` followed by the API key.
+    /// Builds a request for `path` with the API key and `params`.
     fn request(
         &self,
         method: Method,
         path: &str,
         params: &[(&str, &str)],
     ) -> Result<RequestBuilder, DebridError> {
-        let api_key = self.api_key()?;
         Ok(self
-            .http
-            .client()
-            .request(method, format!("{}{path}", self.base_url))
-            .query(params)
-            .query(&[("apikey", api_key)]))
+            .endpoint
+            .request(&self.http, method, path)?
+            .query(params))
     }
 
     async fn call<T: DeserializeOwned>(&self, request: RequestBuilder) -> Result<T, DebridError> {

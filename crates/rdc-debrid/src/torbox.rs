@@ -4,7 +4,6 @@
 //! not, is an envelope `{success, error, detail, data}`: a set `error` or
 //! `success: false` is a failure whose `error` is a machine-readable code.
 
-use std::fmt;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -13,10 +12,11 @@ use rdc_model::{
     Download, DownloadClient, DownloadInfo, Provider, RemoteFile, Torrent, TorrentStatus,
 };
 use reqwest::multipart::{Form, Part};
-use reqwest::{Method, RequestBuilder, StatusCode, Url};
+use reqwest::{Method, RequestBuilder, StatusCode};
 use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Deserializer};
 
+use crate::endpoint::Endpoint;
 use crate::error::DebridError;
 use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp, RetryPolicy};
 use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
@@ -63,25 +63,12 @@ const DEFAULT_ERROR_RETRY: RetryPolicy = RetryPolicy {
 };
 
 /// Client for a TorBox account.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TorBox {
     http: ProviderHttp,
-    base_url: String,
-    /// Host whose cooldown is extended when TorBox asks to slow down.
-    host: String,
-    api_key: String,
+    endpoint: Endpoint,
     prefer_zipped_downloads: bool,
     error_retry: RetryPolicy,
-}
-
-impl fmt::Debug for TorBox {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TorBox")
-            .field("base_url", &self.base_url)
-            .field("prefer_zipped_downloads", &self.prefer_zipped_downloads)
-            .field("error_retry", &self.error_retry)
-            .finish_non_exhaustive()
-    }
 }
 
 impl TorBox {
@@ -89,27 +76,16 @@ impl TorBox {
     pub fn new(config: &ProviderConfig, http: ProviderHttp) -> Self {
         Self {
             http,
-            base_url: String::new(),
-            host: String::new(),
-            api_key: config.api_key.trim().to_owned(),
+            endpoint: Endpoint::new("TorBox", DEFAULT_BASE_URL, config),
             prefer_zipped_downloads: config.prefer_zipped_downloads,
             error_retry: DEFAULT_ERROR_RETRY,
         }
-        .with_base_url(DEFAULT_BASE_URL)
     }
 
     /// Sends requests to `base_url` instead of [`DEFAULT_BASE_URL`].
     #[must_use]
     pub fn with_base_url(mut self, base_url: &str) -> Self {
-        self.base_url = if base_url.ends_with('/') {
-            base_url.to_owned()
-        } else {
-            format!("{base_url}/")
-        };
-        self.host = Url::parse(&self.base_url)
-            .ok()
-            .and_then(|url| url.host_str().map(str::to_owned))
-            .unwrap_or_default();
+        self.endpoint.set_base_url(base_url);
         self
     }
 
@@ -380,7 +356,7 @@ impl TorBox {
                     Method::GET,
                     "torrents/requestdl",
                     &[
-                        ("token", self.api_key()?),
+                        ("token", self.endpoint.api_key()?),
                         ("torrent_id", &torrent_id),
                         ("file_id", &file_id),
                         ("zip_link", zip),
@@ -433,27 +409,15 @@ impl TorBox {
         self.request(Method::GET, "queued/getqueued", &params)
     }
 
-    fn api_key(&self) -> Result<&str, DebridError> {
-        if self.api_key.trim().is_empty() {
-            return Err(DebridError::NotConfigured(
-                "TorBox API key not set in the settings".to_owned(),
-            ));
-        }
-        Ok(&self.api_key)
-    }
-
     fn request(
         &self,
         method: Method,
         path: &str,
         params: &[(&str, &str)],
     ) -> Result<RequestBuilder, DebridError> {
-        let api_key = self.api_key()?;
         Ok(self
-            .http
-            .client()
-            .request(method, format!("{}{path}", self.base_url))
-            .bearer_auth(api_key)
+            .endpoint
+            .request(&self.http, method, path)?
             .query(params))
     }
 
@@ -515,10 +479,13 @@ impl TorBox {
         error
     }
 
+    /// A two-minute rate limit, also applied to the TorBox host.
     fn rate_limited(&self, message: String) -> DebridError {
-        self.http
-            .coordinator()
-            .update_cooldown(&self.host, DEFAULT_RATE_LIMIT_COOLDOWN);
+        if let Some(host) = self.endpoint.host() {
+            self.http
+                .coordinator()
+                .update_cooldown(host, DEFAULT_RATE_LIMIT_COOLDOWN);
+        }
         DebridError::RateLimited {
             message,
             retry_after: DEFAULT_RATE_LIMIT_COOLDOWN,
