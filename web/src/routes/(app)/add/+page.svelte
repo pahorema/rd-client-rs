@@ -85,16 +85,25 @@
 			.catch((e: unknown) => (error = errorMessage(e)));
 	});
 
-	async function checkFiles() {
+	// The magnet field's blur starts a check right as the submit button is pressed; submit waits
+	// for it instead of disabling the button, which would swallow that click.
+	let pendingCheck: Promise<void> | null = null;
+
+	function checkFiles(): Promise<void> {
 		const link = magnet.trim();
 		const source = link || (files.length === 1 ? `file:${files[0].name}:${files[0].size}` : '');
 
-		if (source === checkedSource) return;
+		if (source === checkedSource) return pendingCheck ?? Promise.resolve();
 		checkedSource = source;
 		available = null;
 		manual.clear();
-		if (!source) return;
+		if (!source) return Promise.resolve();
 
+		pendingCheck = runCheck(link);
+		return pendingCheck;
+	}
+
+	async function runCheck(link: string) {
 		checking = true;
 		error = null;
 
@@ -148,7 +157,10 @@
 
 	async function submit(event: SubmitEvent) {
 		event.preventDefault();
-		if (!torrent) return;
+		if (!torrent || saving) return;
+		saving = true;
+		// A failed check only hides the file list; the torrent can still be added.
+		await checkFiles();
 		error = null;
 
 		const settings: NewTorrent = { ...torrent, downloadManualFiles: null };
@@ -157,6 +169,7 @@
 		if (torrent.downloadAction === TorrentDownloadAction.DownloadManual && !multiple) {
 			if (manual.size === 0) {
 				error = 'Select at least one file to download.';
+				saving = false;
 				return;
 			}
 			settings.downloadManualFiles = [...manual].join(',');
@@ -165,10 +178,9 @@
 		const link = magnet.trim();
 		if (!link && files.length === 0) {
 			error = 'Paste a magnet link or pick a torrent file.';
+			saving = false;
 			return;
 		}
-
-		saving = true;
 
 		try {
 			if (link) {
@@ -325,7 +337,7 @@
 			{#if error}{@render failure()}{/if}
 
 			<div>
-				<Button type="submit" disabled={saving || checking}>
+				<Button type="submit" disabled={saving}>
 					{#if saving}<Spinner />{/if}
 					Add torrent
 				</Button>
