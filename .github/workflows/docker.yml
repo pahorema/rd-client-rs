@@ -20,7 +20,8 @@ env:
 jobs:
   build:
     name: Build (${{ matrix.platform }})
-    strategy:
+    if: github.event_name != 'pull_request'
+    strategy: &platforms
       fail-fast: false
       matrix:
         include:
@@ -32,7 +33,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-    steps:
+    steps: &build-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - if: env.PUBLISH == 'true'
@@ -60,6 +61,16 @@ jobs:
           name: digest-${{ strategy.job-index }}
           path: /tmp/digests/*
           retention-days: 1
+
+  # Pull requests build the same images with a read-only token; see `build` for the steps.
+  check:
+    name: Build (${{ matrix.platform }})
+    if: github.event_name == 'pull_request'
+    strategy: *platforms
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps: *build-steps
 
   publish:
     name: Publish manifest
