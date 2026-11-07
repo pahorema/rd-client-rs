@@ -9,19 +9,16 @@ pub fn banned_magnet_error(setting: &str, magnet: &MagnetLink) -> Option<String>
 
 /// Checks source markers before tracker URLs for each nonblank banned entry.
 /// Source comparison deliberately uses the untrimmed, case-sensitive setting entry.
-/// All announce-list tiers are checked, falling back to announce when tiers are absent.
+/// All announce-list tiers are checked, then the primary announce unless a tier repeats it:
+/// tracker enrichment merges both into the uploaded torrent.
 #[must_use]
 pub fn banned_torrent_error(setting: &str, torrent: &TorrentFile) -> Option<String> {
-    let urls = torrent.announce_list.iter().flatten().map(String::as_str);
-    if torrent.announce_list.is_empty() {
-        banned_error(
-            setting,
-            torrent.source.as_deref(),
-            &torrent.announce.iter().map(String::as_str),
-        )
-    } else {
-        banned_error(setting, torrent.source.as_deref(), &urls)
-    }
+    let tiers = torrent.announce_list.iter().flatten().map(String::as_str);
+    let primary = torrent
+        .announce
+        .as_deref()
+        .filter(|announce| !tiers.clone().any(|url| url == *announce));
+    banned_error(setting, torrent.source.as_deref(), &tiers.chain(primary))
 }
 
 fn banned_error<'src>(

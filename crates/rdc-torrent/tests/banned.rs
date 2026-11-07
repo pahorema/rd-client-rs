@@ -61,7 +61,7 @@ fn source_matching_is_raw_case_sensitive_and_precedes_urls_per_entry() {
 }
 
 #[test]
-fn file_checks_all_tiers_and_uses_primary_only_without_tiers() {
+fn file_checks_all_tiers_and_the_primary_announce() {
     let mut file = torrent();
     assert_eq!(
         banned_torrent_error(" BANNED ", &file).as_deref(),
@@ -69,10 +69,23 @@ fn file_checks_all_tiers_and_uses_primary_only_without_tiers() {
             "Cannot add torrent, the torrent contains banned trackers: udp://BANNED.one, https://banned.two."
         )
     );
-    assert_eq!(banned_torrent_error("primary", &file), None);
+    assert_eq!(
+        banned_torrent_error("primary", &file).as_deref(),
+        Some("Cannot add torrent, the torrent contains banned trackers: udp://primary.")
+    );
     file.announce_list.clear();
     assert_eq!(
         banned_torrent_error("primary", &file).as_deref(),
         Some("Cannot add torrent, the torrent contains banned trackers: udp://primary.")
+    );
+}
+
+#[test]
+fn a_primary_announce_repeated_in_a_tier_is_reported_once() {
+    let mut file = torrent();
+    file.announce = Some("udp://BANNED.one".into());
+    assert_eq!(
+        banned_torrent_error("banned.one", &file).as_deref(),
+        Some("Cannot add torrent, the torrent contains banned trackers: udp://BANNED.one.")
     );
 }
