@@ -62,6 +62,19 @@ pub(crate) fn enumeration<T: TryFrom<i64>>(row: &SqliteRow, column: &'static str
     T::try_from(value).map_err(|_| StoreError::invalid(column, &value))
 }
 
+/// An enumeration stored as its integer value; an unknown value decodes as
+/// the default variant with a warning instead of failing the whole read.
+pub(crate) fn enumeration_or_default<T: TryFrom<i64> + Default>(
+    row: &SqliteRow,
+    column: &'static str,
+) -> Result<T> {
+    let value: i64 = row.try_get(column)?;
+    Ok(T::try_from(value).unwrap_or_else(|_| {
+        tracing::warn!(column, value, "unknown stored value, using the default");
+        T::default()
+    }))
+}
+
 pub(crate) fn optional_enumeration<T: TryFrom<i64>>(
     row: &SqliteRow,
     column: &'static str,

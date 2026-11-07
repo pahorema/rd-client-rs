@@ -55,4 +55,5 @@ pub(crate) const MIGRATIONS: &[Migration] = migrations![
     "20251224022148_AddDownloadTypeToTorrent",
     "20260423031719_Downloads_Add_TorrentIdPath_Unique",
     "20260528163000_MoveSourcePayloadToPayloadTable",
+    "20261107000000_Torrents_Fix_Legacy_DownloadClient",
 ];

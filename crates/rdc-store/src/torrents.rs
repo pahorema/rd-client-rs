@@ -188,7 +188,7 @@ fn from_row(row: &SqliteRow) -> Result<Torrent> {
         include_regex: row::optional_text(row, "IncludeRegex")?,
         exclude_regex: row::optional_text(row, "ExcludeRegex")?,
         download_manual_files: row::optional_text(row, "DownloadManualFiles")?,
-        download_client: row::enumeration(row, "DownloadClient")?,
+        download_client: row::enumeration_or_default(row, "DownloadClient")?,
         added: row::timestamp(row, "Added")?,
         files_selected: row::optional_timestamp(row, "FilesSelected")?,
         completed: row::optional_timestamp(row, "Completed")?,

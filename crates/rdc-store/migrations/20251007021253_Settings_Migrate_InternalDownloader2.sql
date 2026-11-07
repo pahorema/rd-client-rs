@@ -5,3 +5,5 @@ UPDATE Settings SET Value = 1 WHERE SettingId = 'DownloadClient:Client' AND Valu
 UPDATE Settings SET Value = 2 WHERE SettingId = 'DownloadClient:Client' AND Value = 3;
 
 UPDATE Settings SET Value = 3 WHERE SettingId = 'DownloadClient:Client' AND Value = 4;
+
+UPDATE "Torrents" SET "DownloadClient" = "DownloadClient" - 1 WHERE "DownloadClient" BETWEEN 1 AND 4;

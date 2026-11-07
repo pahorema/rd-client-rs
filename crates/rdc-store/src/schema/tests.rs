@@ -420,6 +420,93 @@ async fn sources_move_to_the_payload_table() {
     assert_eq!(references, expected);
 }
 
+/// Inserts a torrent with only the columns every layout since
+/// `20250706204358_AddFinishedActionDelay` requires, setting `Type` once the
+/// payload migration made it mandatory.
+async fn insert_torrent_with_client(connection: &mut SqliteConnection, id: &str, client: i64) {
+    let typed = columns(connection, "Torrents")
+        .await
+        .iter()
+        .all(|column| column != "FileOrMagnet");
+    let sql = if typed {
+        r#"INSERT INTO "Torrents" ("TorrentId", "Hash", "DownloadAction", "FinishedAction",
+               "FinishedActionDelay", "HostDownloadAction", "DownloadMinSize", "DownloadClient",
+               "Added", "IsFile", "RetryCount", "DownloadRetryAttempts",
+               "TorrentRetryAttempts", "DeleteOnError", "Lifetime", "Type")
+           VALUES (?, ?, 0, 0, 0, 0, 0, ?, '2025-01-01 00:00:00+00:00', 0, 0, 0, 0, 0, 0, 0)"#
+    } else {
+        r#"INSERT INTO "Torrents" ("TorrentId", "Hash", "DownloadAction", "FinishedAction",
+               "FinishedActionDelay", "HostDownloadAction", "DownloadMinSize", "DownloadClient",
+               "Added", "IsFile", "RetryCount", "DownloadRetryAttempts",
+               "TorrentRetryAttempts", "DeleteOnError", "Lifetime")
+           VALUES (?, ?, 0, 0, 0, 0, 0, ?, '2025-01-01 00:00:00+00:00', 0, 0, 0, 0, 0, 0)"#
+    };
+    sqlx::query(sql)
+        .bind(id)
+        .bind(id)
+        .bind(client)
+        .execute(connection)
+        .await
+        .expect("insert torrent");
+}
+
+async fn stored_clients(connection: &mut SqliteConnection) -> Vec<(String, i64)> {
+    sqlx::query_as(r#"SELECT "TorrentId", "DownloadClient" FROM "Torrents" ORDER BY 1"#)
+        .fetch_all(connection)
+        .await
+        .expect("clients")
+}
+
+#[tokio::test]
+async fn legacy_download_clients_follow_the_renumbered_values_and_load() {
+    use rdc_model::DownloadClient;
+
+    // Upgraded from before the renumbering: every old value shifts down.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("rd-client.db");
+    let mut connection = connect(&path).await;
+    migrate_through(&mut connection, "20250706204358_AddFinishedActionDelay").await;
+    for (id, client) in [("a", 0), ("b", 1), ("c", 2), ("d", 3), ("e", 4)] {
+        insert_torrent_with_client(&mut connection, id, client).await;
+    }
+    reopen(&path).await.expect("upgrade");
+    let expected = [("a", 0), ("b", 0), ("c", 1), ("d", 2), ("e", 3)]
+        .map(|(id, client)| (id.to_owned(), client));
+    assert_eq!(stored_clients(&mut connection).await, expected);
+
+    // Already renumbered by the original application: only Download Station
+    // keeps a value that no longer exists, and it can only mean Download Station.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("rd-client.db");
+    let mut connection = connect(&path).await;
+    migrate_through(
+        &mut connection,
+        "20260528163000_MoveSourcePayloadToPayloadTable",
+    )
+    .await;
+    insert_torrent_with_client(&mut connection, "0A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10", 4).await;
+    let store = Store::open(&path).await.expect("upgrade");
+    let torrents = store.torrents().list().await.expect("list");
+    assert_eq!(torrents.len(), 1);
+    assert_eq!(torrents[0].download_client, DownloadClient::DownloadStation);
+    store.close().await;
+}
+
+#[tokio::test]
+async fn unknown_download_clients_load_as_the_internal_downloader() {
+    use rdc_model::DownloadClient;
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("rd-client.db");
+    reopen(&path).await.expect("create");
+    let mut connection = connect(&path).await;
+    insert_torrent_with_client(&mut connection, "0A5B6F4C-58E1-4D47-9D6F-3C6D7C8E9F10", 9).await;
+    let store = Store::open(&path).await.expect("open");
+    let torrents = store.torrents().list().await.expect("list");
+    assert_eq!(torrents[0].download_client, DownloadClient::Internal);
+    store.close().await;
+}
+
 async fn layout(
     connection: &mut SqliteConnection,
 ) -> Vec<(String, String, String, Option<String>)> {
