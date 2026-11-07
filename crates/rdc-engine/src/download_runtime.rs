@@ -7,7 +7,7 @@ use rdc_download::{
     DownloadStationConfig, DownloadStationDownload, DownloadStationRequest, HttpDownload, Progress,
     SourceLookup, StartError, SymlinkDownload, SymlinkRequest, completion_channel,
 };
-use rdc_model::{Download, DownloadClient, Provider, Torrent, paths};
+use rdc_model::{Download, DownloadClient, Provider, RemoteFile, Torrent, paths};
 use std::{
     io,
     path::{Component, Path, PathBuf},
@@ -20,6 +20,7 @@ use tokio::{fs, sync::watch};
 use tokio_util::sync::CancellationToken;
 
 impl Engine {
+    /// Where a download is written, with its parent directories created and checked.
     pub(crate) async fn output_paths(
         &self,
         torrent: &Torrent,
@@ -27,76 +28,9 @@ impl Engine {
     ) -> Result<(PathBuf, PathBuf, String), EngineError> {
         let settings = self.settings();
         let root = Path::new(&settings.download_client.download_path);
-        if root.as_os_str().is_empty() {
-            return Err(invalid_path());
-        }
-        let name = torrent
-            .rd_name
-            .as_deref()
-            .map(paths::remove_invalid_file_name_chars)
-            .filter(|name| !name.trim().is_empty() && name != ".")
-            .ok_or_else(invalid_path)?;
-        let category = torrent
-            .category
-            .as_deref()
-            .map(paths::remove_invalid_file_name_chars)
-            .filter(|name| !name.trim().is_empty() && name != ".");
-        let destination = category
-            .as_ref()
-            .map_or_else(|| root.to_path_buf(), |category| root.join(category));
-        let safe_torrent = Torrent {
-            rd_name: Some(name),
-            rd_files: torrent.rd_files.clone(),
-            ..Torrent::default()
-        };
-        let safe_download = Download {
-            link: download.link.clone(),
-            file_name: paths::file_name(download),
-            ..Download::default()
-        };
-        if safe_download
-            .file_name
-            .as_deref()
-            .is_none_or(|name| name.trim().is_empty() || name == ".")
-        {
-            return Err(invalid_path());
-        }
-        let relative = paths::relative_download_path(&safe_torrent, &safe_download)
-            .ok_or_else(invalid_path)?;
-        let output = destination.join(&relative);
-        let inside = output.strip_prefix(root).map_err(|_| invalid_path())?;
-        if inside
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-        {
-            return Err(invalid_path());
-        }
-        fs::create_dir_all(root).await?;
-        let mut parent = root.to_path_buf();
-        let parent_relative = inside.parent().ok_or_else(invalid_path)?;
-        for component in parent_relative.components() {
-            parent.push(component);
-            match fs::symlink_metadata(&parent).await {
-                Ok(metadata) if metadata.is_symlink() || !metadata.is_dir() => {
-                    return Err(invalid_path());
-                }
-                Ok(_) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                    match fs::create_dir(&parent).await {
-                        Ok(()) => {}
-                        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                            let metadata = fs::symlink_metadata(&parent).await?;
-                            if metadata.is_symlink() || !metadata.is_dir() {
-                                return Err(invalid_path());
-                            }
-                        }
-                        Err(error) => return Err(error.into()),
-                    }
-                }
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Ok((destination, output, relative))
+        let paths = output_location(root, torrent, &torrent.files(), download)?;
+        create_parent_directories(root, &paths.1).await?;
+        Ok(paths)
     }
 
     pub(crate) async fn prepare_download(
@@ -248,6 +182,88 @@ impl Engine {
         };
         Ok(backend)
     }
+}
+
+/// The destination directory, the output file and its path relative to the destination of a
+/// download of `torrent`, whose parsed provider files are `files`. Touches no filesystem.
+pub(crate) fn output_location(
+    root: &Path,
+    torrent: &Torrent,
+    files: &[RemoteFile],
+    download: &Download,
+) -> Result<(PathBuf, PathBuf, String), EngineError> {
+    if root.as_os_str().is_empty() {
+        return Err(invalid_path());
+    }
+    let name = torrent
+        .rd_name
+        .as_deref()
+        .map(paths::remove_invalid_file_name_chars)
+        .filter(|name| !name.trim().is_empty() && name != ".")
+        .ok_or_else(invalid_path)?;
+    let category = torrent
+        .category
+        .as_deref()
+        .map(paths::remove_invalid_file_name_chars)
+        .filter(|name| !name.trim().is_empty() && name != ".");
+    let destination = category
+        .as_ref()
+        .map_or_else(|| root.to_path_buf(), |category| root.join(category));
+    let safe_download = Download {
+        link: download.link.clone(),
+        file_name: paths::file_name(download),
+        ..Download::default()
+    };
+    if safe_download
+        .file_name
+        .as_deref()
+        .is_none_or(|name| name.trim().is_empty() || name == ".")
+    {
+        return Err(invalid_path());
+    }
+    let relative =
+        paths::relative_download_path_in(&name, files, &safe_download).ok_or_else(invalid_path)?;
+    let output = destination.join(&relative);
+    let inside = output.strip_prefix(root).map_err(|_| invalid_path())?;
+    if inside
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(invalid_path());
+    }
+    Ok((destination, output, relative))
+}
+
+/// Creates the directories between `root` and `output`, refusing symlinked or non-directory
+/// parents.
+async fn create_parent_directories(root: &Path, output: &Path) -> Result<(), EngineError> {
+    let inside = output.strip_prefix(root).map_err(|_| invalid_path())?;
+    fs::create_dir_all(root).await?;
+    let mut parent = root.to_path_buf();
+    let parent_relative = inside.parent().ok_or_else(invalid_path)?;
+    for component in parent_relative.components() {
+        parent.push(component);
+        match fs::symlink_metadata(&parent).await {
+            Ok(metadata) if metadata.is_symlink() || !metadata.is_dir() => {
+                return Err(invalid_path());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match fs::create_dir(&parent).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        let metadata = fs::symlink_metadata(&parent).await?;
+                        if metadata.is_symlink() || !metadata.is_dir() {
+                            return Err(invalid_path());
+                        }
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 fn invalid_path() -> EngineError {

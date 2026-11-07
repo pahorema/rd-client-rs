@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use url::Url;
 
-use crate::{Download, DownloadInfo, Torrent};
+use crate::{Download, DownloadInfo, RemoteFile, Torrent};
 
 /// Whether the platform forbids `c` in a path (Unix: NUL; Windows: NUL,
 /// the other control characters and `|`).
@@ -97,7 +97,7 @@ pub fn download_path(
     let directory = remove_invalid_path_chars(rd_name);
     let mut path = base.to_path_buf();
     push_components(&mut path, &directory);
-    if let Some(sub_directory) = sub_directory(torrent, &file_name, &directory) {
+    if let Some(sub_directory) = sub_directory(&torrent.files(), &file_name, &directory) {
         push_components(&mut path, &sub_directory);
     }
     fs::create_dir_all(&path)?;
@@ -118,13 +118,23 @@ pub fn download_path(
 /// Returns `None` when the torrent has no name, the download has no
 /// unrestricted link or no file name can be derived.
 pub fn relative_download_path(torrent: &Torrent, download: &Download) -> Option<String> {
-    let rd_name = torrent.rd_name.as_deref()?;
+    relative_download_path_in(torrent.rd_name.as_deref()?, &torrent.files(), download)
+}
+
+/// [`relative_download_path`] of a torrent named `rd_name` whose provider
+/// files are `files`, for callers that resolve many downloads of a torrent
+/// with one parse of [`Torrent::files`].
+pub fn relative_download_path_in(
+    rd_name: &str,
+    files: &[RemoteFile],
+    download: &Download,
+) -> Option<String> {
     let link = non_blank(download.link.as_deref())?;
     let file_name = raw_file_name(download, link)?;
     let directory = remove_invalid_path_chars(rd_name);
     let mut path = PathBuf::new();
     push_components(&mut path, &directory);
-    if let Some(sub_directory) = sub_directory(torrent, &file_name, &directory) {
+    if let Some(sub_directory) = sub_directory(files, &file_name, &directory) {
         push_components(&mut path, &sub_directory);
     }
     push_components(&mut path, &file_name);
@@ -208,11 +218,10 @@ fn push_components(path: &mut PathBuf, relative: &str) {
 /// The provider sub-directories of the first provider file whose path ends
 /// with `file_name`, without a leading directory equal to the torrent
 /// directory. A blank `file_name` matches nothing.
-fn sub_directory(torrent: &Torrent, file_name: &str, directory: &str) -> Option<String> {
+fn sub_directory(files: &[RemoteFile], file_name: &str, directory: &str) -> Option<String> {
     if file_name.trim().is_empty() {
         return None;
     }
-    let files = torrent.files();
     let file = files
         .iter()
         .find(|file| !file.path.trim().is_empty() && file.path.ends_with(file_name))?;

@@ -1,6 +1,6 @@
 //! Archive scheduling, multi-volume readiness and extraction result persistence.
 
-use crate::{Engine, EngineError, registry::ActiveUnpack};
+use crate::{Engine, EngineError, download_runtime::output_location, registry::ActiveUnpack};
 use jiff::Timestamp;
 use rdc_archive::UnpackRequest;
 use rdc_model::{Download, DownloadClient, Provider, Torrent};
@@ -72,15 +72,17 @@ impl Engine {
         torrent: &Torrent,
         limit: usize,
     ) -> Result<(), EngineError> {
+        if !torrent.downloads.iter().any(awaits_unpack) {
+            return Ok(());
+        }
+        let settings = self.settings();
+        let root = Path::new(&settings.download_client.download_path);
+        let files = torrent.files();
         let mut groups: HashMap<PathBuf, Vec<&Download>> = HashMap::new();
         let mut unknown_pending = false;
         let mut unknown_failed = false;
         for download in &torrent.downloads {
-            if download.completed.is_none()
-                && download.unpacking_queued.is_some()
-                && download.unpacking_started.is_none()
-                && download.error.is_none()
-            {
+            if awaits_unpack(download) {
                 let Some(link) = download.link.as_deref() else {
                     self.fail_unpack(download.download_id, "Download Link cannot be null")
                         .await?;
@@ -109,7 +111,8 @@ impl Engine {
                 file_name: download.file_name.clone(),
                 ..Download::default()
             };
-            let (_, output, _) = self.output_paths(torrent, &identity).await?;
+            // Only the group that starts needs its directories; see `output_paths` below.
+            let (_, output, _) = output_location(root, torrent, &files, &identity)?;
             groups
                 .entry(rdc_archive::first_volume(&output))
                 .or_default()
@@ -127,12 +130,7 @@ impl Engine {
             let queued: Vec<_> = downloads
                 .iter()
                 .copied()
-                .filter(|download| {
-                    download.completed.is_none()
-                        && download.unpacking_queued.is_some()
-                        && download.unpacking_started.is_none()
-                        && download.error.is_none()
-                })
+                .filter(|download| awaits_unpack(download))
                 .collect();
             if queued.is_empty() {
                 continue;
@@ -287,6 +285,14 @@ impl Engine {
             .await?;
         Ok(())
     }
+}
+
+/// Whether the download is queued for unpacking and its unpacking has not started.
+fn awaits_unpack(download: &Download) -> bool {
+    download.completed.is_none()
+        && download.unpacking_queued.is_some()
+        && download.unpacking_started.is_none()
+        && download.error.is_none()
 }
 
 fn archive_trigger(path: &Path) -> bool {

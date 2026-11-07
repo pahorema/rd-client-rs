@@ -174,6 +174,43 @@ async fn a_full_download_slot_does_not_starve_selection_or_completion_of_other_t
 }
 
 #[tokio::test]
+async fn unpack_scheduling_touches_only_the_directories_of_started_work() {
+    let (test, factory) = fixture().await;
+    let torrent = add(&test, HASH, "one", &["a/one.bin", "b/two.bin"], template()).await;
+    test.fake.set_download_infos(
+        "one".to_owned(),
+        Some(
+            ["a/one.bin", "b/two.bin"]
+                .iter()
+                .map(|path| DownloadInfo {
+                    file_name: path.rsplit('/').next().map(str::to_owned),
+                    restricted_link: format!("https://example.invalid/{path}"),
+                })
+                .collect(),
+        ),
+    );
+    test.engine.tick_once().await.expect("create");
+    test.engine.tick_once().await.expect("start");
+    let folder = std::path::PathBuf::from(&test.engine.settings().download_client.download_path)
+        .join("Example");
+    assert!(folder.join("a").is_dir());
+    assert!(!folder.join("b").exists());
+    // A broken directory of a download that has not started fails neither the torrent nor
+    // the extraction step of its finished sibling.
+    fs::write(folder.join("b"), b"not a directory")
+        .await
+        .expect("blocking file");
+    finish(&test, &factory, 0, b"done").await;
+    test.engine.tick_once().await.expect("unpack");
+    let current = current(&test, torrent.torrent_id).await;
+    assert_eq!(current.error, None);
+    assert!(current.completed.is_none());
+    assert!(current.downloads[0].completed.is_some());
+    assert_eq!(current.downloads[0].error, None);
+    test.engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_slow_symlink_start_does_not_hold_up_other_torrents() {
     let (test, factory) = fixture().await;
     let slow = FakeDownloadEngine::new();
