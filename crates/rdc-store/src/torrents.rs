@@ -150,6 +150,15 @@ impl<'store> Torrents<'store> {
         Ok(Some(torrent))
     }
 
+    /// The torrent with this id alone, without its downloads and payload.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors and undecodable rows.
+    pub async fn get_row(&self, torrent_id: Uuid) -> Result<Option<Torrent>> {
+        row_by_id(self.pool, torrent_id).await
+    }
+
     /// The first torrent whose hash equals `hash` lower-cased, with its
     /// downloads but without its payload.
     ///

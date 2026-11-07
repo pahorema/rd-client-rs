@@ -27,7 +27,7 @@ mod operation_tests;
 
 /// Queue waits are capped even when a caller requests a longer interval.
 const MAX_DEQUEUE_WAIT: Duration = Duration::from_secs(90);
-/// Polling only reads local rows and does not force provider requests.
+/// Polling only reads the torrent's own row and does not force provider requests.
 const DEQUEUE_POLL: Duration = Duration::from_millis(100);
 
 impl Engine {
@@ -751,7 +751,7 @@ impl Engine {
     ) -> Result<WaitOutcome, EngineError> {
         let wait = async {
             loop {
-                let Some(torrent) = self.inner.store.torrents().get(torrent_id).await? else {
+                let Some(torrent) = self.inner.store.torrents().get_row(torrent_id).await? else {
                     return Ok(WaitOutcome::Missing);
                 };
                 if torrent.rd_id.is_some() {

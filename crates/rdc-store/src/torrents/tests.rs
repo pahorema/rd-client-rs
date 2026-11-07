@@ -112,6 +112,20 @@ async fn incomplete_listing_and_payloadless_get_skip_what_they_do_not_need() {
         .expect("torrent");
     assert_eq!(state.payload, None);
     assert_eq!(state.downloads, torrents[0].downloads);
+    let row = store
+        .torrents()
+        .get_row(id(SECOND))
+        .await
+        .expect("get row")
+        .expect("torrent");
+    assert_eq!(row.downloads, []);
+    assert_eq!(
+        Torrent {
+            downloads: state.downloads.clone(),
+            ..row
+        },
+        state
+    );
 }
 
 #[tokio::test]
