@@ -22,6 +22,7 @@
 		optionLabel,
 		providerStatusLabel
 	} from '#lib/labels.js';
+	import { Latest } from '#lib/latest.js';
 	import { live } from '#lib/live.svelte.js';
 	import { downloadStatusText } from '#lib/status.js';
 	import { goto } from '$app/navigation';
@@ -35,6 +36,7 @@
 	import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
 	import Trash2Icon from '@lucide/svelte/icons/trash-2';
 	import XIcon from '@lucide/svelte/icons/x';
+	import { untrack } from 'svelte';
 	import { SvelteSet } from 'svelte/reactivity';
 
 	let detail = $state<Torrent | null>(null);
@@ -50,21 +52,44 @@
 	const expanded = new SvelteSet<string>();
 
 	const torrentId = $derived(page.params.id ?? '');
+	const loads = new Latest();
+	// Files count the reload below was last made for, so a mismatch never reloads in a loop.
+	let filesReloadedFor: number | null = null;
+
+	function load(id: string) {
+		// Moving to another torrent reuses this page; only the latest reply is shown.
+		const current = loads.next();
+		torrentsApi
+			.get(id)
+			.then((result) => current() && (detail = result))
+			.catch((e: unknown) => current() && (loadError = errorMessage(e)));
+	}
 
 	$effect(() => {
 		const id = torrentId;
 		detail = null;
 		loadError = null;
-		torrentsApi
-			.get(id)
-			.then((result) => (detail = result))
-			.catch((e: unknown) => (loadError = errorMessage(e)));
+		filesReloadedFor = null;
+		load(id);
+	});
+
+	const update = $derived(live.torrents?.find((t) => t.torrentId === torrentId));
+	// Shown once the live list no longer has the torrent, e.g. after another client deleted it.
+	const removed = $derived(detail != null && live.torrents != null && update == null);
+
+	// The provider reports files some time after the torrent was added; live updates only
+	// carry their count, so the detail is reloaded when it changes.
+	$effect(() => {
+		const count = update?.filesCount;
+
+		if (detail && count != null && count !== detail.files.length && count !== filesReloadedFor) {
+			filesReloadedFor = count;
+			untrack(() => load(torrentId));
+		}
 	});
 
 	// Live updates carry fresh state and downloads but no files or magnet.
 	const torrent = $derived.by(() => {
-		const update = live.torrents?.find((t) => t.torrentId === torrentId);
-
 		if (!detail || !update) {
 			return detail;
 		}
@@ -135,6 +160,20 @@
 {:else if !torrent}
 	<div class="flex justify-center py-16"><Spinner class="size-6 text-muted-foreground" /></div>
 {:else}
+	{#if removed}
+		<Alert.Root variant="destructive">
+			<CircleAlertIcon />
+			<Alert.Title>This torrent no longer exists</Alert.Title>
+			<Alert.Description>
+				<p>
+					It was deleted, possibly from another client. <a
+						href={resolve('')}
+						class="underline underline-offset-4">Back to the torrents</a
+					>
+				</p>
+			</Alert.Description>
+		</Alert.Root>
+	{/if}
 	<div class="flex flex-wrap items-start gap-3">
 		<div class="mr-auto grid min-w-0 gap-2">
 			<h1 class="text-xl font-semibold tracking-tight break-all">
