@@ -336,6 +336,31 @@ async fn an_archive_wrapping_an_old_style_set_is_unpacked_through_the_set() {
 }
 
 #[tokio::test]
+async fn a_wrapped_set_failing_to_unpack_keeps_the_wrapper_for_a_retry() {
+    let downloads = Downloads::new();
+    let archive = downloads.torrent.join("wrapper.zip");
+    let volumes: Vec<(&str, Vec<u8>)> = ["legacy.rar", "legacy.r00"]
+        .into_iter()
+        .map(|name| (name, fs::read(fixtures().join(name)).unwrap()))
+        .collect();
+    let entries: Vec<(&str, &[u8])> = volumes
+        .iter()
+        .map(|(name, content)| (*name, content.as_slice()))
+        .collect();
+    write_zip(&archive, &entries);
+
+    let error = run(downloads.request(&archive)).await.unwrap_err();
+
+    assert!(matches!(error, Error::Read { .. }), "{error}");
+    assert_eq!(files_below(&downloads.destination), ["Show/wrapper.zip"]);
+    let folders: Vec<_> = fs::read_dir(&downloads.torrent)
+        .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().path().is_dir())
+        .collect();
+    assert!(folders.is_empty(), "temporary folder left: {folders:?}");
+}
+
+#[tokio::test]
 async fn a_name_merely_containing_r00_is_not_taken_for_a_wrapped_set() {
     let downloads = Downloads::new();
     let archive = downloads.torrent.join("show.zip");

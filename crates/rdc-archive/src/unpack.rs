@@ -50,10 +50,12 @@ pub struct UnpackRequest {
 ///    the archive is extracted into `destination`; otherwise into `destination/<name>`, so no
 ///    entry can reach the files of other torrents in `destination`.
 /// 3. When an entry has the `.r00` extension, the archive wraps an old-style RAR set: it is
-///    extracted into a fresh temporary folder inside the extraction folder and deleted, then
-///    each wrapped set (found through its `.r00` volume at the top of that folder) is
-///    extracted from its `.rar` volume, and the temporary folder is removed. Without any
-///    top-level `.r00` volume the temporary folder is kept, so its content is not lost.
+///    extracted into a fresh temporary folder inside the extraction folder, then each wrapped
+///    set (found through its `.r00` volume at the top of that folder) is extracted from its
+///    `.rar` volume. Only then are the archive deleted and the temporary folder removed; when a
+///    step fails, the temporary folder is removed and the archive kept, so a retry starts over.
+///    Without any top-level `.r00` volume the temporary folder is kept, so its content is not
+///    lost.
 /// 4. Otherwise the archive is extracted and deleted. For a multi-volume set, its other
 ///    volumes are deleted as well.
 /// 5. With [`flatten_hash_dir`](UnpackRequest::flatten_hash_dir) set and a `<hash>` folder in
@@ -142,25 +144,16 @@ where
     if wraps_set {
         let temp = extract_path.join(Uuid::new_v4().to_string());
         fs::create_dir_all(&temp).map_err(Error::io("create directory", &temp))?;
-        extract(
-            archive,
-            &temp,
-            |percent| progress.report(percent / 2),
-            cancel,
-        )?;
-        delete_archive(archive, inspection.volume)?;
-        let wrapped = wrapped_sets(&temp)?;
-        for second_volume in &wrapped {
-            let first_volume = second_volume.with_extension("rar");
-            if first_volume.is_file() {
-                extract(
-                    &first_volume,
-                    &extract_path,
-                    |percent| progress.report(50 + percent / 2),
-                    cancel,
-                )?;
+        let wrapped = match unpack_wrapped(archive, &temp, &extract_path, &mut progress, cancel) {
+            Ok(wrapped) => wrapped,
+            Err(error) => {
+                if let Err(cleanup) = fs::remove_dir_all(&temp) {
+                    warn!(folder = %temp.display(), error = %cleanup, "temporary folder kept");
+                }
+                return Err(error);
             }
-        }
+        };
+        delete_archive(archive, inspection.volume)?;
         if !wrapped.is_empty() {
             remove_with_retry(&temp, |path| fs::remove_dir_all(path), "remove directory")?;
         }
@@ -178,6 +171,39 @@ where
     }
     progress.report(100);
     Ok(())
+}
+
+/// Extracts `archive` into `temp`, then each old-style set found at the top of `temp` into
+/// `extract_path`, and returns the `.r00` volumes of the sets found; see step 3 of [`unpack`].
+fn unpack_wrapped<F>(
+    archive: &Path,
+    temp: &Path,
+    extract_path: &Path,
+    progress: &mut Monotonic<F>,
+    cancel: &CancellationToken,
+) -> Result<Vec<PathBuf>, Error>
+where
+    F: FnMut(u8) + Send,
+{
+    extract(
+        archive,
+        temp,
+        |percent| progress.report(percent / 2),
+        cancel,
+    )?;
+    let wrapped = wrapped_sets(temp)?;
+    for second_volume in &wrapped {
+        let first_volume = second_volume.with_extension("rar");
+        if first_volume.is_file() {
+            extract(
+                &first_volume,
+                extract_path,
+                |percent| progress.report(50 + percent / 2),
+                cancel,
+            )?;
+        }
+    }
+    Ok(wrapped)
 }
 
 /// Moves the content of `<extract_path>/<hash>/<first sub-folder>/` up one or two levels, see
