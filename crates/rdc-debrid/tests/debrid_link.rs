@@ -673,6 +673,18 @@ async fn provider_selects_every_file_without_a_request() {
 }
 
 #[tokio::test]
+async fn provider_waits_with_the_selection_until_files_are_known() {
+    let server = MockServer::start().await;
+
+    let selected = provider(&server)
+        .select_files(&torrent_with_files(&[]))
+        .await
+        .expect("selection");
+
+    assert_eq!(selected, None);
+}
+
+#[tokio::test]
 async fn provider_links_are_already_unrestricted_and_nothing_is_cached() {
     let server = MockServer::start().await;
     let provider = provider(&server);

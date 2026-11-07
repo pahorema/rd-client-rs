@@ -281,9 +281,11 @@ impl DebridProvider for DebridLink {
         Ok(Vec::new())
     }
 
-    /// Every file of a seedbox torrent is downloaded, so nothing is sent.
+    /// Every file of a seedbox torrent is downloaded, so nothing is sent;
+    /// selection waits until the file list is known.
     async fn select_files(&self, torrent: &Torrent) -> Result<Option<usize>, DebridError> {
-        Ok(Some(torrent.files().len()))
+        let count = torrent.files().len();
+        Ok((count > 0).then_some(count))
     }
 
     async fn delete(&self, torrent: &Torrent) -> Result<(), DebridError> {
