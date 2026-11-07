@@ -136,9 +136,8 @@ impl Engine {
         template: TorrentTemplate,
         retry_count: Option<i32>,
     ) -> Result<Torrent, EngineError> {
-        let parsed = TorrentFile::parse(bytes).map_err(|error| {
-            EngineError::Message(format!("{error}, trying to parse {}", BASE64.encode(bytes)))
-        })?;
+        let parsed =
+            TorrentFile::parse(bytes).map_err(|error| torrent_parse_error(&error, bytes))?;
         let settings = self.settings();
         if let Some(error) = rdc_torrent::banned_torrent_error(
             settings
@@ -713,9 +712,8 @@ impl Engine {
         &self,
         bytes: &[u8],
     ) -> Result<Vec<AvailableFile>, EngineError> {
-        let parsed = TorrentFile::parse(bytes).map_err(|error| {
-            EngineError::Message(format!("{error}, trying to parse {}", BASE64.encode(bytes)))
-        })?;
+        let parsed =
+            TorrentFile::parse(bytes).map_err(|error| torrent_parse_error(&error, bytes))?;
         self.available_files(&parsed.info_hash_hex()).await
     }
 
@@ -750,6 +748,14 @@ impl Engine {
             result = time::timeout(timeout.min(MAX_DEQUEUE_WAIT), wait) => result.unwrap_or(Ok(WaitOutcome::TimedOut)),
         }
     }
+}
+
+/// Describes invalid torrent metadata by its size; the bytes themselves can be megabytes.
+fn torrent_parse_error(error: &impl std::fmt::Display, bytes: &[u8]) -> EngineError {
+    EngineError::Message(format!(
+        "{error}, trying to parse a {}-byte torrent file",
+        bytes.len()
+    ))
 }
 
 fn is_queued(torrent: &Torrent) -> bool {

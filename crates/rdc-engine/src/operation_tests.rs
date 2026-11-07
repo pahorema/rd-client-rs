@@ -916,7 +916,7 @@ async fn availability_parses_magnets_and_metadata_without_creating_rows() {
 }
 
 #[tokio::test]
-async fn parse_errors_include_the_submitted_payload() {
+async fn parse_errors_name_the_magnet_but_not_the_torrent_bytes() {
     let test = TestEngine::with_settings(settings()).await.unwrap();
     let magnet_error = test
         .engine
@@ -931,7 +931,15 @@ async fn parse_errors_include_the_submitted_payload() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(file_error.ends_with(&format!(", trying to parse {}", BASE64.encode(b"invalid"))));
+    assert!(file_error.ends_with(", trying to parse a 7-byte torrent file"));
+    assert!(!file_error.contains(&BASE64.encode(b"invalid")));
+    let availability_error = test
+        .engine
+        .available_files_for_torrent(b"invalid")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(availability_error, file_error);
     test.engine.pause("missing").await.unwrap();
     test.engine.resume("missing").await.unwrap();
 }
