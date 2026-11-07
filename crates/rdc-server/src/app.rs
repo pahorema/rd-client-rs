@@ -1,9 +1,6 @@
 //! HTTP router assembly and shared application dependencies.
 
-use std::{
-    fmt::{self, Display},
-    sync::{Arc, Mutex},
-};
+use std::fmt::{self, Display};
 
 use axum::{Json, Router, extract::rejection::JsonRejection, http::StatusCode, middleware};
 use rdc_engine::Engine;
@@ -43,8 +40,8 @@ pub(crate) struct AppState {
     pub(crate) store: Store,
     pub(crate) sessions: Sessions,
     pub(crate) policy: AuthPolicy,
-    /// Number of currently connected event streams.
-    pub(crate) connections: Arc<Mutex<usize>>,
+    /// Torrent list updates shared by the open event streams.
+    pub(crate) updates: events::Updates,
     /// Ends open event streams during graceful shutdown.
     pub(crate) shutdown: CancellationToken,
 }
@@ -181,7 +178,7 @@ pub fn build(
         store,
         sessions,
         policy,
-        connections: Arc::new(Mutex::new(0)),
+        updates: events::Updates::default(),
         shutdown,
     };
     AppBuilder::new(base_path, logs)

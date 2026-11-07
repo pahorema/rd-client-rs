@@ -1,6 +1,6 @@
 //! Router assembly, path handling, API errors, and embedded web assets.
 
-use std::{any::Any, fmt, sync::Arc};
+use std::{any::Any, fmt, future::IntoFuture, sync::Arc, time::Duration};
 
 use axum::{
     Router,
@@ -22,6 +22,9 @@ const DEFAULT_BODY_LIMIT: usize = 64 * 1024;
 pub(crate) const UPLOAD_BODY_LIMIT: usize = 30_000_000;
 /// Largest request body echoed by debug request logging.
 const LOGGED_BODY_LIMIT: u64 = 64 * 1024;
+/// How long open connections may take to finish once shutdown begins; below the 10
+/// seconds `docker stop` waits before killing the process.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Plain-text handler error retaining its body under every application prefix.
 #[derive(Debug)]
@@ -530,7 +533,8 @@ fn asset_response(name: &str, bytes: std::borrow::Cow<'static, [u8]>) -> Respons
 /// Serve on every IPv4 interface until Ctrl-C or a termination signal arrives.
 ///
 /// `shutdown` is cancelled when the signal arrives, before open connections are drained, so
-/// long-lived responses such as event streams can end.
+/// long-lived responses such as event streams can end. Connections still open after a few
+/// seconds, such as a client that stopped reading, are closed.
 ///
 /// # Errors
 /// Returns bind or server I/O errors.
@@ -540,15 +544,32 @@ pub async fn serve(
     shutdown: tokio_util::sync::CancellationToken,
 ) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?;
-    axum::serve(
+    serve_until(listener, app, shutdown, shutdown_signal(), DRAIN_TIMEOUT).await
+}
+
+async fn serve_until(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    shutdown: tokio_util::sync::CancellationToken,
+    signal: impl Future<Output = ()> + Send + 'static,
+    drain: Duration,
+) -> anyhow::Result<()> {
+    let stop = shutdown.clone();
+    let server = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        shutdown_signal().await;
-        shutdown.cancel();
-    })
-    .await?;
+        signal.await;
+        stop.cancel();
+    });
+    tokio::select! {
+        result = server.into_future() => result?,
+        () = async {
+            shutdown.cancelled().await;
+            tokio::time::sleep(drain).await;
+        } => tracing::warn!("Closing connections still open {drain:?} after shutdown began"),
+    }
     Ok(())
 }
 
@@ -574,6 +595,43 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_closes_a_response_the_client_stopped_reading() {
+        use tokio::io::AsyncWriteExt;
+
+        let endless = || async {
+            Body::from_stream(tokio_stream::iter(std::iter::repeat_with(|| {
+                Ok::<_, std::convert::Infallible>(axum::body::Bytes::from(vec![b'x'; 64 * 1024]))
+            })))
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop, signal) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve_until(
+            listener,
+            Router::new().route("/", get(endless)),
+            tokio_util::sync::CancellationToken::new(),
+            async {
+                let _ = signal.await;
+            },
+            Duration::from_millis(200),
+        ));
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        // Never read, so the server's writes back up.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        stop.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("shutdown waits for the stalled response")
+            .unwrap()
+            .unwrap();
+        drop(client);
+    }
 
     #[test]
     fn embedded_assets_have_mime_types_and_appropriate_cache_policies() {
