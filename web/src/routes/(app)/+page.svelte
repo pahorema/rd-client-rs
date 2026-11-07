@@ -210,7 +210,14 @@
 						/>
 					</Table.Head>
 					{#each columns as column (column.field)}
-						<Table.Head class={column.class}>
+						<Table.Head
+							class={column.class}
+							aria-sort={sort.field !== column.field
+								? 'none'
+								: sort.direction === 'asc'
+									? 'ascending'
+									: 'descending'}
+						>
 							<button
 								type="button"
 								class={cn(
