@@ -265,34 +265,41 @@ async fn protected_request(
         "torrents/info" | "torrents/count" => {
             let settings = engine.settings();
             let torrents = engine.torrents().await.map_err(internal)?;
+            let count = name == "torrents/count";
+            let category = params
+                .get("category")
+                .filter(|value| !count && !value.trim().is_empty())
+                .map(str::to_owned);
             let hashes: BTreeSet<String> = params
                 .get("hashes")
+                .filter(|_| !count)
                 .unwrap_or_default()
                 .split('|')
                 .filter(|v| !v.is_empty())
                 .map(str::to_ascii_lowercase)
                 .collect();
-            let infos: Vec<Value> = torrents
-                .iter()
-                .enumerate()
-                .map(|(index, torrent)| models::info(torrent, engine, &settings, index + 1))
-                .filter(|item| models::matches_filter(item, params.get("filter")))
-                .filter(|item| {
-                    name == "torrents/count"
-                        || params
-                            .get("category")
-                            .filter(|v| !v.trim().is_empty())
-                            .is_none_or(|value| item["category"] == value)
-                })
-                .filter(|item| {
-                    name == "torrents/count"
-                        || hashes.is_empty()
-                        || item["hash"]
-                            .as_str()
-                            .is_some_and(|hash| hashes.contains(&hash.to_ascii_lowercase()))
-                })
-                .collect();
-            if name == "torrents/count" {
+            let filter = params.get("filter").map(str::to_owned);
+            let engine = engine.clone();
+            // Content paths of completed torrents look at the download directory.
+            let infos = tokio::task::spawn_blocking(move || {
+                torrents
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, torrent)| {
+                        category.as_deref().is_none_or(|category| {
+                            torrent.category.as_deref().unwrap_or_default() == category
+                        })
+                    })
+                    .filter(|(_, torrent)| {
+                        hashes.is_empty() || hashes.contains(&torrent.hash.to_ascii_lowercase())
+                    })
+                    .map(|(index, torrent)| models::info(torrent, &engine, &settings, index + 1))
+                    .filter(|item| models::matches_filter(item, filter.as_deref()))
+                    .collect::<Vec<Value>>()
+            })
+            .await
+            .map_err(internal)?;
+            if count {
                 Ok(Json(json!(infos.len())).into_response())
             } else {
                 Ok(Json(infos).into_response())
@@ -457,7 +464,13 @@ async fn protected_request(
         "torrents/tags" => Ok(Json(json!([])).into_response()),
         "sync/maindata" => {
             let torrents = engine.torrents().await.map_err(internal)?;
-            Ok(Json(models::sync(&torrents, engine, &engine.settings())).into_response())
+            let engine = engine.clone();
+            let main = tokio::task::spawn_blocking(move || {
+                models::sync(&torrents, &engine, &engine.settings())
+            })
+            .await
+            .map_err(internal)?;
+            Ok(Json(main).into_response())
         }
         "transfer/info" => Ok(Json(models::transfer(engine)).into_response()),
         _ => Ok(StatusCode::NOT_FOUND.into_response()),

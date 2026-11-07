@@ -718,6 +718,80 @@ async fn http_torrent_url_uses_requested_priority() {
 }
 
 #[tokio::test]
+async fn info_filters_by_hash_and_category_keep_list_positions() {
+    let fixture = Fixture::new(Settings::default()).await;
+    for (magnet, category) in [(MAGNET1, "movies"), (MAGNET2, "tv")] {
+        fixture
+            .test
+            .engine
+            .add_magnet(
+                magnet,
+                TorrentTemplate {
+                    category: Some(category.to_owned()),
+                    ..TorrentTemplate::default()
+                },
+            )
+            .await
+            .unwrap();
+    }
+    let app = fixture.app("");
+    let cookie = fixture.login(&app, "", "/api/v2").await;
+    let get = |query: &'static str| {
+        let app = app.clone();
+        let cookie = cookie.clone();
+        async move {
+            json_response(
+                call(
+                    &app,
+                    Method::GET,
+                    &format!("/api/v2/torrents/info{query}"),
+                    Some(&cookie),
+                    None,
+                    Body::empty(),
+                )
+                .await,
+            )
+            .await
+        }
+    };
+    // Only stable fields: others carry the current time.
+    let identities = |items: Value| {
+        items
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| (item["hash"].clone(), item["priority"].clone()))
+            .collect::<Vec<_>>()
+    };
+    let all = get("").await;
+    assert_eq!(all.as_array().unwrap().len(), 2);
+    let tv = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["category"] == "tv")
+        .unwrap()
+        .clone();
+    let expected = identities(json!([tv]));
+    assert_eq!(identities(get("?category=tv").await), expected);
+    let hash = tv["hash"].as_str().unwrap().to_ascii_uppercase();
+    let by_hash = json_response(
+        call(
+            &app,
+            Method::GET,
+            &format!("/api/v2/torrents/info?hashes=0000|{hash}"),
+            Some(&cookie),
+            None,
+            Body::empty(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(identities(by_hash), expected);
+    assert_eq!(get("?category=music").await, json!([]));
+}
+
+#[tokio::test]
 async fn http_torrent_url_failures_are_capped_and_generic() {
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
