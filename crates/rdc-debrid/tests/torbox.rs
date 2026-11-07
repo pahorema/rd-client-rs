@@ -421,10 +421,30 @@ async fn listing_reads_pages_until_one_that_is_not_full() {
 }
 
 #[tokio::test]
-async fn listing_skips_missing_lists() {
+async fn listing_without_a_torrent_list_is_an_error() {
+    for response in [json(&data("null")), ResponseTemplate::new(204)] {
+        let (server, client) = client().await;
+        Mock::given(method("GET"))
+            .and(path("/torrents/mylist"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+        mount_queued(&server, None, data("[]")).await;
+
+        let error = client.list_torrents().await.expect_err("no torrent list");
+
+        assert!(
+            matches!(error, DebridError::InvalidResponse(_)),
+            "{error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn listing_takes_a_queue_without_data_as_empty() {
     let (server, client) = client().await;
-    mount_mylist(&server, None, data("null")).await;
-    mount_queued(&server, None, data("[]")).await;
+    mount_mylist(&server, None, data("[]")).await;
+    mount_queued(&server, None, data("null")).await;
 
     assert_eq!(client.list_torrents().await.expect("list"), Vec::new());
 }

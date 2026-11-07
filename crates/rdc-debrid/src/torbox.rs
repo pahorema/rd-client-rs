@@ -135,9 +135,12 @@ impl TorBox {
 
     /// Lists the torrents of the account followed by its queued torrents
     /// (queued torrents have their own ids), each read page by page.
+    ///
+    /// A torrent page without data is a failed listing, never an account
+    /// without torrents; a queue page without data is an empty queue.
     pub async fn list_torrents(&self) -> Result<Vec<RemoteTorrent>, DebridError> {
         let current: Vec<TorrentInfo> = self
-            .pages(|offset, limit| {
+            .pages(MissingPage::Failure, |offset, limit| {
                 self.request(
                     Method::GET,
                     "torrents/mylist",
@@ -150,7 +153,9 @@ impl TorBox {
             })
             .await?;
         let queued: Vec<QueuedTorrent> = self
-            .pages(|offset, limit| self.queued_request(&[("offset", offset), ("limit", limit)]))
+            .pages(MissingPage::Empty, |offset, limit| {
+                self.queued_request(&[("offset", offset), ("limit", limit)])
+            })
             .await?;
         Ok(current
             .into_iter()
@@ -160,19 +165,26 @@ impl TorBox {
     }
 
     /// Every item of a listing read in pages of [`PAGE_SIZE`] until a page
-    /// that is not full; `page` builds the request for an offset and a limit.
+    /// that is not full; `page` builds the request for an offset and a limit
+    /// and `missing` says what a page without data means.
     async fn pages<T: DeserializeOwned>(
         &self,
+        missing: MissingPage,
         page: impl Fn(&str, &str) -> Result<RequestBuilder, DebridError> + Send + Sync,
     ) -> Result<Vec<T>, DebridError> {
         let limit = PAGE_SIZE.to_string();
         let mut items = Vec::new();
         loop {
             let offset = items.len().to_string();
-            let found: Vec<T> = self
-                .call(|| page(&offset, &limit))
-                .await?
-                .unwrap_or_default();
+            let found: Vec<T> = match (self.call(|| page(&offset, &limit)).await?, missing) {
+                (Some(found), _) => found,
+                (None, MissingPage::Empty) => Vec::new(),
+                (None, MissingPage::Failure) => {
+                    return Err(DebridError::InvalidResponse(
+                        "TorBox did not return the torrent list".to_owned(),
+                    ));
+                }
+            };
             let full = found.len() >= PAGE_SIZE;
             items.extend(found);
             if !full {
@@ -526,6 +538,15 @@ impl TorBox {
             retry_after: DEFAULT_RATE_LIMIT_COOLDOWN,
         }
     }
+}
+
+/// What a listing page without data (HTTP 204 or `data: null`) means.
+#[derive(Debug, Clone, Copy)]
+enum MissingPage {
+    /// The listing failed.
+    Failure,
+    /// There are no more items.
+    Empty,
 }
 
 /// Why a single TorBox call failed.
