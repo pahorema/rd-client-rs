@@ -2,10 +2,15 @@
 //!
 //! Three naming schemes are recognised, case-insensitively:
 //! - `name.part1.rar`, `name.part2.rar`, … (zero padding of the first number is kept);
-//! - `name.rar`, `name.r00`, `name.r01`, … `name.r99`, `name.s00`, …;
+//! - `name.rar`, `name.r00`, `name.r01`, … `name.r99`, `name.s00`, … `name.y99`, as `UnRAR`
+//!   names old-style volumes past `.r99`; `.zNN` is left out because split ZIP archives use
+//!   `name.z01`, `name.z02`, …;
 //! - `name.001`, `name.002`, … (at least three digits).
 
 use std::path::{Path, PathBuf};
+
+/// Last extension letter of an old-style volume name (`.y99`); see the module documentation.
+const LAST_LEGACY_LETTER: u8 = b'y';
 
 /// Whether `path` is named like a volume of a multi-volume set other than its first one.
 ///
@@ -112,7 +117,10 @@ fn parse_legacy<'a>(path: &'a Path, name: &'a str) -> Option<VolumeName<'a>> {
             return None;
         };
         let letter = letter.to_ascii_lowercase();
-        if !(b'r'..=b'z').contains(&letter) || !tens.is_ascii_digit() || !ones.is_ascii_digit() {
+        if !(b'r'..=LAST_LEGACY_LETTER).contains(&letter)
+            || !tens.is_ascii_digit()
+            || !ones.is_ascii_digit()
+        {
             return None;
         }
         u32::from(letter - b'r') * 100 + u32::from(tens - b'0') * 10 + u32::from(ones - b'0') + 1
@@ -168,7 +176,7 @@ impl VolumeName<'_> {
                     let letter = u8::try_from(position / 100)
                         .ok()
                         .and_then(|offset| b'r'.checked_add(offset))
-                        .filter(|letter| *letter <= b'z')?;
+                        .filter(|letter| *letter <= LAST_LEGACY_LETTER)?;
                     format!("{}{:02}", char::from(letter), position % 100)
                 };
                 let ext = if upper { ext.to_ascii_uppercase() } else { ext };
@@ -244,7 +252,16 @@ mod tests {
         assert_eq!(volume.path(100).unwrap(), Path::new("a.r99"));
         assert_eq!(volume.path(101).unwrap(), Path::new("a.s00"));
         assert_eq!(parse(Path::new("a.s00")).unwrap().index, 101);
-        assert!(volume.path(901).is_none());
+        assert_eq!(volume.path(800).unwrap(), Path::new("a.y99"));
+        assert!(volume.path(801).is_none());
+    }
+
+    #[test]
+    fn split_zip_parts_are_not_taken_for_rar_volumes() {
+        for name in ["archive.z01", "archive.Z02", "archive.z99"] {
+            assert!(!is_non_first_volume(Path::new(name)), "{name}");
+            assert_eq!(first_volume(Path::new(name)), Path::new(name), "{name}");
+        }
     }
 
     #[test]
