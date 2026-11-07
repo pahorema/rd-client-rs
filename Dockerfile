@@ -1,17 +1,17 @@
 # syntax=docker/dockerfile:1.7
 
-ARG RUST_VERSION=1.99.1
-ARG ALPINE_VERSION=3.24
+# Base images are pinned by digest; Dependabot updates tags and digests together.
 
-FROM oven/bun:1-alpine AS web
+FROM oven/bun:1-alpine@sha256:4cf82f5686b196504fe119db3fcd9185b191f82ece82c40680e597228ec6070a AS web
 WORKDIR /src/web
 COPY web/package.json web/bun.lock ./
 RUN bun install --frozen-lockfile
 COPY web/ ./
 RUN bun run build
 
-FROM rust:${RUST_VERSION}-alpine${ALPINE_VERSION} AS server
-ARG RUST_VERSION
+# Keep the Rust version in step with rust-toolchain.toml.
+FROM rust:1.99.1-alpine3.24@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS server
+# Use the image's toolchain (its RUST_VERSION) instead of installing the channel again.
 ENV RUSTUP_TOOLCHAIN=${RUST_VERSION}
 RUN apk add --no-cache build-base cmake perl linux-headers
 WORKDIR /src
@@ -27,7 +27,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM scratch AS binary
 COPY --from=server /out/rd-client /rd-client
 
-FROM alpine:${ALPINE_VERSION}
+FROM alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a
 RUN apk add --no-cache ca-certificates su-exec tzdata \
     && mkdir -p /data/db /data/downloads
 COPY --from=server /out/rd-client /app/rd-client
