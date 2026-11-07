@@ -89,9 +89,9 @@ pub(crate) fn inspect(archive: &Path) -> Result<Inspection, Error> {
 /// and existing files are replaced. Entries that would end up outside `destination` (absolute
 /// names, `..` escapes, paths through symbolic links) make the extraction fail with
 /// [`Error::UnsafeEntry`], and RAR entries that are links or copies of other files (symbolic and
-/// hard links, junctions, file copies) with [`Error::UnsupportedEntry`], both before anything is
-/// written. `on_progress` receives the percentage of uncompressed bytes written so far, each
-/// value once and in increasing order, ending with 100 on success.
+/// hard links, junctions, file copies) or encrypted with [`Error::UnsupportedEntry`], both before
+/// anything is written. `on_progress` receives the percentage of uncompressed bytes written so
+/// far, each value once and in increasing order, ending with 100 on success.
 ///
 /// `cancel` is checked between entries, and for ZIP archives also while an entry is written; a
 /// RAR entry, once started, is written to the end. A cancelled extraction fails with

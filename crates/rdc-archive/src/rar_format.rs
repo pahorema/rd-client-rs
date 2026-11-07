@@ -52,13 +52,15 @@ fn entry_name(path: &Path) -> String {
     }
 }
 
-/// Refuses entries the library would not write from their own data.
+/// Refuses entries the library would not write from their own data, or could not write at all.
 ///
 /// Links and file copies are never extracted: the library resolves the source of a hard link or
 /// file copy against the process's working directory, so such an entry could copy any server file
-/// into the destination, and a symbolic link could point anywhere.
+/// into the destination, and a symbolic link could point anywhere. Encrypted entries need a
+/// password the unpack never has; refusing them up front avoids a half-written destination.
 fn ensure_extractable(header: &FileHeader, name: &str) -> Result<(), Error> {
     let reason = match header.redirection {
+        Redirection::None if header.is_encrypted() => "it is encrypted",
         Redirection::None => return Ok(()),
         Redirection::UnixSymlink | Redirection::WindowsSymlink => "it is a symbolic link",
         Redirection::Junction => "it is a directory junction",

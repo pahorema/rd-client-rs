@@ -300,3 +300,22 @@ fn a_link_name_padded_with_empty_components_is_refused_by_name() {
     );
     assert!(!destination.exists());
 }
+
+#[test]
+fn encrypted_rar_entries_are_refused_before_anything_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("encrypted.rar");
+    Rar5::new()
+        .file("readme.txt", b"harmless")
+        .encrypted("Movie.mkv", &[0x42; 32])
+        .write(&archive);
+    let destination = dir.path().join("out");
+
+    let error = extract_all(&archive, &destination).unwrap_err();
+
+    assert!(
+        matches!(&error, Error::UnsupportedEntry { entry, reason } if entry == "Movie.mkv" && reason.contains("encrypted")),
+        "{error}"
+    );
+    assert!(!destination.exists());
+}

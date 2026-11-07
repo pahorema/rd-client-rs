@@ -22,7 +22,8 @@ const HFL_DATA: u64 = 0x2;
 /// File flag: the data CRC32 is present.
 const FHFL_CRC32: u64 = 0x4;
 
-/// Extra record type of a file header: file-system redirection.
+/// Extra record types of a file header: encryption / file-system redirection.
+const FHEXTRA_CRYPT: u64 = 0x1;
 const FHEXTRA_REDIR: u64 = 0x5;
 
 /// Host OS of the entries: Unix, whose attributes are a `st_mode`.
@@ -70,6 +71,18 @@ impl Rar5 {
         vint(len(target.as_bytes()), &mut record);
         record.extend_from_slice(target.as_bytes());
         self.entry(name, &[], &extra_record(&record))
+    }
+
+    /// Adds a file marked as AES-256 encrypted (version 0, no password check, 2^15 key
+    /// iterations, fixed salt and IV); the tests never decrypt it.
+    pub(crate) fn encrypted(self, name: &str, data: &[u8]) -> Self {
+        let mut record = Vec::new();
+        vint(FHEXTRA_CRYPT, &mut record);
+        vint(0, &mut record);
+        vint(0, &mut record);
+        record.push(15);
+        record.extend_from_slice(&[0x5a; 32]);
+        self.entry(name, data, &extra_record(&record))
     }
 
     /// Ends the archive and writes it to `path`.
