@@ -184,7 +184,7 @@ async fn finished_action_waits_for_its_delay_and_symlink_torrents_keep_provider_
 }
 
 #[tokio::test]
-async fn provider_only_removal_runs_once_and_keeps_the_row_as_deleted() {
+async fn provider_only_removal_runs_once_and_keeps_a_successful_torrent_clean() {
     let (test, factory) = fixture().await;
     let torrent = add(
         &test,
@@ -193,6 +193,7 @@ async fn provider_only_removal_runs_once_and_keeps_the_row_as_deleted() {
         &["file.bin"],
         TorrentTemplate {
             finished_action: TorrentFinishedAction::RemoveProvider,
+            delete_on_error: 1,
             ..template()
         },
     )
@@ -202,10 +203,13 @@ async fn provider_only_removal_runs_once_and_keeps_the_row_as_deleted() {
     finish(&test, &factory, 0, b"complete").await;
     test.engine.tick_once().await.expect("complete");
     test.engine.tick_once().await.expect("finished action");
+    // Past the delete-on-error delay, an errored row would now lose its files.
+    mark_completed(&test, torrent.torrent_id, None, minutes_ago(2)).await;
     test.engine.tick_once().await.expect("not repeated");
     let kept = current(&test, torrent.torrent_id).await;
-    assert_eq!(kept.error.as_deref(), Some("Torrent deleted"));
+    assert_eq!(kept.error, None);
     assert!(kept.completed.is_some());
+    assert_eq!(kept.rd_id, None);
     assert_eq!(provider_deletes(&test), 1);
     assert!(factory.requests()[0].local_path.exists());
     test.engine.shutdown().await;

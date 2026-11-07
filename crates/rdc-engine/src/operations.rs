@@ -392,9 +392,11 @@ impl Engine {
 
     /// Cancels active work before independently deleting rows, provider data and local files.
     ///
-    /// Keeping rows marks the torrent completed with `Torrent deleted`. Provider deletion
-    /// failures are logged; rate limits still update the shared cooldown. Local deletion never
-    /// follows a symlink outside the configured download directory.
+    /// Keeping the rows of a torrent that did not complete successfully marks it completed with
+    /// `Torrent deleted`; a successful torrent keeps its clean completion. A kept row forgets
+    /// its provider id once provider deletion was attempted, unless a rate limit deferred it.
+    /// Provider deletion failures are logged; rate limits still update the shared cooldown.
+    /// Local deletion never follows a symlink outside the configured download directory.
     ///
     /// # Errors
     /// Returns persistence errors or local cleanup errors after three attempts.
@@ -412,29 +414,44 @@ impl Engine {
         torrent_id: Uuid,
         options: DeleteOptions,
     ) -> Result<(), EngineError> {
-        let Some(torrent) = self.inner.store.torrents().get(torrent_id).await? else {
-            return Ok(());
-        };
-        self.inner
+        let Some(torrent) = self
+            .inner
             .store
             .torrents()
-            .update_complete(
-                torrent_id,
-                Some("Torrent deleted"),
-                Some(Timestamp::now()),
-                RetryOnError::Skip,
-            )
-            .await?;
+            .get_without_payload(torrent_id)
+            .await?
+        else {
+            return Ok(());
+        };
+        let kept_success = !options.data && torrent.completed.is_some() && torrent.error.is_none();
+        if !kept_success {
+            self.inner
+                .store
+                .torrents()
+                .update_complete(
+                    torrent_id,
+                    Some("Torrent deleted"),
+                    Some(Timestamp::now()),
+                    RetryOnError::Skip,
+                )
+                .await?;
+        }
         self.inner.registry.cancel_torrent(torrent_id).await;
         if options.data {
             self.inner.store.torrents().delete(torrent_id).await?;
         }
-        if options.provider
-            && torrent.rd_id.is_some()
-            && let Err(error) = self.provider().delete(&torrent).await
-        {
-            self.record_provider_error(&error);
-            tracing::warn!(%torrent_id, %error, "Unable to delete torrent at provider");
+        if options.provider && torrent.rd_id.is_some() {
+            let deferred = match self.provider().delete(&torrent).await {
+                Ok(()) => false,
+                Err(error) => {
+                    self.record_provider_error(&error);
+                    tracing::warn!(%torrent_id, %error, "Unable to delete torrent at provider");
+                    error.retry_after().is_some()
+                }
+            };
+            if !options.data && !deferred {
+                self.inner.store.torrents().clear_rd_id(torrent_id).await?;
+            }
         }
         if options.local_files {
             let settings = self.settings();

@@ -84,6 +84,8 @@ impl Engine {
                     provider: true,
                     local_files: false,
                 },
+                // A kept row without provider id has had its provider torrent removed.
+                TorrentFinishedAction::RemoveProvider if torrent.rd_id.is_none() => continue,
                 TorrentFinishedAction::RemoveProvider => DeleteOptions {
                     data: false,
                     provider: true,
@@ -95,6 +97,13 @@ impl Engine {
                     local_files: false,
                 },
             };
+            // Provider removal waits for a cooldown instead of failing and orphaning the torrent.
+            if options.provider
+                && torrent.rd_id.is_some()
+                && self.inner.coordinator.max_next_allowed_at().is_some()
+            {
+                continue;
+            }
             self.delete(torrent.torrent_id, options).await?;
         }
         Ok(())

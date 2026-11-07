@@ -169,6 +169,15 @@ impl Torrents<'_> {
         self.set(torrent_id, r#""RdId" = ?"#, rd_id).await
     }
 
+    /// Forgets the provider-side id once the provider torrent is gone.
+    ///
+    /// # Errors
+    ///
+    /// Fails on database errors.
+    pub async fn clear_rd_id(&self, torrent_id: Uuid) -> Result<()> {
+        self.set(torrent_id, r#""RdId" = ?"#, None::<&str>).await
+    }
+
     /// Stores the info hash, lower-cased.
     ///
     /// # Errors
