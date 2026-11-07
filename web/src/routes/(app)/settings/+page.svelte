@@ -35,6 +35,9 @@
 		window.isSecureContext &&
 		'registerProtocolHandler' in navigator;
 
+	// Leaving the page cancels running diagnostics; the server stops them with the request.
+	const diagnostics = new AbortController();
+
 	onMount(() => {
 		settingsApi
 			.list()
@@ -43,6 +46,8 @@
 				active = settingsTabs(catalogue)[0]?.tab.key ?? 'Tests';
 			})
 			.catch((e: unknown) => (loadError = errorMessage(e)));
+
+		return () => diagnostics.abort();
 	});
 
 	const valueOf = (key: string) => catalogue?.find((s) => s.key === key)?.value;
@@ -91,7 +96,10 @@
 			label: 'Test download path permissions',
 			help: 'Checks that the download path exists and can be written to.',
 			action: async () => {
-				await settingsApi.testPath(String(valueOf('DownloadClient:DownloadPath') ?? ''));
+				await settingsApi.testPath(
+					String(valueOf('DownloadClient:DownloadPath') ?? ''),
+					diagnostics.signal
+				);
 				return 'The download path looks good.';
 			}
 		},
@@ -99,13 +107,15 @@
 			name: 'download',
 			label: 'Test download speed',
 			help: 'Downloads a test file from your provider (or a public speed-test server when it has none) and stops after 50 MB.',
-			action: async () => `Download speed: ${formatSpeed(await settingsApi.testDownloadSpeed())}`
+			action: async () =>
+				`Download speed: ${formatSpeed(await settingsApi.testDownloadSpeed(diagnostics.signal))}`
 		},
 		{
 			name: 'write',
 			label: 'Test write speed',
 			help: 'Writes a temporary file to the download path to measure the disk speed.',
-			action: async () => `Write speed: ${formatSpeed(await settingsApi.testWriteSpeed())}`
+			action: async () =>
+				`Write speed: ${formatSpeed(await settingsApi.testWriteSpeed(diagnostics.signal))}`
 		}
 	];
 
@@ -113,7 +123,8 @@
 		void run('aria2', async () => {
 			const result = await settingsApi.testAria2cConnection(
 				String(valueOf('DownloadClient:Aria2cUrl') ?? ''),
-				String(valueOf('DownloadClient:Aria2cSecret') ?? '')
+				String(valueOf('DownloadClient:Aria2cSecret') ?? ''),
+				diagnostics.signal
 			);
 			return `Connected to aria2 version ${result?.version ?? 'unknown'}.`;
 		});

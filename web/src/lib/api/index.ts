@@ -59,16 +59,19 @@ export const settings = {
 		request<null>('Api/Settings', { method: 'PUT', json: [{ key, value }] }),
 	profile: () => request<Profile>('Api/Settings/Profile'),
 	version: () => request<Version>('Api/Settings/Version'),
-	testPath: (path: string) =>
-		request<null>('Api/Settings/TestPath', { method: 'POST', json: { path } }),
+	testPath: (path: string, signal?: AbortSignal) =>
+		request<null>('Api/Settings/TestPath', { method: 'POST', json: { path }, signal }),
 	/** Resolves with the measured download speed in bytes per second. */
-	testDownloadSpeed: () => request<number>('Api/Settings/TestDownloadSpeed'),
+	testDownloadSpeed: (signal?: AbortSignal) =>
+		request<number>('Api/Settings/TestDownloadSpeed', { signal }),
 	/** Resolves with the measured write speed in bytes per second. */
-	testWriteSpeed: () => request<number>('Api/Settings/TestWriteSpeed'),
-	testAria2cConnection: (url: string, secret: string) =>
+	testWriteSpeed: (signal?: AbortSignal) =>
+		request<number>('Api/Settings/TestWriteSpeed', { signal }),
+	testAria2cConnection: (url: string, secret: string, signal?: AbortSignal) =>
 		request<Aria2Version>('Api/Settings/TestAria2cConnection', {
 			method: 'POST',
-			json: { url, secret }
+			json: { url, secret },
+			signal
 		})
 };
 
