@@ -15,6 +15,8 @@ export function getSortFieldValue(item: unknown, field: string): unknown {
 	}, item);
 }
 
+const collator = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true });
+
 /**
  * Compares two values for sorting: strings case-insensitively, dates and
  * booleans by value, and missing values after everything else.
@@ -33,7 +35,7 @@ export function compareSortValues(left: unknown, right: unknown): number {
 	}
 
 	if (typeof left === 'string' && typeof right === 'string') {
-		return left.localeCompare(right, undefined, { sensitivity: 'base', numeric: true });
+		return collator.compare(left, right);
 	}
 
 	if (left instanceof Date && right instanceof Date) {
@@ -60,7 +62,7 @@ export function compareSortValues(left: unknown, right: unknown): number {
 
 /**
  * Returns a sorted copy of `items` ordered by `field`. Missing values sort
- * last in both directions.
+ * last in both directions. `accessor` runs once per item, not once per comparison.
  */
 export function sortItems<T>(
 	items: readonly T[],
@@ -69,15 +71,15 @@ export function sortItems<T>(
 	accessor: (item: T, field: string) => unknown = getSortFieldValue
 ): T[] {
 	const sign = direction === 'asc' ? 1 : -1;
+	const keyed = items.map((item) => ({ item, key: accessor(item, field) }));
 
-	return [...items].sort((left, right) => {
-		const a = accessor(left, field);
-		const b = accessor(right, field);
-
+	keyed.sort(({ key: a }, { key: b }) => {
 		if (a == null || b == null) {
 			return compareSortValues(a, b);
 		}
 
 		return compareSortValues(a, b) * sign;
 	});
+
+	return keyed.map(({ item }) => item);
 }
