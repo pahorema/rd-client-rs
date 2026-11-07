@@ -79,6 +79,8 @@ impl DebridLink {
     /// The listing ends with a page that is not full or when the
     /// reported next page is not after the current one (`-1` on the last
     /// page): Debrid-Link keeps answering out-of-range pages with items.
+    /// A page without a torrent list (no content or no `value`) is an
+    /// error, never an empty seedbox.
     pub async fn list_torrents(&self) -> Result<Vec<RemoteTorrent>, DebridError> {
         let mut torrents = Vec::new();
         let mut page: i64 = 0;
@@ -87,14 +89,17 @@ impl DebridLink {
                 .request(Method::GET, "seedbox/list")?
                 .query(&[("page", page)])
                 .query(&[("perPage", PAGE_SIZE)]);
-            let Some(answer) = self.exchange::<Vec<SeedboxTorrent>>(request).await? else {
-                return Ok(torrents);
+            let answer = self.exchange::<Vec<SeedboxTorrent>>(request).await?;
+            let Some((items, pagination)) =
+                answer.and_then(|answer| Some((answer.value?, answer.pagination)))
+            else {
+                return Err(DebridError::InvalidResponse(
+                    "Debrid-Link did not return the torrent list".to_owned(),
+                ));
             };
-            let items = answer.value.unwrap_or_default();
             let full = items.len() >= PAGE_SIZE;
             torrents.extend(items.into_iter().map(SeedboxTorrent::into_remote));
-            let next = answer
-                .pagination
+            let next = pagination
                 .and_then(|pagination| pagination.next)
                 .unwrap_or(page + 1);
             if !full || next <= page {

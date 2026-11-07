@@ -238,6 +238,38 @@ async fn listing_stops_on_the_last_page_the_api_reports() {
 }
 
 #[tokio::test]
+async fn listing_without_a_torrent_list_is_an_error() {
+    for response in [ResponseTemplate::new(204), ok(&Value::Null)] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/seedbox/list"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+
+        let error = client(&server)
+            .list_torrents()
+            .await
+            .expect_err("no torrent list");
+
+        assert!(
+            matches!(error, DebridError::InvalidResponse(_)),
+            "{error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_empty_seedbox_is_an_empty_listing() {
+    let server = MockServer::start().await;
+    list_page("0", &json!([])).mount(&server).await;
+
+    let torrents = client(&server).list_torrents().await.expect("list");
+
+    assert_eq!(torrents, Vec::new());
+}
+
+#[tokio::test]
 async fn listing_maps_torrent_fields_and_reports_the_download_speed() {
     let server = MockServer::start().await;
     list_page("0", &json!([seedbox_torrent("t1")]))
