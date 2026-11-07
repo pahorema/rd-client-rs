@@ -548,6 +548,7 @@ async fn new_databases_have_the_expected_tables_and_indexes() {
         ("index", "IX_AspNetUserLogins_UserId"),
         ("index", "IX_AspNetUserRoles_RoleId"),
         ("index", "IX_Downloads_TorrentId_Path"),
+        ("index", "IX_Torrents_Hash"),
         ("index", "RoleNameIndex"),
         ("index", "UserNameIndex"),
         ("table", "AspNetRoleClaims"),

@@ -148,3 +148,4 @@ CREATE INDEX "IX_AspNetUserRoles_RoleId" ON "AspNetUserRoles" ("RoleId");
 CREATE INDEX "EmailIndex" ON "AspNetUsers" ("NormalizedEmail");
 CREATE UNIQUE INDEX "UserNameIndex" ON "AspNetUsers" ("NormalizedUserName");
 CREATE UNIQUE INDEX "IX_Downloads_TorrentId_Path" ON "Downloads" ("TorrentId", "Path");
+CREATE INDEX "IX_Torrents_Hash" ON "Torrents" ("Hash");
