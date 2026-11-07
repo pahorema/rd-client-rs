@@ -90,7 +90,7 @@ pub(crate) fn spawn(engine: &Engine) -> Vec<JoinHandle<()>> {
     vec![provider, watch, disk_job, update_job, rate_job, tick]
 }
 
-async fn tick_loop(engine: Engine) {
+pub(crate) async fn tick_loop(engine: Engine) {
     let mut failures = 0_u32;
     loop {
         if engine.inner.cancel.is_cancelled() {

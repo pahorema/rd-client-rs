@@ -626,3 +626,7 @@ pub(crate) fn minutes_elapsed(at: Timestamp, minutes: i32) -> bool {
 #[cfg(test)]
 #[path = "tick_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tick_lifecycle_tests.rs"]
+mod lifecycle_tests;

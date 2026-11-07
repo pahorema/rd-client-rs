@@ -10,10 +10,10 @@ use rdc_debrid::{DebridError, RemoteTorrent};
 use rdc_model::{DownloadInfo, RemoteFile, TorrentFinishedAction, settings::Settings};
 use tokio::fs;
 
-const HASH: &str = "0123456789012345678901234567890123456789";
+pub(super) const HASH: &str = "0123456789012345678901234567890123456789";
 const HASH_TWO: &str = "1123456789012345678901234567890123456789";
 
-async fn fixture() -> (TestEngine, FakeDownloadFactory) {
+pub(super) async fn fixture() -> (TestEngine, FakeDownloadFactory) {
     let fake = FakeDebridProvider::default();
     let factory = FakeDownloadFactory::new();
     let mut options = fake.options();
@@ -29,7 +29,7 @@ async fn fixture() -> (TestEngine, FakeDownloadFactory) {
     )
 }
 
-async fn add(
+pub(super) async fn add(
     test: &TestEngine,
     hash: &str,
     id: &str,
@@ -75,13 +75,13 @@ async fn add(
         .await
         .expect("add")
 }
-fn template() -> TorrentTemplate {
+pub(super) fn template() -> TorrentTemplate {
     TorrentTemplate {
         finished_action: TorrentFinishedAction::None,
         ..TorrentTemplate::default()
     }
 }
-async fn current(test: &TestEngine, id: Uuid) -> Torrent {
+pub(super) async fn current(test: &TestEngine, id: Uuid) -> Torrent {
     test.store
         .torrents()
         .get(id)
@@ -89,7 +89,12 @@ async fn current(test: &TestEngine, id: Uuid) -> Torrent {
         .expect("read")
         .expect("torrent")
 }
-async fn finish(test: &TestEngine, factory: &FakeDownloadFactory, index: usize, content: &[u8]) {
+pub(super) async fn finish(
+    test: &TestEngine,
+    factory: &FakeDownloadFactory,
+    index: usize,
+    content: &[u8],
+) {
     let request = factory.requests()[index].clone();
     fs::write(&request.local_path, content)
         .await
