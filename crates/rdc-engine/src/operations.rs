@@ -231,7 +231,12 @@ impl Engine {
         if !inserted {
             return Ok(torrent);
         }
-        self.dispatch_queued().await?;
+        // A dropped caller (a disconnected HTTP client) must not abort the dispatch between
+        // the provider addition and storing its id, or the next dispatch adds it twice.
+        let engine = self.clone();
+        tokio::spawn(async move { engine.dispatch_queued().await })
+            .await
+            .map_err(message)??;
         Ok(self
             .inner
             .store
