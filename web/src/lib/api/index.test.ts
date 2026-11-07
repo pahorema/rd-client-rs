@@ -148,10 +148,7 @@ describe('settings', () => {
 });
 
 describe('torrents', () => {
-	it('reads the list, a torrent and the monitor states', async () => {
-		await torrents.list();
-		expect(lastCall()).toMatchObject({ url: 'Api/Torrents', method: 'GET' });
-
+	it('reads a torrent and the monitor states', async () => {
 		await torrents.get('0b9e2c1a-1111-4222-8333-444455556666');
 		expect(lastCall().url).toBe('Api/Torrents/Get/0b9e2c1a-1111-4222-8333-444455556666');
 

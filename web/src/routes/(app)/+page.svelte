@@ -1,11 +1,9 @@
 <script lang="ts">
-	import { errorMessage, torrents as torrentsApi } from '#lib/api/index.js';
-	import type { Torrent } from '#lib/api/types.js';
+	import { torrents as torrentsApi } from '#lib/api/index.js';
 	import ConfirmDialog from '#lib/components/confirm-dialog.svelte';
 	import DeleteTorrentDialog from '#lib/components/delete-torrent-dialog.svelte';
 	import TorrentProgress from '#lib/components/torrent-progress.svelte';
 	import TorrentSettingsDialog from '#lib/components/torrent-settings-dialog.svelte';
-	import * as Alert from '#lib/components/ui/alert/index.js';
 	import { Button } from '#lib/components/ui/button/index.js';
 	import { Checkbox } from '#lib/components/ui/checkbox/index.js';
 	import { Input } from '#lib/components/ui/input/index.js';
@@ -26,16 +24,12 @@
 	import { resolve } from '$app/paths';
 	import ArrowDownIcon from '@lucide/svelte/icons/arrow-down';
 	import ArrowUpIcon from '@lucide/svelte/icons/arrow-up';
-	import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
 	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
 	import SearchIcon from '@lucide/svelte/icons/search';
 	import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
 	import Trash2Icon from '@lucide/svelte/icons/trash-2';
-	import { onMount } from 'svelte';
 	import { SvelteSet } from 'svelte/reactivity';
 
-	let initial = $state<Torrent[] | null>(null);
-	let loadError = $state<string | null>(null);
 	let query = $state('');
 	let filter = $state<TorrentFilter>('all');
 	let sort = $state(loadTorrentSort(globalThis.localStorage));
@@ -45,7 +39,9 @@
 	let retryOpen = $state(false);
 	let settingsOpen = $state(false);
 
-	const torrents = $derived(live.torrents ?? initial ?? []);
+	// The event stream sends the full list as soon as it opens; the reconnect banner covers
+	// a stream that cannot open.
+	const torrents = $derived(live.torrents ?? []);
 	const visible = $derived(sortTorrents(filterTorrents(torrents, query, filter), sort));
 	const selectedTorrents = $derived(torrents.filter((t) => selected.has(t.torrentId)));
 	const allVisibleSelected = $derived(
@@ -83,13 +79,6 @@
 		}
 	});
 
-	onMount(() => {
-		torrentsApi
-			.list()
-			.then((result) => (initial = result ?? []))
-			.catch((e: unknown) => (loadError = errorMessage(e)));
-	});
-
 	function sortBy(field: TorrentSortField) {
 		sort = nextSort(sort, field);
 		saveTorrentSort(globalThis.localStorage, sort);
@@ -124,14 +113,6 @@
 <svelte:head>
 	<title>Torrents · RD Client</title>
 </svelte:head>
-
-{#if loadError}
-	<Alert.Root variant="destructive">
-		<CircleAlertIcon />
-		<Alert.Title>Could not load the torrents</Alert.Title>
-		<Alert.Description>{loadError}. Refresh the page after fixing the problem.</Alert.Description>
-	</Alert.Root>
-{/if}
 
 <div class="flex flex-wrap items-center gap-2">
 	<h1 class="mr-auto text-xl font-semibold tracking-tight">Torrents</h1>
@@ -190,7 +171,7 @@
 	</div>
 </div>
 
-{#if initial == null && live.torrents == null && !loadError}
+{#if live.torrents == null}
 	<div class="flex justify-center py-16"><Spinner class="size-6 text-muted-foreground" /></div>
 {:else if visible.length === 0}
 	<div class="rounded-xl border border-dashed py-16 text-center text-sm text-muted-foreground">

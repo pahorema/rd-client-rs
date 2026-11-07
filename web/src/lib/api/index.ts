@@ -78,7 +78,6 @@ export const settings = {
 
 /** Torrent endpoints. */
 export const torrents = {
-	list: () => request<Torrent[]>('Api/Torrents'),
 	get: (torrentId: string) => request<Torrent>(`Api/Torrents/Get/${encodeURIComponent(torrentId)}`),
 	/** Resolves with `null` while the disk space monitor has nothing to report. */
 	diskSpaceStatus: () => request<DiskSpaceStatus>('Api/Torrents/DiskSpaceStatus'),
