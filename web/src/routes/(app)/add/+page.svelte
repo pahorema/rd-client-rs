@@ -12,12 +12,7 @@
 		settings as settingsApi,
 		torrents as torrentsApi
 	} from '#lib/api/index.js';
-	import {
-		DownloadClient,
-		TorrentDownloadAction,
-		type AvailableFile,
-		type NewTorrent
-	} from '#lib/api/types.js';
+	import { DownloadClient, TorrentDownloadAction, type NewTorrent } from '#lib/api/types.js';
 	import OptionSelect from '#lib/components/option-select.svelte';
 	import * as Alert from '#lib/components/ui/alert/index.js';
 	import { Button } from '#lib/components/ui/button/index.js';
@@ -28,6 +23,7 @@
 	import { Label } from '#lib/components/ui/label/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
 	import { Textarea } from '#lib/components/ui/textarea/index.js';
+	import { FileCheck } from '#lib/file-check.svelte.js';
 	import { formatSize } from '#lib/format.js';
 	import {
 		downloadActionOptions,
@@ -35,6 +31,7 @@
 		finishedActionOptions,
 		hostDownloadActionOptions
 	} from '#lib/labels.js';
+	import { Latest } from '#lib/latest.js';
 	import { cn } from '#lib/utils.js';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
@@ -50,10 +47,13 @@
 	let provider = $state<string | null>(null);
 	let categories = $state<string[]>([]);
 
-	let available = $state<AvailableFile[] | null>(null);
-	let checkedSource = $state<string | null>(null);
-	let checking = $state(false);
 	const manual = new SvelteSet<string>();
+	const fileCheck = new FileCheck((available) => {
+		manual.clear();
+		for (const file of available) manual.add(file.filename);
+		void verifyRegex();
+	});
+	const regexCheck = new Latest();
 
 	let includeError = $state('');
 	let excludeError = $state('');
@@ -104,42 +104,19 @@
 
 	// The magnet field's blur starts a check right as the submit button is pressed; submit waits
 	// for it instead of disabling the button, which would swallow that click.
-	let pendingCheck: Promise<void> | null = null;
-
 	function checkFiles(): Promise<void> {
 		const link = magnet.trim();
-		const source = link || (files.length === 1 ? `file:${files[0].name}:${files[0].size}` : '');
+		const file = files.length === 1 ? files[0] : null;
+		const source = link || (file ? `file:${file.name}:${file.size}` : '');
 
-		if (source === checkedSource) return pendingCheck ?? Promise.resolve();
-		checkedSource = source;
-		available = null;
-		manual.clear();
-		if (!source) return Promise.resolve();
-
-		pendingCheck = runCheck(link);
-		return pendingCheck;
-	}
-
-	async function runCheck(link: string) {
-		checking = true;
-		error = null;
-
-		try {
-			const result = link
-				? await torrentsApi.checkFilesMagnet(link)
-				: await torrentsApi.checkFiles(files[0]);
-			available = result ?? [];
-			for (const file of available) manual.add(file.filename);
-			void verifyRegex();
-		} catch (e) {
-			error = errorMessage(e);
-			checkedSource = null;
-		} finally {
-			checking = false;
-		}
+		return fileCheck.check(source, () => {
+			if (link) return torrentsApi.checkFilesMagnet(link);
+			return file ? torrentsApi.checkFiles(file) : Promise.resolve(null);
+		});
 	}
 
 	async function verifyRegex() {
+		const current = regexCheck.next();
 		includeError = '';
 		excludeError = '';
 		regexSelection = null;
@@ -152,11 +129,12 @@
 				torrent.excludeRegex,
 				link
 			);
+			if (!current()) return;
 			includeError = result?.includeError ?? '';
 			excludeError = result?.excludeError ?? '';
 			regexSelection = new Set(result?.selectedFiles.map((f) => f.filename));
 		} catch (e) {
-			includeError = errorMessage(e);
+			if (current()) includeError = errorMessage(e);
 		}
 	}
 
@@ -190,7 +168,7 @@
 		settings.category = settings.category?.trim() || null;
 
 		if (torrent.downloadAction === TorrentDownloadAction.DownloadManual && !multiple) {
-			if (manual.size === 0) {
+			if (!fileCheck.available || manual.size === 0) {
 				error = 'Select at least one file to download.';
 				saving = false;
 				return;
@@ -315,13 +293,13 @@
 							</Field.Description>
 						{/if}
 					</Field.Field>
-					{#if checking}
+					{#if fileCheck.checking}
 						<div class="flex items-center gap-2 text-sm text-muted-foreground">
 							<Spinner /> Checking the provider…
 						</div>
-					{:else if available && available.length > 0}
+					{:else if fileCheck.available && fileCheck.available.length > 0}
 						<ul class="grid max-h-96 gap-1 overflow-y-auto rounded-lg border p-1 text-sm">
-							{#each available as file (file.filename)}
+							{#each fileCheck.available as file (file.filename)}
 								{@const excluded = regexSelection != null && !regexSelection.has(file.filename)}
 								<li class="rounded px-2 py-1 hover:bg-muted">
 									{#if torrent.downloadAction === TorrentDownloadAction.DownloadManual}
@@ -345,7 +323,7 @@
 								</li>
 							{/each}
 						</ul>
-					{:else if available}
+					{:else if fileCheck.available}
 						<p class="text-sm text-muted-foreground">
 							The provider has no files for this torrent yet.
 						</p>
@@ -357,7 +335,7 @@
 				</Card.Content>
 			</Card.Root>
 
-			{#if error}{@render failure()}{/if}
+			{#if error || fileCheck.error}{@render failure()}{/if}
 
 			<div>
 				<Button type="submit" disabled={saving}>
@@ -522,7 +500,7 @@
 	<Alert.Root variant="destructive">
 		<CircleAlertIcon />
 		<Alert.Title>Could not add the torrent</Alert.Title>
-		<Alert.Description>{error}</Alert.Description>
+		<Alert.Description>{error ?? fileCheck.error}</Alert.Description>
 	</Alert.Root>
 {/snippet}
 
