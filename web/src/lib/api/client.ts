@@ -65,7 +65,7 @@ async function failure(response: Response): Promise<ApiError> {
  * the UI works under any base path. Resolves with the parsed JSON body, or
  * `null` when the response has no body.
  */
-export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+export async function request<T>(path: string, options: RequestOptions = {}): Promise<T | null> {
 	const headers: Record<string, string> = { Accept: 'application/json, text/plain, */*' };
 	let body: BodyInit | undefined;
 
@@ -101,7 +101,7 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 	const text = await response.text();
 
 	if (text.length === 0) {
-		return null as T;
+		return null;
 	}
 
 	try {

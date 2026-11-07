@@ -77,8 +77,8 @@ export const torrents = {
 	list: () => request<Torrent[]>('Api/Torrents'),
 	get: (torrentId: string) => request<Torrent>(`Api/Torrents/Get/${encodeURIComponent(torrentId)}`),
 	/** Resolves with `null` while the disk space monitor has nothing to report. */
-	diskSpaceStatus: () => request<DiskSpaceStatus | null>('Api/Torrents/DiskSpaceStatus'),
-	rateLimitStatus: () => request<RateLimitStatus | null>('Api/Torrents/RateLimitStatus'),
+	diskSpaceStatus: () => request<DiskSpaceStatus>('Api/Torrents/DiskSpaceStatus'),
+	rateLimitStatus: () => request<RateLimitStatus>('Api/Torrents/RateLimitStatus'),
 	uploadMagnet: (magnetLink: string, torrent: NewTorrent) =>
 		request<null>('Api/Torrents/UploadMagnet', { method: 'POST', json: { magnetLink, torrent } }),
 	uploadFile: (file: File, torrent: NewTorrent) =>
@@ -94,7 +94,7 @@ export const torrents = {
 			form: torrentForm(file)
 		}),
 	verifyRegex: (includeRegex: string | null, excludeRegex: string | null, magnetLink: string) =>
-		request<VerifyRegexResult | null>('Api/Torrents/VerifyRegex', {
+		request<VerifyRegexResult>('Api/Torrents/VerifyRegex', {
 			method: 'POST',
 			json: { includeRegex, excludeRegex, magnetLink }
 		}),
