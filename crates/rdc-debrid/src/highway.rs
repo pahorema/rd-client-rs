@@ -21,7 +21,7 @@ use crate::error::DebridError;
 use crate::http::ProviderHttp;
 use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
 use crate::text_rate_limit::classify_add_error;
-use crate::values::{base_name, non_blank};
+use crate::values::{base_name, excerpt, non_blank};
 
 /// The public HIGHWAY API endpoint.
 pub const DEFAULT_ENDPOINT: &str = "https://cloud.high-way.me/center-api/transfers.php";
@@ -566,7 +566,7 @@ fn error_from(status: StatusCode, body: &str) -> DebridError {
             } else {
                 format!("{} {code}", status.as_u16())
             };
-            let detail = message.unwrap_or_else(|| body.trim().to_owned());
+            let detail = message.unwrap_or_else(|| excerpt(body.trim()).to_owned());
             DebridError::Provider(format!("HIGHWAY request failed ({label}): {detail}"))
         }
     }

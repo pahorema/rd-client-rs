@@ -18,6 +18,7 @@ use crate::http::ProviderHttp;
 use crate::json;
 use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
 use crate::text_rate_limit::classify_add_error;
+use crate::values::excerpt;
 
 /// Root of the AllDebrid API.
 pub const DEFAULT_BASE_URL: &str = "https://api.alldebrid.com/v4.1/";
@@ -391,25 +392,31 @@ impl AllDebrid {
         let envelope: Envelope = serde_json::from_str(&text).map_err(|_| {
             if status.is_success() {
                 DebridError::InvalidResponse(format!(
-                    "Unable to read the AllDebrid response. Response was: {text}"
+                    "Unable to read the AllDebrid response. Response was: {}",
+                    excerpt(&text)
                 ))
             } else {
                 DebridError::Provider(format!(
-                    "AllDebrid answered with HTTP status {status}. Response was: {text}"
+                    "AllDebrid answered with HTTP status {status}. Response was: {}",
+                    excerpt(&text)
                 ))
             }
         })?;
         if envelope.status.as_deref() != Some("success") {
             return Err(match envelope.error {
                 Some(error) if error.has_message() => error.into_error(),
-                _ => DebridError::Provider(format!("Unknown error. Response was: {text}")),
+                _ => DebridError::Provider(format!(
+                    "Unknown error. Response was: {}",
+                    excerpt(&text)
+                )),
             });
         }
         match envelope.data {
             None | Some(Value::Null) => Ok(T::default()),
             Some(data) => serde_json::from_value(data).map_err(|error| {
                 DebridError::InvalidResponse(format!(
-                    "Unable to read the AllDebrid response ({error}). Response was: {text}"
+                    "Unable to read the AllDebrid response ({error}). Response was: {}",
+                    excerpt(&text)
                 ))
             }),
         }

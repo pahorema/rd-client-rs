@@ -175,6 +175,24 @@ async fn answers_that_are_not_json_are_reported() {
 }
 
 #[tokio::test]
+async fn long_answers_are_quoted_as_an_excerpt() {
+    let server = MockServer::start().await;
+    let body = format!("<html>{}</html>", "x".repeat(1000));
+
+    let error = user_error(
+        &server,
+        ResponseTemplate::new(503).set_body_string(body.clone()),
+    )
+    .await;
+
+    let text = error.to_string();
+    assert!(
+        text.ends_with(&format!("Response was: {}", &body[..300])),
+        "{text}"
+    );
+}
+
+#[tokio::test]
 async fn requests_time_out_after_the_configured_timeout() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

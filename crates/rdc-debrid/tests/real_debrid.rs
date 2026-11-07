@@ -176,6 +176,17 @@ async fn error_bodies_without_error_field_are_reported_verbatim() {
 }
 
 #[tokio::test]
+async fn long_error_bodies_are_quoted_as_an_excerpt() {
+    let server = MockServer::start().await;
+    let body = format!("<html>{}</html>", "x".repeat(1000));
+    let response = ResponseTemplate::new(503).set_body_string(body.clone());
+
+    let error = user_error(&server, response).await;
+
+    assert_eq!(error.to_string(), body[..300]);
+}
+
+#[tokio::test]
 async fn empty_error_bodies_report_the_http_status() {
     let server = MockServer::start().await;
 

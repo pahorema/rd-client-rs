@@ -17,6 +17,7 @@ use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp};
 use crate::json;
 use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
 use crate::text_rate_limit::classify_add_error;
+use crate::values::excerpt;
 
 /// API host used when no alternative hostname is configured.
 pub const DEFAULT_API_HOSTNAME: &str = "api.real-debrid.com";
@@ -315,7 +316,8 @@ impl RealDebrid {
                 let text = self.execute(request).await?.unwrap_or_default();
                 parse_utc_offset(&text).ok_or_else(|| {
                     DebridError::InvalidResponse(format!(
-                        "Unable to read the Real-Debrid server time: {text}"
+                        "Unable to read the Real-Debrid server time: {}",
+                        excerpt(&text)
                     ))
                 })
             })
@@ -348,7 +350,8 @@ impl RealDebrid {
         };
         serde_json::from_str(&text).map_err(|error| {
             DebridError::InvalidResponse(format!(
-                "Unable to read the Real-Debrid response ({error}). Response was: {text}"
+                "Unable to read the Real-Debrid response ({error}). Response was: {}",
+                excerpt(&text)
             ))
         })
     }
@@ -606,7 +609,7 @@ fn api_error(status: StatusCode, text: &str) -> DebridError {
         _ if text.trim().is_empty() => {
             DebridError::Provider(format!("Real-Debrid answered with HTTP status {status}"))
         }
-        _ => DebridError::Provider(text.to_owned()),
+        _ => DebridError::Provider(excerpt(text).to_owned()),
     }
 }
 
