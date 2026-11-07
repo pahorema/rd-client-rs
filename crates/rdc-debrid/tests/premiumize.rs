@@ -80,6 +80,17 @@ async fn requests_authenticate_with_the_api_key_query_only() {
 }
 
 #[tokio::test]
+async fn api_keys_are_sent_without_surrounding_whitespace() {
+    let server = MockServer::start().await;
+    mount_account(&server, r#"{"status":"success","customer_id":1}"#).await;
+    let mut config = common::config();
+    config.api_key = format!(" {API_KEY}\n");
+    let client = Premiumize::new(&config, common::http()).with_base_url(&server.uri());
+
+    client.user().await.expect("user");
+}
+
+#[tokio::test]
 async fn blank_api_key_is_not_configured() {
     let server = MockServer::start().await;
     let mut config = common::config();

@@ -131,6 +131,30 @@ async fn blank_api_key_is_not_configured() {
 }
 
 #[tokio::test]
+async fn api_keys_are_sent_without_surrounding_whitespace() {
+    let server = MockServer::start().await;
+    mount_user(
+        &server,
+        json(r#"{"success":true,"data":{"email":"me@example.com"}}"#),
+    )
+    .await;
+    let mut config = common::config();
+    config.api_key = format!(" {}\n", common::API_KEY);
+    let client = TorBox::new(&config, common::http()).with_base_url(&server.uri());
+
+    client.user().await.expect("user");
+
+    let requests = server.received_requests().await.expect("recorded");
+    assert_eq!(
+        requests[0]
+            .headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some("Bearer test-api-key")
+    );
+}
+
+#[tokio::test]
 async fn error_envelopes_report_code_and_detail() {
     for (body, message) in [
         (

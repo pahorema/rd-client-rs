@@ -69,7 +69,7 @@ impl Premiumize {
         Self {
             http,
             base_url: DEFAULT_BASE_URL.to_owned(),
-            api_key: config.api_key.clone(),
+            api_key: config.api_key.trim().to_owned(),
         }
     }
 

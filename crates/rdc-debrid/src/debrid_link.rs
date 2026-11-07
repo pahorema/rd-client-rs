@@ -49,7 +49,7 @@ impl DebridLink {
     pub fn new(config: &ProviderConfig, http: ProviderHttp) -> Self {
         Self {
             http,
-            api_key: config.api_key.clone(),
+            api_key: config.api_key.trim().to_owned(),
             base_url: DEFAULT_BASE_URL.to_owned(),
         }
     }

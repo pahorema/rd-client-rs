@@ -93,7 +93,7 @@ impl TorBox {
             http,
             base_url: String::new(),
             host: String::new(),
-            api_key: config.api_key.clone(),
+            api_key: config.api_key.trim().to_owned(),
             prefer_zipped_downloads: config.prefer_zipped_downloads,
             error_retry: DEFAULT_ERROR_RETRY,
         }

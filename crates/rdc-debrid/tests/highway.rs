@@ -175,6 +175,19 @@ async fn blank_token_is_not_configured_and_sends_nothing() {
     assert_eq!(server.received_requests().await.expect("recorded").len(), 0);
 }
 
+#[tokio::test]
+async fn tokens_are_sent_without_surrounding_whitespace() {
+    let server = MockServer::start().await;
+    mount_listing(&server, &json!([transfer("4213", "queued")])).await;
+
+    let torrents = client_with_key(&server, " test-token\n")
+        .list_torrents()
+        .await
+        .expect("list");
+
+    assert_eq!(torrents.len(), 1);
+}
+
 async fn listing_error(response: ResponseTemplate) -> DebridError {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

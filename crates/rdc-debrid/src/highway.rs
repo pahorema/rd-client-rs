@@ -68,7 +68,7 @@ impl Highway {
     pub fn new(config: &ProviderConfig, http: ProviderHttp) -> Self {
         Self {
             http,
-            api_key: config.api_key.clone(),
+            api_key: config.api_key.trim().to_owned(),
             endpoint: DEFAULT_ENDPOINT.to_owned(),
         }
     }

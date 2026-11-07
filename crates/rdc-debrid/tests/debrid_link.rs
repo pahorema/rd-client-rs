@@ -103,6 +103,23 @@ async fn blank_api_key_is_not_configured_and_sends_nothing() {
 }
 
 #[tokio::test]
+async fn api_keys_are_sent_without_surrounding_whitespace() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/account/infos"))
+        .and(header("authorization", "Bearer test-key"))
+        .respond_with(ok(&json!({ "username": "alice" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    client_with_key(&server, " test-key\n")
+        .user()
+        .await
+        .expect("user");
+}
+
+#[tokio::test]
 async fn failed_envelope_reports_the_api_error_code() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
