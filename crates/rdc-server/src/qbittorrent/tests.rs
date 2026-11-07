@@ -164,7 +164,12 @@ async fn login_cookie_authentication_and_unknown_paths_obey_base_path() {
             .await;
             let preferences = json_response(response).await;
             assert_eq!(preferences["web_ui_username"], "alice");
-            assert!(preferences["save_path"].as_str().unwrap().ends_with('/'));
+            assert!(
+                preferences["save_path"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with(std::path::MAIN_SEPARATOR)
+            );
             assert_eq!(preferences["scan_dirs"], json!({}));
             for (path, expected) in [("app/version", "v4.3.2"), ("app/webapiVersion", "2.7")] {
                 assert_eq!(

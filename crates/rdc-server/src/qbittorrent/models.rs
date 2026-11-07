@@ -442,7 +442,11 @@ mod tests {
         assert!(pending["progress"].as_f64().unwrap() < 1.0);
         assert_eq!(
             pending["content_path"],
-            format!("{}Film.mkv/", save_path(&settings))
+            format!(
+                "{}Film.mkv{}",
+                save_path(&settings),
+                std::path::MAIN_SEPARATOR
+            )
         );
         assert_eq!(files(&torrent)[0]["index"], 0);
         assert_eq!(files(&torrent)[0]["priority"], 1);
@@ -471,7 +475,7 @@ mod tests {
         torrent.client_kind = Some(Provider::TorBox);
         assert_eq!(
             info(&torrent, &fixture.engine, &settings, 1)["content_path"],
-            format!("{}Film/", save_path(&settings))
+            format!("{}Film{}", save_path(&settings), std::path::MAIN_SEPARATOR)
         );
     }
 
@@ -497,7 +501,7 @@ mod tests {
         }]);
         assert_eq!(
             content_path(&torrent, &settings),
-            format!("{}/", nested.display())
+            format!("{}{}", nested.display(), std::path::MAIN_SEPARATOR)
         );
     }
     #[test]
