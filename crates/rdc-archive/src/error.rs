@@ -30,6 +30,14 @@ pub enum Error {
         /// Entry name as stored in the archive.
         entry: String,
     },
+    /// An archive entry is of a kind that is never extracted, such as a link.
+    #[error("archive entry {entry:?} cannot be extracted: {reason}")]
+    UnsupportedEntry {
+        /// Entry name as stored in the archive.
+        entry: String,
+        /// Why the entry is refused, e.g. `"it is a hard link"`.
+        reason: &'static str,
+    },
     /// A name used as a directory below the destination is absolute or climbs out of it.
     #[error("{name:?} cannot be used as a folder name inside the download directory")]
     UnsafeName {

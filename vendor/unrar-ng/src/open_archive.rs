@@ -919,6 +919,46 @@ bitflags::bitflags! {
     }
 }
 
+/// File-system redirection recorded for an entry: a link or a reference to another file.
+///
+/// The library creates the link, or copies the referenced file, instead of writing the entry's
+/// own data. The source of a hard link or file copy is resolved against the process's working
+/// directory when extracting with [`OpenArchive::extract_to`], so callers that extract
+/// untrusted archives should refuse every entry with a redirection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Redirection {
+    /// A regular file or directory.
+    None,
+    /// A Unix symbolic link (also how RAR 4 archives record Unix links).
+    UnixSymlink,
+    /// A Windows symbolic link.
+    WindowsSymlink,
+    /// A Windows directory junction.
+    Junction,
+    /// A hard link to a file stored earlier in the archive.
+    HardLink,
+    /// A copy of a file stored earlier in the archive.
+    FileCopy,
+    /// A redirection type this wrapper does not know, with its raw value.
+    Unknown(u32),
+}
+
+impl Redirection {
+    /// Maps the `RedirType` value of the DLL header (`FSREDIR_*` in `headers.hpp`).
+    fn from_raw(value: c_uint) -> Self {
+        match value {
+            0 => Self::None,
+            1 => Self::UnixSymlink,
+            2 => Self::WindowsSymlink,
+            3 => Self::Junction,
+            4 => Self::HardLink,
+            5 => Self::FileCopy,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
 /// Metadata for an entry in a RAR archive
 ///
 /// Created using the read_header methods in an OpenArchive, contains
@@ -933,6 +973,8 @@ pub struct FileHeader {
     pub file_time: u32,
     pub method: u32,
     pub file_attr: u32,
+    /// Whether the entry is a link or a file reference rather than plain data.
+    pub redirection: Redirection,
 }
 
 impl FileHeader {
@@ -1013,6 +1055,7 @@ impl From<native::HeaderDataEx> for FileHeader {
         let file_time = header.file_time;
         let method = header.method;
         let file_attr = header.file_attr;
+        let redir_type = header.redir_type;
 
         FileHeader {
             filename: PathBuf::from(filename.to_os_string()),
@@ -1022,6 +1065,7 @@ impl From<native::HeaderDataEx> for FileHeader {
             file_time,
             method,
             file_attr,
+            redirection: Redirection::from_raw(redir_type),
         }
     }
 }

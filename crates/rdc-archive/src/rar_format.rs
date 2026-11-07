@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 use unrar_ng::{
-    Archive, CursorBeforeFile, CursorBeforeHeader, OpenArchive, Process, UnrarResult, VolumeInfo,
+    Archive, CursorBeforeFile, CursorBeforeHeader, FileHeader, OpenArchive, Process, Redirection,
+    UnrarResult, VolumeInfo,
 };
 
 use crate::Error;
@@ -51,6 +52,26 @@ fn entry_name(path: &Path) -> String {
     }
 }
 
+/// Refuses entries the library would not write from their own data.
+///
+/// Links and file copies are never extracted: the library resolves the source of a hard link or
+/// file copy against the process's working directory, so such an entry could copy any server file
+/// into the destination, and a symbolic link could point anywhere.
+fn ensure_extractable(header: &FileHeader, name: &str) -> Result<(), Error> {
+    let reason = match header.redirection {
+        Redirection::None => return Ok(()),
+        Redirection::UnixSymlink | Redirection::WindowsSymlink => "it is a symbolic link",
+        Redirection::Junction => "it is a directory junction",
+        Redirection::HardLink => "it is a hard link",
+        Redirection::FileCopy => "it is a copy of another entry",
+        _ => "it is a link to another file",
+    };
+    Err(Error::UnsupportedEntry {
+        entry: name.to_owned(),
+        reason,
+    })
+}
+
 /// Lists the file entries of `archive` (and of its following volumes), skipping directories,
 /// and tells which volume of a set `archive` is.
 pub(crate) fn inspect(archive: &Path) -> Result<Inspection, Error> {
@@ -76,7 +97,7 @@ pub(crate) fn inspect(archive: &Path) -> Result<Inspection, Error> {
     Ok(Inspection { entries, volume })
 }
 
-/// Validates every entry name against `destination` and returns the total uncompressed size.
+/// Validates every entry against `destination` and returns the total uncompressed size.
 fn scan(archive: &Path, destination: &Path) -> Result<u64, Error> {
     let listing = Archive::new(archive)
         .open_for_listing()
@@ -84,7 +105,9 @@ fn scan(archive: &Path, destination: &Path) -> Result<u64, Error> {
     let mut total = 0_u64;
     for header in listing {
         let header = header.map_err(Error::read(archive))?;
-        entry_destination(destination, &header.filename.to_string_lossy())?;
+        let name = header.filename.to_string_lossy();
+        entry_destination(destination, &name)?;
+        ensure_extractable(&header, &name)?;
         if header.is_file() {
             total = total.saturating_add(header.unpacked_size);
         }
@@ -94,7 +117,7 @@ fn scan(archive: &Path, destination: &Path) -> Result<u64, Error> {
 
 /// Extracts every entry of `archive` (and of its following volumes) below `destination`.
 ///
-/// All entry names are validated before anything is written. Cancellation is checked between
+/// All entries are validated before anything is written. Cancellation is checked between
 /// entries: the library writes one entry in a single call that cannot be interrupted.
 pub(crate) fn extract(
     archive: &Path,
@@ -117,6 +140,7 @@ pub(crate) fn extract(
         let entry = header.entry();
         let name = entry.filename.to_string_lossy().into_owned();
         let target = entry_destination(destination, &name)?;
+        ensure_extractable(entry, &name)?;
         if entry.is_directory() {
             create_entry_directory(destination, &target, &name)?;
             open = header.skip().map_err(Error::read(archive))?;

@@ -4,6 +4,7 @@ use rdc_archive::{Error, extract, list_entries};
 use tokio_util::sync::CancellationToken;
 
 use crate::common::{big_text, copy_fixtures, copy_fixtures_as, files_below};
+use crate::rar5::{Rar5, Redirect};
 
 const MULTI: [&str; 3] = ["multi.part1.rar", "multi.part2.rar", "multi.part3.rar"];
 const LEGACY: [&str; 3] = ["legacy.rar", "legacy.r00", "legacy.r01"];
@@ -211,4 +212,69 @@ fn large_rar_entries_are_extracted_and_complete_the_progress() {
     assert!(zeros.iter().all(|byte| *byte == 0));
     assert_eq!(seen.last(), Some(&100));
     assert!(seen.windows(2).all(|pair| pair[0] < pair[1]), "{seen:?}");
+}
+
+#[test]
+fn stored_rar5_entries_built_by_the_tests_are_extracted() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("built.rar");
+    Rar5::new()
+        .file("a.txt", b"alpha")
+        .file("dir/b.txt", b"beta")
+        .write(&archive);
+    let destination = dir.path().join("out");
+
+    extract_all(&archive, &destination).unwrap();
+
+    assert_eq!(files_below(&destination), ["a.txt", "dir/b.txt"]);
+    assert_eq!(
+        fs::read_to_string(destination.join("dir/b.txt")).unwrap(),
+        "beta"
+    );
+}
+
+#[test]
+fn rar_link_and_file_copy_entries_are_refused_before_anything_is_written() {
+    for kind in [
+        Redirect::HardLink,
+        Redirect::FileCopy,
+        Redirect::UnixSymlink,
+        Redirect::WindowsSymlink,
+        Redirect::Junction,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("session.key");
+        fs::write(&secret, "secret").unwrap();
+        let archive = dir.path().join("links.rar");
+        Rar5::new()
+            .file("readme.txt", b"harmless")
+            .redirect("Movie.mkv", kind, &secret.to_string_lossy())
+            .write(&archive);
+        let destination = dir.path().join("out");
+
+        let error = extract_all(&archive, &destination).unwrap_err();
+
+        assert!(
+            matches!(&error, Error::UnsupportedEntry { entry, .. } if entry == "Movie.mkv"),
+            "{kind:?}: {error}"
+        );
+        assert_eq!(files_below(&destination), Vec::<String>::new(), "{kind:?}");
+        assert_eq!(fs::read_to_string(&secret).unwrap(), "secret", "{kind:?}");
+    }
+}
+
+#[test]
+fn a_refused_link_names_the_entry_and_its_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("link.rar");
+    Rar5::new()
+        .redirect("Movie.mkv", Redirect::HardLink, "data/db/rd-client.db")
+        .write(&archive);
+
+    let error = extract_all(&archive, &dir.path().join("out")).unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "archive entry \"Movie.mkv\" cannot be extracted: it is a hard link"
+    );
 }

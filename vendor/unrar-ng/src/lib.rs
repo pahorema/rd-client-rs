@@ -148,5 +148,5 @@ mod open_archive;
 pub use error::UnrarResult;
 pub use open_archive::{
     CursorBeforeFile, CursorBeforeHeader, ExtractEvent, ExtractStatus, FileHeader, List, ListSplit,
-    OpenArchive, Process, VolumeInfo,
+    OpenArchive, Process, Redirection, VolumeInfo,
 };
