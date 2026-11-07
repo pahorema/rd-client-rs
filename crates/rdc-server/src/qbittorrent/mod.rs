@@ -420,6 +420,10 @@ async fn protected_request(
             if name.is_empty() {
                 return Err(bad_request("category name is empty"));
             }
+            // Categories are stored comma-separated.
+            if name.contains(',') {
+                return Err(bad_request("Invalid category name"));
+            }
             let settings = engine.settings();
             let mut categories = settings
                 .general

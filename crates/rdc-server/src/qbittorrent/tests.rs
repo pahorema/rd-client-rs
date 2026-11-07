@@ -901,6 +901,11 @@ async fn auxiliary_endpoints_and_binding_errors_keep_expected_statuses() {
                 "category=",
                 StatusCode::BAD_REQUEST,
             ),
+            (
+                "torrents/createCategory",
+                "category=a%2Cb",
+                StatusCode::BAD_REQUEST,
+            ),
             ("torrents/add", "urls=", StatusCode::BAD_REQUEST),
         ];
         for (suffix, form, status) in invalid {
@@ -919,6 +924,7 @@ async fn auxiliary_endpoints_and_binding_errors_keep_expected_statuses() {
                 "{suffix}"
             );
         }
+        assert_eq!(fixture.test.engine.settings().general.categories, None);
         assert_eq!(
             call(
                 &app,
