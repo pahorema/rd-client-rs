@@ -25,6 +25,7 @@ rdc-model.workspace = true
 rdc-store = { path = "../rdc-store" }
 reqwest = { workspace = true, features = ["rustls"] }
 rust-embed = { workspace = true, features = ["interpolate-folder-path"] }
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
 subtle.workspace = true
