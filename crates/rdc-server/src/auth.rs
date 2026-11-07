@@ -25,7 +25,7 @@ use axum::{
 };
 use data_encoding::BASE64URL_NOPAD;
 use hmac::{Hmac, KeyInit, Mac};
-use rdc_store::{LoginOutcome, Store};
+use rdc_store::{LoginOutcome, Store, User};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::sync::Mutex;
@@ -151,7 +151,20 @@ impl Sessions {
         else {
             return Ok(None);
         };
-        let Some(stamp) = user.security_stamp else {
+        self.sign_in(&user, scope).await
+    }
+
+    /// Returns a persistent `SID` Set-Cookie header for an account the caller
+    /// has just authenticated or created; `None` when it has no security stamp.
+    ///
+    /// # Errors
+    /// Fails on an invalid base path.
+    pub async fn sign_in(
+        &self,
+        user: &User,
+        scope: &CookieScope,
+    ) -> Result<Option<HeaderValue>, AuthError> {
+        let Some(stamp) = &user.security_stamp else {
             return Ok(None);
         };
         self.invalidate(&user.id).await;

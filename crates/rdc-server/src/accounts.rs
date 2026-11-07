@@ -107,7 +107,7 @@ async fn create(
             "Invalid UserName or Password",
         ));
     }
-    state
+    let user = state
         .store
         .users()
         .create(user_name, password)
@@ -115,7 +115,7 @@ async fn create(
         .map_err(user_error)?;
     let cookie = state
         .sessions
-        .login(user_name, password, &scope)
+        .sign_in(&user, &scope)
         .await
         .map_err(internal)?
         .ok_or_else(|| internal("Account created but sign-in failed"))?;
