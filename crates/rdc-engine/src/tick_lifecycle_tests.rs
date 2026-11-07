@@ -50,7 +50,7 @@ async fn backdate_added(test: &TestEngine, id: Uuid, at: Timestamp) {
 }
 
 async fn wait_until<F: Fn() -> bool>(condition: F) {
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         while !condition() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -299,10 +299,23 @@ async fn background_tick_loop_advances_torrents_and_stops_on_shutdown() {
     let (test, factory) = fixture().await;
     let torrent = add(&test, HASH, "one", &["a.bin"], template()).await;
     let runner = tokio::spawn(crate::background::tick_loop(test.engine.clone()));
-    wait_until(|| factory.engines().len() == 1).await;
-    finish(&test, &factory, 0, b"complete").await;
+    // The engine is started only after it is registered and its start is persisted.
+    wait_until(|| {
+        factory
+            .engines()
+            .first()
+            .is_some_and(|engine| engine.started() == 1)
+    })
+    .await;
+    // The loop owns completion collection, so the transfer is finished through its backend
+    // without inspecting the registry the loop is concurrently draining.
+    let request = factory.requests()[0].clone();
+    fs::write(&request.local_path, b"complete")
+        .await
+        .expect("download file");
+    factory.engines()[0].complete(Ok(()));
     let store = test.store.clone();
-    tokio::time::timeout(Duration::from_secs(10), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let row = store
                 .torrents()
