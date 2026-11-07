@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use rdc_model::settings::SettingEntry;
+use rdc_model::settings::{SettingEntry, stored_text_from_json};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -67,7 +67,7 @@ async fn update(
     let values = values
         .into_iter()
         .filter_map(|CaseInsensitive(SettingUpdate { key, value })| {
-            key.map(|key| (key, stored_value(value)))
+            key.map(|key| (key, value.as_ref().and_then(stored_text_from_json)))
         })
         .collect();
     state
@@ -76,15 +76,6 @@ async fn update(
         .await
         .map_err(internal)?;
     Ok(StatusCode::OK)
-}
-
-fn stored_value(value: Option<Value>) -> Option<String> {
-    match value? {
-        Value::Null => None,
-        Value::String(value) => Some(value),
-        Value::Bool(value) => Some(if value { "True" } else { "False" }.to_owned()),
-        other => Some(other.to_string()),
-    }
 }
 
 async fn profile(State(state): State<AppState>) -> Result<Json<rdc_engine::Profile>, ApiError> {
