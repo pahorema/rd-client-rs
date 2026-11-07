@@ -77,7 +77,8 @@ pub struct ProviderConfig {
     pub api_key: String,
     /// Alternative API hostname (Real-Debrid only), `None` for the default.
     pub api_hostname: Option<String>,
-    /// Timeout of every request.
+    /// Timeout of every request. Providers do not read it: it is the timeout
+    /// to build the [`ProviderHttp`](crate::ProviderHttp) they are given with.
     pub timeout: Duration,
     /// Download whole torrents as one zip when possible (TorBox only).
     pub prefer_zipped_downloads: bool,

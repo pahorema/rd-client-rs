@@ -2,7 +2,6 @@
 
 use std::fmt;
 use std::path::Path;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use jiff::{SignedDuration, Timestamp};
@@ -33,7 +32,6 @@ const PAGE_SIZE: &str = "50";
 pub struct DebridLink {
     http: ProviderHttp,
     api_key: String,
-    timeout: Duration,
     base_url: String,
 }
 
@@ -41,20 +39,17 @@ impl fmt::Debug for DebridLink {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DebridLink")
             .field("api_key", &"<redacted>")
-            .field("timeout", &self.timeout)
             .field("base_url", &self.base_url)
             .finish_non_exhaustive()
     }
 }
 
 impl DebridLink {
-    /// Creates a client for the account of `config.api_key`; every request
-    /// times out after `config.timeout`.
+    /// Creates a client for the account of `config.api_key`.
     pub fn new(config: &ProviderConfig, http: ProviderHttp) -> Self {
         Self {
             http,
             api_key: config.api_key.clone(),
-            timeout: config.timeout,
             base_url: DEFAULT_BASE_URL.to_owned(),
         }
     }
@@ -231,8 +226,7 @@ impl DebridLink {
             .http
             .client()
             .request(method, format!("{}{path}", self.base_url))
-            .bearer_auth(&self.api_key)
-            .timeout(self.timeout))
+            .bearer_auth(&self.api_key))
     }
 
     async fn send<T: DeserializeOwned>(

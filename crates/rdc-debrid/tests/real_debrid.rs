@@ -24,15 +24,12 @@ fn config(api_key: &str, timeout: Duration) -> ProviderConfig {
 }
 
 fn client_with(server: &MockServer, config: &ProviderConfig) -> RealDebrid {
-    let http = ProviderHttp::new(
-        Duration::from_secs(30),
-        Arc::new(RateLimitCoordinator::new()),
-    )
-    .expect("client builds")
-    .with_retry_policy(RetryPolicy {
-        max_retries: 1,
-        base_delay: Duration::from_millis(1),
-    });
+    let http = ProviderHttp::new(config.timeout, Arc::new(RateLimitCoordinator::new()))
+        .expect("client builds")
+        .with_retry_policy(RetryPolicy {
+            max_retries: 1,
+            base_delay: Duration::from_millis(1),
+        });
     RealDebrid::with_base_url(config, http, &format!("{}/rest/1.0/", server.uri()))
 }
 

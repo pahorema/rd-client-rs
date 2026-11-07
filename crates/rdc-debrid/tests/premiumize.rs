@@ -191,10 +191,11 @@ async fn timeouts_name_the_cause_but_not_the_api_key() {
         )
         .mount(&server)
         .await;
-    let mut config = common::config();
-    config.timeout = Duration::from_millis(50);
-    let client = Premiumize::new(&config, common::http_with_timeout(config.timeout))
-        .with_base_url(&server.uri());
+    let client = Premiumize::new(
+        &common::config(),
+        common::http_with_timeout(Duration::from_millis(50)),
+    )
+    .with_base_url(&server.uri());
 
     let error = client.user().await.expect_err("timed out");
 

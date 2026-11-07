@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use jiff::Timestamp;
@@ -52,7 +51,6 @@ pub fn is_spool_id(id: &str) -> bool {
 pub struct Highway {
     http: ProviderHttp,
     api_key: String,
-    timeout: Duration,
     endpoint: String,
 }
 
@@ -60,20 +58,17 @@ impl fmt::Debug for Highway {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Highway")
             .field("api_key", &"<redacted>")
-            .field("timeout", &self.timeout)
             .field("endpoint", &self.endpoint)
             .finish_non_exhaustive()
     }
 }
 
 impl Highway {
-    /// Creates a client for the account of the API token `config.api_key`;
-    /// every request times out after `config.timeout`.
+    /// Creates a client for the account of the API token `config.api_key`.
     pub fn new(config: &ProviderConfig, http: ProviderHttp) -> Self {
         Self {
             http,
             api_key: config.api_key.clone(),
-            timeout: config.timeout,
             endpoint: DEFAULT_ENDPOINT.to_owned(),
         }
     }
@@ -310,8 +305,7 @@ impl Highway {
             .client()
             .request(method, &self.endpoint)
             .query(query)
-            .bearer_auth(&self.api_key)
-            .timeout(self.timeout))
+            .bearer_auth(&self.api_key))
     }
 
     /// Sends a request; `None` for 404 and empty bodies.

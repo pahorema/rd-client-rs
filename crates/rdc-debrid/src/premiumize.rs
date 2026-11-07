@@ -10,7 +10,6 @@
 
 use std::fmt;
 use std::pin::Pin;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use jiff::Timestamp;
@@ -54,14 +53,12 @@ pub struct Premiumize {
     http: ProviderHttp,
     base_url: String,
     api_key: String,
-    timeout: Duration,
 }
 
 impl fmt::Debug for Premiumize {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Premiumize")
             .field("base_url", &self.base_url)
-            .field("timeout", &self.timeout)
             .finish_non_exhaustive()
     }
 }
@@ -73,7 +70,6 @@ impl Premiumize {
             http,
             base_url: DEFAULT_BASE_URL.to_owned(),
             api_key: config.api_key.clone(),
-            timeout: config.timeout,
         }
     }
 
@@ -293,8 +289,7 @@ impl Premiumize {
             .client()
             .request(method, format!("{}{path}", self.base_url))
             .query(params)
-            .query(&[("apikey", api_key)])
-            .timeout(self.timeout))
+            .query(&[("apikey", api_key)]))
     }
 
     async fn call<T: DeserializeOwned>(&self, request: RequestBuilder) -> Result<T, DebridError> {

@@ -72,7 +72,6 @@ pub struct TorBox {
     /// Host whose cooldown is extended when TorBox asks to slow down.
     host: String,
     api_key: String,
-    timeout: Duration,
     prefer_zipped_downloads: bool,
     error_retry: RetryPolicy,
 }
@@ -81,7 +80,6 @@ impl fmt::Debug for TorBox {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TorBox")
             .field("base_url", &self.base_url)
-            .field("timeout", &self.timeout)
             .field("prefer_zipped_downloads", &self.prefer_zipped_downloads)
             .field("error_retry", &self.error_retry)
             .finish_non_exhaustive()
@@ -96,7 +94,6 @@ impl TorBox {
             base_url: String::new(),
             host: String::new(),
             api_key: config.api_key.clone(),
-            timeout: config.timeout,
             prefer_zipped_downloads: config.prefer_zipped_downloads,
             error_retry: DEFAULT_ERROR_RETRY,
         }
@@ -459,8 +456,7 @@ impl TorBox {
             .client()
             .request(method, format!("{}{path}", self.base_url))
             .bearer_auth(api_key)
-            .query(params)
-            .timeout(self.timeout))
+            .query(params))
     }
 
     /// Sends the request made by `build` and returns the envelope's `data`,

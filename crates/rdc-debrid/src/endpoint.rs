@@ -1,8 +1,7 @@
-//! Base address, API key and timeout of a provider API authenticated with a
-//! bearer token.
+//! Base address and API key of a provider API authenticated with a bearer
+//! token.
 
 use std::fmt;
-use std::time::Duration;
 
 use reqwest::{Method, RequestBuilder, Url};
 
@@ -17,7 +16,6 @@ pub(crate) struct Endpoint {
     /// API root (always ending with `/`), or why it is unusable.
     base_url: Result<Url, String>,
     api_key: String,
-    timeout: Duration,
 }
 
 impl fmt::Debug for Endpoint {
@@ -25,7 +23,6 @@ impl fmt::Debug for Endpoint {
         f.debug_struct("Endpoint")
             .field("provider", &self.provider)
             .field("base_url", &self.base_url)
-            .field("timeout", &self.timeout)
             .finish_non_exhaustive()
     }
 }
@@ -46,7 +43,6 @@ impl Endpoint {
             provider,
             base_url,
             api_key: config.api_key.trim().to_owned(),
-            timeout: config.timeout,
         }
     }
 
@@ -71,10 +67,7 @@ impl Endpoint {
         method: Method,
         path: &str,
     ) -> Result<RequestBuilder, DebridError> {
-        Ok(http
-            .client()
-            .request(method, self.url(path)?)
-            .timeout(self.timeout))
+        Ok(http.client().request(method, self.url(path)?))
     }
 
     /// A request carrying the API key as bearer token.
@@ -101,6 +94,7 @@ impl Endpoint {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use super::*;
     use crate::rate_limit::RateLimitCoordinator;
