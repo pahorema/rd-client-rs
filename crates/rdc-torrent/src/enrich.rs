@@ -2,78 +2,51 @@ use crate::bencode::{self, Node, Value};
 use std::{borrow::Cow, collections::HashSet};
 use thiserror::Error;
 
-/// Adds unique trackers and groups existing parameters in first-key order.
-/// Values use percent encoding (including display names); exact topics retain readable colons.
+/// Appends the trackers a magnet link does not list yet as percent-encoded `tr` parameters.
+/// Existing parameters stay byte for byte in place, valueless ones included, and a `#fragment`
+/// stays at the end. Trackers compare case-insensitively with the decoded `tr` values (`+` read
+/// as a space, as [`MagnetLink::parse`](crate::MagnetLink::parse) does).
 /// Returns the exact input when no tracker is added. Fetch failures are handled by the caller.
 #[must_use]
 pub fn enrich_magnet<'src>(magnet: &'src str, trackers: &[String]) -> Cow<'src, str> {
-    if trackers.is_empty() {
-        return Cow::Borrowed(magnet);
-    }
-    let (scheme, query) = magnet.split_once('?').unwrap_or((magnet, ""));
-    if query.is_empty() {
-        let mut out = format!("{scheme}?");
-        for tracker in trackers {
-            append_parameter(&mut out, "tr", tracker);
-        }
-        return Cow::Owned(out);
-    }
-    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
-    for pair in query.split('&').filter(|s| s.contains('=')) {
-        for (key, value) in url::form_urlencoded::parse(pair.as_bytes()) {
-            if let Some((_, values)) = groups
-                .iter_mut()
-                .find(|(k, _)| k.eq_ignore_ascii_case(&key))
-            {
-                values.push(value.into_owned());
-            } else {
-                groups.push((key.into_owned(), vec![value.into_owned()]));
-            }
-        }
-    }
-    let mut existing = Vec::new();
-    let mut seen = HashSet::new();
-    if let Some(index) = groups
+    let (body, fragment) = match magnet.split_once('#') {
+        Some((body, fragment)) => (body, Some(fragment)),
+        None => (magnet, None),
+    };
+    let query = body.split_once('?').map_or("", |(_, query)| query);
+    let mut seen: HashSet<String> = url::form_urlencoded::parse(query.as_bytes())
+        .filter(|(key, _)| key.eq_ignore_ascii_case("tr"))
+        .map(|(_, tracker)| tracker.to_lowercase())
+        .collect();
+    let added: Vec<&String> = trackers
         .iter()
-        .position(|(k, _)| k.eq_ignore_ascii_case("tr"))
-    {
-        for tracker in groups.remove(index).1 {
-            push_unique(&mut existing, &mut seen, tracker);
-        }
-    }
-    let count = existing.len();
-    for tracker in trackers {
-        if seen.insert(tracker.to_lowercase()) {
-            existing.push(tracker.clone());
-        }
-    }
-    if count == existing.len() {
+        .filter(|tracker| seen.insert(tracker.to_lowercase()))
+        .collect();
+    if added.is_empty() {
         return Cow::Borrowed(magnet);
     }
-    let mut out = format!("{scheme}?");
-    for (key, values) in groups {
-        for value in values {
-            append_parameter(&mut out, &key, &value);
-        }
+    let mut out = body.to_owned();
+    if !body.contains('?') {
+        out.push('?');
     }
-    for tracker in existing {
-        append_parameter(&mut out, "tr", &tracker);
+    for tracker in added {
+        if !out.ends_with(['?', '&']) {
+            out.push('&');
+        }
+        out.push_str("tr=");
+        escape_into(tracker, &mut out);
+    }
+    if let Some(fragment) = fragment {
+        out.push('#');
+        out.push_str(fragment);
     }
     Cow::Owned(out)
 }
 
-fn append_parameter(out: &mut String, key: &str, value: &str) {
-    if !out.ends_with('?') {
-        out.push('&');
-    }
-    escape_into(key, out, false);
-    out.push('=');
-    escape_into(value, out, key.eq_ignore_ascii_case("xt"));
-}
-fn escape_into(value: &str, out: &mut String, topic: bool) {
+fn escape_into(value: &str, out: &mut String) {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) || (topic && byte == b':') {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
             out.push(char::from(byte));
         } else {
             out.push('%');

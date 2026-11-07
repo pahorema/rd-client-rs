@@ -104,30 +104,32 @@ fn preserves_parameters_and_includes_all_trackers() {
 }
 
 #[test]
-fn percent_encodes_names_and_other_values_without_corrupting_queries() {
-    // Q13: decoded dn spaces and ampersands remain percent-encoded, not raw.
+fn existing_parameters_are_kept_byte_for_byte() {
     let input =
         "magnet:?xt=urn%3Abtih%3AHASH&dn=Name+%26+%C3%A9&x=a%2Bb%26c&x=d%3De&TR=udp%3A%2F%2Fone";
     assert_eq!(
-        enrich_magnet(input, &strings(&["udp://two"])),
-        "magnet:?xt=urn:btih:HASH&dn=Name%20%26%20%C3%A9&x=a%2Bb%26c&x=d%3De&tr=udp%3A%2F%2Fone&tr=udp%3A%2F%2Ftwo"
+        enrich_magnet(input, &strings(&["udp://two", "udp://one"])),
+        format!("{input}&tr=udp%3A%2F%2Ftwo")
     );
-    // Q13 also encodes values under differently-cased name/topic keys.
     assert_eq!(
         enrich_magnet(
-            "magnet:?XT=urn:btih:HASH&DN=a%26b",
-            &strings(&["udp://new"])
+            "magnet:?xt=urn:btih:HASH&flag&dn=a+b&tr=udp%3A%2F%2Fone#frag",
+            &strings(&["udp://two"])
         ),
-        "magnet:?XT=urn:btih:HASH&DN=a%26b&tr=udp%3A%2F%2Fnew"
+        "magnet:?xt=urn:btih:HASH&flag&dn=a+b&tr=udp%3A%2F%2Fone&tr=udp%3A%2F%2Ftwo#frag"
+    );
+    assert_eq!(
+        enrich_magnet("magnet:?xt=urn:btih:HASH&", &strings(&["udp://two"])),
+        "magnet:?xt=urn:btih:HASH&tr=udp%3A%2F%2Ftwo"
     );
 }
 
 #[test]
-fn absent_query_appends_supplied_trackers_without_regrouping() {
+fn trackers_supplied_twice_are_added_once() {
     for input in ["magnet:", "magnet:?"] {
         assert_eq!(
-            enrich_magnet(input, &strings(&["udp://one", "udp://one"])),
-            "magnet:?tr=udp%3A%2F%2Fone&tr=udp%3A%2F%2Fone"
+            enrich_magnet(input, &strings(&["udp://one", "UDP://ONE"])),
+            "magnet:?tr=udp%3A%2F%2Fone"
         );
     }
 }
