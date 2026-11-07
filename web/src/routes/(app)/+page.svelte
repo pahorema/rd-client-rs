@@ -12,6 +12,7 @@
 	import { formatDateTime, formatNumber, formatSize } from '#lib/format.js';
 	import { live } from '#lib/live.svelte.js';
 	import {
+		browserStorage,
 		filterTorrents,
 		loadTorrentSort,
 		nextSort,
@@ -32,7 +33,7 @@
 
 	let query = $state('');
 	let filter = $state<TorrentFilter>('all');
-	let sort = $state(loadTorrentSort(globalThis.localStorage));
+	let sort = $state(loadTorrentSort(browserStorage()));
 	const selected = new SvelteSet<string>();
 
 	let deleteOpen = $state(false);
@@ -81,7 +82,7 @@
 
 	function sortBy(field: TorrentSortField) {
 		sort = nextSort(sort, field);
-		saveTorrentSort(globalThis.localStorage, sort);
+		saveTorrentSort(browserStorage(), sort);
 	}
 
 	function toggle(id: string, checked: boolean) {

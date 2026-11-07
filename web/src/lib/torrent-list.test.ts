@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { TorrentStatus, type Torrent } from './api/types.js';
 import {
+	browserStorage,
 	defaultTorrentSort,
 	filterTorrents,
 	loadTorrentSort,
@@ -112,5 +113,16 @@ describe('sort persistence', () => {
 			defaultTorrentSort
 		);
 		expect(loadTorrentSort({ getItem: () => 'not json' })).toEqual(defaultTorrentSort);
+	});
+
+	it('treats storage whose getter throws as unavailable', () => {
+		const blocked = {
+			get localStorage(): Storage {
+				throw new DOMException('The operation is insecure.', 'SecurityError');
+			}
+		};
+
+		expect(browserStorage(blocked)).toBeUndefined();
+		expect(loadTorrentSort(browserStorage(blocked))).toEqual(defaultTorrentSort);
 	});
 });

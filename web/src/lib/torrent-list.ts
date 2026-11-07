@@ -90,6 +90,20 @@ export function nextSort(current: TorrentSort, field: TorrentSortField): Torrent
 	return { field, direction: 'desc' };
 }
 
+/**
+ * The browser's local storage, or `undefined` where reading it throws (blocked
+ * cookies and site data make the property getter itself raise a `SecurityError`).
+ */
+export function browserStorage(
+	scope: { readonly localStorage?: Storage } = globalThis
+): Storage | undefined {
+	try {
+		return scope.localStorage;
+	} catch {
+		return undefined;
+	}
+}
+
 const SORT_STORAGE_KEY = 'rd-client.torrents.sort';
 
 /** Reads the persisted sort order, falling back to newest first. */
