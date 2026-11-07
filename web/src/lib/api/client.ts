@@ -40,11 +40,18 @@ export function errorMessage(error: unknown): string {
 	return String(error);
 }
 
+/** Longest server text shown in an error; bodies can be large (a whole page or payload). */
+const MAX_MESSAGE_LENGTH = 300;
+
+function clip(text: string): string {
+	return text.length > MAX_MESSAGE_LENGTH ? `${text.slice(0, MAX_MESSAGE_LENGTH)}…` : text;
+}
+
 async function failure(response: Response): Promise<ApiError> {
 	const body = (await response.text().catch(() => '')).trim();
 	const fallback = `Request failed with status ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`;
 
-	return new ApiError(response.status, body || fallback);
+	return new ApiError(response.status, clip(body) || fallback);
 }
 
 /**
@@ -90,6 +97,6 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 	try {
 		return JSON.parse(text) as T;
 	} catch {
-		throw new ApiError(response.status, `Unexpected response from the server: ${text}`);
+		throw new ApiError(response.status, `Unexpected response from the server: ${clip(text)}`);
 	}
 }

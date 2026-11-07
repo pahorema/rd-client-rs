@@ -64,6 +64,17 @@ describe('request', () => {
 		expect(errorMessage(error)).toBe('Invalid credentials');
 	});
 
+	it('shortens long error bodies', async () => {
+		fetchMock.mockResolvedValue(
+			new Response(`Invalid torrent: ${'A'.repeat(5000)}`, { status: 500 })
+		);
+
+		const message = errorMessage(await request('Api/Torrents').catch((e: unknown) => e));
+
+		expect(message).toHaveLength(301);
+		expect(message.endsWith('A…')).toBe(true);
+	});
+
 	it('describes errors without a body by their status', async () => {
 		fetchMock.mockResolvedValue(new Response(null, { status: 500, statusText: 'Server Error' }));
 
