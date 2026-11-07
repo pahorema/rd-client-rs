@@ -165,10 +165,12 @@ async fn index_and_ui_missing_page_are_healthy_and_not_cached() {
         let body = text(response).await;
         assert!(body.contains("UI is missing") || body.contains("<html"));
     }
-    assert_eq!(
-        request(app, "/missing.js").await.status(),
-        StatusCode::NOT_FOUND
-    );
+    for path in ["/missing.js", "/torrent/details"] {
+        assert_eq!(
+            request(app.clone(), path).await.status(),
+            StatusCode::NOT_FOUND
+        );
+    }
 }
 
 #[tokio::test]

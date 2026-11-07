@@ -439,15 +439,8 @@ async fn static_file(request: Request) -> Response {
     } else {
         asset_path
     };
-    let asset = WebAssets::get(requested)
-        .map(|asset| (requested, asset))
-        .or_else(|| {
-            if requested.contains('.') {
-                None
-            } else {
-                WebAssets::get("index.html").map(|asset| ("index.html", asset))
-            }
-        });
+    // The UI uses hash routing, so only the root path maps to the index page.
+    let asset = WebAssets::get(requested).map(|asset| (requested, asset));
     let mut response = if let Some((name, asset)) = asset {
         asset_response(name, asset.data)
     } else if requested == "index.html" {
