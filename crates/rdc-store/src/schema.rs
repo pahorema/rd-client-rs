@@ -14,7 +14,7 @@ mod tests;
 use std::collections::HashSet;
 
 use sqlx::{ConnectOptions, Connection, SqliteConnection, sqlite::SqliteConnectOptions};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::error::{Result, StoreError};
 
@@ -45,8 +45,17 @@ pub(crate) async fn prepare(options: &SqliteConnectOptions) -> Result<()> {
         Ok(false) => upgrade(&mut connection, MIGRATIONS).await,
         Err(error) => Err(error),
     };
-    connection.close().await?;
-    result
+    // A failed close must not hide the migration error it follows.
+    let closed = connection.close().await;
+    match (result, closed) {
+        (Err(error), closed) => {
+            if let Err(close) = closed {
+                warn!(%close, "closing the migration connection failed");
+            }
+            Err(error)
+        }
+        (Ok(()), closed) => Ok(closed?),
+    }
 }
 
 /// Names of the tables in the database, internal SQLite tables excluded.
