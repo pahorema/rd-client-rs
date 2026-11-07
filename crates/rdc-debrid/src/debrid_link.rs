@@ -12,8 +12,10 @@ use serde::Deserialize;
 use serde::de::{DeserializeOwned, IgnoredAny};
 
 use crate::error::DebridError;
-use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp};
+use crate::http::ProviderHttp;
 use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
+use crate::text_rate_limit::classify_add_error;
+use crate::values::{base_name, non_blank};
 
 /// `rd_status_raw` of a torrent the provider no longer knows.
 const DELETED: &str = "deleted";
@@ -129,7 +131,7 @@ impl DebridLink {
 
     async fn add(&self, request: RequestBuilder) -> Result<String, DebridError> {
         let torrent: Option<SeedboxTorrent> =
-            self.send(request).await.map_err(rate_limit_from_text)?;
+            self.send(request).await.map_err(classify_add_error)?;
         Ok(torrent.and_then(|torrent| torrent.id).unwrap_or_default())
     }
 
@@ -196,7 +198,7 @@ impl DebridLink {
             };
             if filter.is_downloadable(&file.path, file.bytes)? {
                 infos.push(DownloadInfo {
-                    file_name: Some(file_name_of(&file.path).to_owned()),
+                    file_name: Some(base_name(&file.path).to_owned()),
                     restricted_link: link,
                 });
             }
@@ -388,32 +390,6 @@ fn http_error(status: StatusCode) -> DebridError {
     DebridError::Provider(format!(
         "Debrid-Link answered with unexpected HTTP status {status}"
     ))
-}
-
-/// Treats an add failure whose text asks to slow down as a two-minute rate limit.
-fn rate_limit_from_text(error: DebridError) -> DebridError {
-    if matches!(error, DebridError::RateLimited { .. }) {
-        return error;
-    }
-    let message = error.to_string();
-    let lowercase = message.to_lowercase();
-    if lowercase.contains("slow_down") || lowercase.contains("rate limit exceeded") {
-        DebridError::RateLimited {
-            message,
-            retry_after: DEFAULT_RATE_LIMIT_COOLDOWN,
-        }
-    } else {
-        error
-    }
-}
-
-fn non_blank(value: Option<&str>) -> Option<&str> {
-    value.filter(|value| !value.trim().is_empty())
-}
-
-/// Last component of a provider file path.
-fn file_name_of(path: &str) -> &str {
-    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 fn apply(torrent: &mut Torrent, remote: &RemoteTorrent) {

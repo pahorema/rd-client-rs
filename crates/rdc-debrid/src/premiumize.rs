@@ -22,6 +22,7 @@ use serde::de::{DeserializeOwned, IgnoredAny};
 use crate::error::DebridError;
 use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp};
 use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
+use crate::values::{excerpt, non_blank, percent};
 
 /// Address of the Premiumize API.
 pub const DEFAULT_BASE_URL: &str = "https://www.premiumize.me/api/";
@@ -43,9 +44,6 @@ const RATE_LIMIT_MARKERS: [&str; 14] = [
     "target service is unreachable",
     "retry after a delay",
 ];
-
-/// Longest part of an unexpected response body quoted in error messages.
-const BODY_EXCERPT_CHARS: usize = 300;
 
 /// Client for a Premiumize.me account.
 #[derive(Clone)]
@@ -370,14 +368,6 @@ fn created_id(created: Created, what: &str) -> Result<String, DebridError> {
         .ok_or_else(|| DebridError::Provider(format!("Unable to add {what}")))
 }
 
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "a fraction of 1 times 100 always fits; NaN and overflow saturate"
-)]
-fn percent(fraction: f64) -> i64 {
-    (fraction * 100.0) as i64
-}
-
 /// An identifier Premiumize sends either as a number or as a string.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -444,12 +434,6 @@ fn unreadable(body: &str, error: &serde_json::Error) -> DebridError {
     ))
 }
 
-fn excerpt(body: &str) -> &str {
-    body.char_indices()
-        .nth(BODY_EXCERPT_CHARS)
-        .map_or(body, |(end, _)| &body[..end])
-}
-
 /// Writes `remote` into the torrent's `rd_*` fields.
 fn apply(torrent: &mut Torrent, remote: &RemoteTorrent) {
     if !remote.filename.trim().is_empty() {
@@ -502,10 +486,6 @@ struct Item {
     #[serde(rename = "type")]
     kind: Option<String>,
     link: Option<String>,
-}
-
-fn non_blank(text: Option<&str>) -> Option<&str> {
-    text.filter(|text| !text.trim().is_empty())
 }
 
 #[async_trait]

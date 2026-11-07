@@ -20,6 +20,7 @@ use serde::{Deserialize, Deserializer};
 use crate::error::DebridError;
 use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp, RetryPolicy};
 use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
+use crate::values::{base_name, excerpt, percent};
 
 /// Address of the TorBox API.
 pub const DEFAULT_BASE_URL: &str = "https://api.torbox.app/v1/api/";
@@ -50,9 +51,6 @@ const TRANSIENT_ERRORS: [&str; 4] = [
 
 /// Error codes meaning the account has to wait before adding more work.
 const RATE_LIMIT_ERRORS: [&str; 2] = ["RATE_LIMIT", "ACTIVE_LIMIT"];
-
-/// Longest part of an unexpected response body quoted in error messages.
-const BODY_EXCERPT_CHARS: usize = 300;
 
 /// Longest wait between retries of a transient TorBox error.
 const MAX_ERROR_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -813,25 +811,11 @@ fn timestamp<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Timest
     }))
 }
 
-fn excerpt(body: &str) -> &str {
-    body.char_indices()
-        .nth(BODY_EXCERPT_CHARS)
-        .map_or(body, |(end, _)| &body[..end])
-}
-
 /// Reads a TorBox torrent id (a number).
 fn parse_id(id: &str) -> Result<i64, DebridError> {
     id.trim()
         .parse()
         .map_err(|_| DebridError::Provider(format!("Invalid TorBox torrent id: {id}")))
-}
-
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "a fraction of 1 times 100 always fits; NaN and overflow saturate"
-)]
-fn percent(fraction: f64) -> i64 {
-    (fraction * 100.0) as i64
 }
 
 /// Writes `remote` into the torrent's `rd_*` fields.
@@ -941,11 +925,6 @@ fn parse_sentinel_link(link: &str) -> Result<(i64, Option<i64>), DebridError> {
         DebridError::Provider(format!("Invalid file ID in link segment 5: {file_id}"))
     })?;
     Ok((torrent_id, Some(file_id)))
-}
-
-/// The last component of a provider path.
-fn base_name(path: &str) -> &str {
-    path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 /// A cached torrent of a `checkcached` answer.

@@ -15,6 +15,7 @@ pub mod rate_limit;
 pub mod real_debrid;
 mod text_rate_limit;
 pub mod torbox;
+mod values;
 
 pub use all_debrid::AllDebrid;
 pub use connect::connect;

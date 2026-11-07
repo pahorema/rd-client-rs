@@ -18,8 +18,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 
 use crate::error::DebridError;
-use crate::http::{DEFAULT_RATE_LIMIT_COOLDOWN, ProviderHttp};
+use crate::http::ProviderHttp;
 use crate::provider::{AvailableFile, DebridProvider, DebridUser, ProviderConfig, RemoteTorrent};
+use crate::text_rate_limit::classify_add_error;
+use crate::values::{base_name, non_blank};
 
 /// The public HIGHWAY API endpoint.
 pub const DEFAULT_ENDPOINT: &str = "https://cloud.high-way.me/center-api/transfers.php";
@@ -136,7 +138,7 @@ impl Highway {
 
     async fn add(&self, form: Form) -> Result<String, DebridError> {
         let request = self.request(Method::POST, &[])?.multipart(form);
-        let body = self.send(request).await.map_err(rate_limit_from_text)?;
+        let body = self.send(request).await.map_err(classify_add_error)?;
         let transfer: Option<Transfer> = body.as_deref().map(decode).transpose()?;
         transfer
             .and_then(|transfer| transfer.id)
@@ -435,7 +437,7 @@ fn download_infos(torrent: &Torrent) -> Result<Option<Vec<DownloadInfo>>, Debrid
         }
     }
     let info = |file: &RemoteFile, restricted_link: String| DownloadInfo {
-        file_name: Some(file_name_of(&file.path).to_owned()),
+        file_name: Some(base_name(&file.path).to_owned()),
         restricted_link,
     };
     if torrent.download_client == DownloadClient::Symlink {
@@ -498,11 +500,6 @@ fn starts_with_dir(path: &str, dir: &str) -> bool {
         && matches!(path.as_bytes().get(dir.len()), Some(b'/' | b'\\'))
 }
 
-/// Last component of a provider file path.
-fn file_name_of(path: &str) -> &str {
-    path.rsplit(['/', '\\']).next().unwrap_or(path)
-}
-
 /// The service to name for `id`: spool references are looked up without one.
 fn service_for(id: &str) -> Option<&'static str> {
     (!is_spool_id(id)).then_some(SERVICE)
@@ -514,10 +511,6 @@ fn id_query<'a>(id: &'a str, service: Option<&'a str>) -> Vec<(&'static str, &'a
         query.push(("service", service));
     }
     query
-}
-
-fn non_blank(value: Option<&str>) -> Option<&str> {
-    value.filter(|value| !value.trim().is_empty())
 }
 
 fn apply(torrent: &mut Torrent, remote: &RemoteTorrent) {
@@ -555,23 +548,6 @@ fn apply(torrent: &mut Torrent, remote: &RemoteTorrent) {
         && let Some(detail) = non_blank(remote.message.as_deref())
     {
         torrent.error = Some(detail.to_owned());
-    }
-}
-
-/// Treats an add failure whose text asks to slow down as a two-minute rate limit.
-fn rate_limit_from_text(error: DebridError) -> DebridError {
-    if matches!(error, DebridError::RateLimited { .. }) {
-        return error;
-    }
-    let message = error.to_string();
-    let lowercase = message.to_lowercase();
-    if lowercase.contains("slow_down") || lowercase.contains("rate limit exceeded") {
-        DebridError::RateLimited {
-            message,
-            retry_after: DEFAULT_RATE_LIMIT_COOLDOWN,
-        }
-    } else {
-        error
     }
 }
 
