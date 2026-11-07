@@ -151,6 +151,7 @@ impl<'store> Users<'store> {
             lockout_end: None,
             lockout_enabled: true,
         };
+        let password_hash = password::hash(password).await;
         let inserted = sqlx::query(
             r#"INSERT INTO "AspNetUsers" ("Id", "UserName", "NormalizedUserName", "Email",
                    "NormalizedEmail", "EmailConfirmed", "PasswordHash", "SecurityStamp",
@@ -162,7 +163,7 @@ impl<'store> Users<'store> {
         .bind(&user.id)
         .bind(user_name)
         .bind(normalize(user_name))
-        .bind(password::hash(password))
+        .bind(password_hash)
         .bind(&user.security_stamp)
         .bind(Uuid::new_v4().to_string())
         .execute(self.pool)
@@ -196,12 +197,10 @@ impl<'store> Users<'store> {
         if locked {
             return Ok(LoginOutcome::LockedOut);
         }
-        let verification = account
-            .password_hash
-            .as_deref()
-            .map_or(Verification::Failed, |hash| {
-                password::verify(hash, password)
-            });
+        let verification = match account.password_hash.as_deref() {
+            Some(hash) => password::verify(hash, password).await,
+            None => Verification::Failed,
+        };
         match verification {
             Verification::Failed => return Ok(LoginOutcome::Failed),
             Verification::Success => {}
@@ -209,11 +208,12 @@ impl<'store> Users<'store> {
                 // Like any login write, a concurrent change of the account
                 // only skips the upgrade; the login itself succeeds.
                 let stamp = new_security_stamp();
+                let password_hash = password::hash(password).await;
                 let upgraded = self
                     .write(
                         &mut account,
                         r#""PasswordHash" = ?, "SecurityStamp" = ?"#,
-                        &[password::hash(password), stamp.clone()],
+                        &[password_hash, stamp.clone()],
                     )
                     .await?;
                 if upgraded {
@@ -269,7 +269,7 @@ impl<'store> Users<'store> {
         }
         if new_password {
             assignments.push(r#""PasswordHash" = ?"#);
-            values.push(password::hash(password));
+            values.push(password::hash(password).await);
         }
         if assignments.is_empty() {
             return Ok(account.user);

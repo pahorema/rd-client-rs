@@ -10,12 +10,25 @@
 //!
 //! New hashes use version 3 with HMAC-SHA512, 100 000 iterations, a 16 byte
 //! salt and a 32 byte subkey; verifying any weaker hash asks for a rehash.
+//!
+//! Deriving a key takes tens of milliseconds of CPU, so [`hash`] and
+//! [`verify`] run on the blocking thread pool, at most [`WORKERS`] at a time,
+//! instead of stalling the async workers.
+
+use std::{sync::LazyLock, thread};
 
 use data_encoding::BASE64;
 use pbkdf2::pbkdf2_hmac;
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
 use subtle::ConstantTimeEq;
+use tokio::sync::Semaphore;
+
+/// Key derivations allowed to run at once: half the available cores, at
+/// least one, so a burst of logins leaves CPU for everything else.
+static WORKERS: LazyLock<Semaphore> = LazyLock::new(|| {
+    Semaphore::new(thread::available_parallelism().map_or(1, |cores| cores.get().div_ceil(2)))
+});
 
 /// Iterations of new hashes; weaker stored hashes are upgraded.
 const ITERATIONS: u32 = 100_000;
@@ -44,7 +57,29 @@ pub(crate) enum Verification {
 }
 
 /// A new version 3 hash of `password` with a random salt.
-pub(crate) fn hash(password: &str) -> String {
+pub(crate) async fn hash(password: &str) -> String {
+    let password = password.to_owned();
+    off_thread(move || hash_now(&password)).await
+}
+
+/// Checks `password` against a stored hash, in time independent of where
+/// the subkeys differ.
+pub(crate) async fn verify(hashed: &str, password: &str) -> Verification {
+    let (hashed, password) = (hashed.to_owned(), password.to_owned());
+    off_thread(move || verify_now(&hashed, &password)).await
+}
+
+async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+    let _permit = WORKERS
+        .acquire()
+        .await
+        .expect("the worker semaphore is never closed");
+    tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or_else(|error| std::panic::resume_unwind(error.into_panic()))
+}
+
+fn hash_now(password: &str) -> String {
     let mut salt = [0; SALT_LENGTH];
     getrandom::fill(&mut salt).expect("the operating system provides random bytes");
     hash_with_salt(password, &salt)
@@ -67,9 +102,7 @@ fn hash_with_salt(password: &str, salt: &[u8; SALT_LENGTH]) -> String {
     BASE64.encode(&record)
 }
 
-/// Checks `password` against a stored hash, in time independent of where
-/// the subkeys differ.
-pub(crate) fn verify(hashed: &str, password: &str) -> Verification {
+fn verify_now(hashed: &str, password: &str) -> Verification {
     let Ok(record) = BASE64.decode(hashed.trim().as_bytes()) else {
         return Verification::Failed;
     };
@@ -148,30 +181,30 @@ mod tests {
         assert_eq!(hash_with_salt("Passw0rd!", &salt), V3_SHA512);
     }
 
-    #[test]
-    fn new_hashes_are_salted_and_verify() {
-        let first = hash("Passw0rd!");
-        assert_ne!(first, hash("Passw0rd!"));
-        assert_eq!(verify(&first, "Passw0rd!"), Verification::Success);
-        assert_eq!(verify(&first, "passw0rd!"), Verification::Failed);
+    #[tokio::test]
+    async fn new_hashes_are_salted_and_verify() {
+        let first = hash("Passw0rd!").await;
+        assert_ne!(first, hash("Passw0rd!").await);
+        assert_eq!(verify(&first, "Passw0rd!").await, Verification::Success);
+        assert_eq!(verify(&first, "passw0rd!").await, Verification::Failed);
     }
 
     #[test]
     fn current_hashes_verify_without_rehash() {
-        assert_eq!(verify(V3_SHA512, "Passw0rd!"), Verification::Success);
-        assert_eq!(verify(V3_LONG, "Passw0rd!"), Verification::Success);
-        assert_eq!(verify(V3_SHA512, "Passw0rd?"), Verification::Failed);
+        assert_eq!(verify_now(V3_SHA512, "Passw0rd!"), Verification::Success);
+        assert_eq!(verify_now(V3_LONG, "Passw0rd!"), Verification::Success);
+        assert_eq!(verify_now(V3_SHA512, "Passw0rd?"), Verification::Failed);
     }
 
     #[test]
     fn weaker_hashes_verify_and_ask_for_a_rehash() {
         for hashed in [V3_SHA256, V3_SHA1, V2] {
             assert_eq!(
-                verify(hashed, "Passw0rd!"),
+                verify_now(hashed, "Passw0rd!"),
                 Verification::SuccessRehashNeeded,
                 "{hashed}"
             );
-            assert_eq!(verify(hashed, "wrong1"), Verification::Failed, "{hashed}");
+            assert_eq!(verify_now(hashed, "wrong1"), Verification::Failed, "{hashed}");
         }
     }
 
@@ -196,14 +229,14 @@ mod tests {
         ] {
             let hashed = BASE64.encode(&record);
             assert_eq!(
-                verify(&hashed, "Passw0rd!"),
+                verify_now(&hashed, "Passw0rd!"),
                 Verification::Failed,
                 "{hashed}"
             );
         }
         for hashed in ["", "not base64!", "AQ=="] {
             assert_eq!(
-                verify(hashed, "Passw0rd!"),
+                verify_now(hashed, "Passw0rd!"),
                 Verification::Failed,
                 "{hashed:?}"
             );
