@@ -293,6 +293,13 @@ impl Engine {
                     .expect("download registry lock poisoned")
                     .insert(download.download_id, active.clone());
             }
+            if torrent.download_client == DownloadClient::Symlink {
+                // A symlink start waits for the file to appear on the mount; the tick goes on.
+                let engine = self.clone();
+                let id = download.download_id;
+                tokio::spawn(async move { engine.finish_symlink_start(id, active).await });
+                continue;
+            }
             match active.engine.start().await {
                 Ok(id) => {
                     if let Err(error) = self
@@ -326,6 +333,33 @@ impl Engine {
             }
         }
         Ok(false)
+    }
+
+    /// Starts a symlink transfer and stores its remote id. A failed start completes the
+    /// transfer with its error, which the next tick collects like any other outcome.
+    async fn finish_symlink_start(&self, id: Uuid, active: Arc<ActiveDownload>) {
+        let Ok(remote_id) = active.engine.start().await else {
+            return;
+        };
+        let _guard = self.inner.provider_lock.lock().await;
+        let registered = self
+            .inner
+            .registry
+            .downloads
+            .lock()
+            .expect("download registry lock poisoned")
+            .get(&id)
+            .is_some_and(|current| Arc::ptr_eq(current, &active));
+        if registered
+            && let Err(error) = self
+                .inner
+                .store
+                .downloads()
+                .update_remote_id(id, &remote_id)
+                .await
+        {
+            tracing::warn!(download_id = %id, %error, "storing the symlink transfer id failed");
+        }
     }
 
     async fn resolve_download(

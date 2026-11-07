@@ -174,6 +174,59 @@ async fn a_full_download_slot_does_not_starve_selection_or_completion_of_other_t
 }
 
 #[tokio::test]
+async fn a_slow_symlink_start_does_not_hold_up_other_torrents() {
+    let (test, factory) = fixture().await;
+    let slow = FakeDownloadEngine::new();
+    slow.set_start_result(Ok("linked".to_owned()));
+    slow.block_start();
+    factory.push(slow.clone());
+    let first = add(
+        &test,
+        HASH,
+        "one",
+        &["a.bin"],
+        TorrentTemplate {
+            download_client: DownloadClient::Symlink,
+            ..template()
+        },
+    )
+    .await;
+    test.engine.tick_once().await.expect("create");
+    let mut second_template = template();
+    second_template.host_download_action = TorrentHostDownloadAction::DownloadNone;
+    let second = add(&test, HASH_TWO, "two", &["other.bin"], second_template).await;
+    tokio::time::timeout(Duration::from_secs(5), test.engine.tick_once())
+        .await
+        .expect("the tick does not wait for the symlink")
+        .expect("tick");
+    assert_eq!(slow.started(), 1);
+    assert!(current(&test, second.torrent_id).await.completed.is_some());
+    assert!(
+        current(&test, first.torrent_id).await.downloads[0]
+            .download_started
+            .is_some()
+    );
+    slow.release_start();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while current(&test, first.torrent_id).await.downloads[0]
+            .remote_id
+            .is_none()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("remote id stored");
+    assert_eq!(
+        current(&test, first.torrent_id).await.downloads[0]
+            .remote_id
+            .as_deref(),
+        Some("linked")
+    );
+    test.engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn low_disk_pause_blocks_only_new_internal_starts_and_not_other_torrent_phases() {
     let (test, factory) = fixture().await;
     let first = add(&test, HASH, "one", &["a.bin"], template()).await;
