@@ -24,9 +24,12 @@ pub(crate) fn join_name(base: &Path, name: &str) -> Result<PathBuf, Error> {
 
 /// Resolves the archive entry `name` to a path inside `destination`.
 ///
-/// Both `/` and `\` separate components. Empty and `.` components are ignored and `..` steps
-/// back one level, but never above `destination`. Absolute names, drive prefixes and NUL bytes
-/// are refused, as are names that resolve to `destination` itself.
+/// Both `/` and `\` separate components. `.` components are ignored and `..` steps back one
+/// level, but never above `destination`. Absolute names, drive prefixes and NUL bytes are
+/// refused, as are names that resolve to `destination` itself. Empty components (repeated
+/// separators, as in `a//b`) are refused too: `UnRAR` counts each one as a directory level when it
+/// decides how far up a link may point. A single trailing separator, which marks a directory
+/// entry, is allowed.
 pub(crate) fn entry_destination(destination: &Path, name: &str) -> Result<PathBuf, Error> {
     let unsafe_entry = || Error::UnsafeEntry {
         entry: name.to_owned(),
@@ -35,9 +38,12 @@ pub(crate) fn entry_destination(destination: &Path, name: &str) -> Result<PathBu
         return Err(unsafe_entry());
     }
     let mut parts: Vec<&str> = Vec::new();
-    for part in name.split(['/', '\\']) {
+    let mut components = name.split(['/', '\\']).peekable();
+    while let Some(part) = components.next() {
         match part {
-            "" | "." => {}
+            "" if components.peek().is_none() => {}
+            "" => return Err(unsafe_entry()),
+            "." => {}
             ".." => {
                 if parts.pop().is_none() {
                     return Err(unsafe_entry());
@@ -135,7 +141,7 @@ mod tests {
             resolve("a\\b\\c.txt").unwrap(),
             Path::new("/dest/a/b/c.txt")
         );
-        assert_eq!(resolve("./a//b/").unwrap(), Path::new("/dest/a/b"));
+        assert_eq!(resolve("./a/b/").unwrap(), Path::new("/dest/a/b"));
     }
 
     #[test]
@@ -157,6 +163,24 @@ mod tests {
             "",
             "./",
             "a/..",
+        ] {
+            let error = resolve(name).unwrap_err();
+            assert!(
+                matches!(&error, Error::UnsafeEntry { entry } if entry == name),
+                "{name:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn names_with_empty_components_are_refused() {
+        for name in [
+            "a//b.txt",
+            "a\\\\b.txt",
+            "a/\\b.txt",
+            "a////////link",
+            "a//",
+            "./a//b/",
         ] {
             let error = resolve(name).unwrap_err();
             assert!(

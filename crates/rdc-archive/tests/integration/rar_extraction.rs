@@ -278,3 +278,25 @@ fn a_refused_link_names_the_entry_and_its_kind() {
         "archive entry \"Movie.mkv\" cannot be extracted: it is a hard link"
     );
 }
+
+#[test]
+fn a_link_name_padded_with_empty_components_is_refused_by_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("padded.rar");
+    Rar5::new()
+        .redirect(
+            "a////////link",
+            Redirect::UnixSymlink,
+            "../../../../../data/db/rd-client.db",
+        )
+        .write(&archive);
+    let destination = dir.path().join("out");
+
+    let error = extract_all(&archive, &destination).unwrap_err();
+
+    assert!(
+        matches!(&error, Error::UnsafeEntry { entry } if entry == "a////////link"),
+        "{error}"
+    );
+    assert!(!destination.exists());
+}
