@@ -7,12 +7,19 @@ use thiserror::Error;
 use tokio::{sync::Mutex, time::Instant};
 use tokio_util::sync::CancellationToken;
 
+/// A failed list is not requested again for this long, so a dead URL does not cost every
+/// addition the request timeout.
+const FAILURE_BACKOFF: Duration = Duration::from_secs(60);
+
 /// A failed tracker-list request; enrichment callers may log it and continue unchanged.
 #[derive(Debug, Error)]
 pub enum FetchTrackersError {
     /// The HTTP request, response status, or response body failed.
     #[error("unable to fetch tracker list for enrichment: {0}")]
     Http(#[from] reqwest::Error),
+    /// The same URL failed less than a minute ago and was not requested again.
+    #[error("tracker list for enrichment failed recently, retrying later")]
+    RecentlyFailed,
     /// The caller cancelled the request.
     #[error("fetching tracker list was cancelled")]
     Cancelled,
@@ -26,11 +33,18 @@ struct CachedList {
     trackers: Arc<[String]>,
 }
 
+#[derive(Debug, Default)]
+struct Cache {
+    list: Option<CachedList>,
+    /// The URL that failed last and until when it is not requested again.
+    failure: Option<(Url, Instant)>,
+}
+
 /// A single-flight HTTP fetcher with a cache shared by every clone.
 #[derive(Clone, Debug)]
 pub struct TrackerList {
     client: Client,
-    cached: Arc<Mutex<Option<CachedList>>>,
+    cached: Arc<Mutex<Cache>>,
 }
 
 impl TrackerList {
@@ -49,10 +63,12 @@ impl TrackerList {
     ///
     /// Positive expiration values are minutes. Changing the URL or expiration invalidates
     /// the cache. Nonpositive expiration disables caching; empty results are never cached.
-    /// Concurrent cache misses share one request when caching is enabled.
+    /// Concurrent cache misses share one request when caching is enabled. A failed URL is
+    /// not requested again for a minute.
     ///
     /// # Errors
-    /// Returns HTTP/status/body failures or caller cancellation, without hiding them.
+    /// Returns HTTP/status/body failures, a recent failure of the same URL, or caller
+    /// cancellation, without hiding them.
     pub async fn fetch(
         &self,
         configured_url: Option<&str>,
@@ -70,13 +86,13 @@ impl TrackerList {
             guard = self.cached.lock() => guard,
         };
         let Some(url) = url else {
-            *cached = None;
+            *cached = Cache::default();
             if configured_url.is_some_and(|value| !value.trim().is_empty()) {
                 tracing::warn!(url = configured_url, "Invalid tracker list URL format");
             }
             return Ok(Arc::from([]));
         };
-        if let Some(entry) = cached.as_ref()
+        if let Some(entry) = cached.list.as_ref()
             && expiration_minutes > 0
             && entry.expiration_minutes == expiration_minutes
             && entry.url == url
@@ -84,7 +100,14 @@ impl TrackerList {
         {
             return Ok(Arc::clone(&entry.trackers));
         }
-        *cached = None;
+        if cached
+            .failure
+            .as_ref()
+            .is_some_and(|(failed, until)| *failed == url && *until > Instant::now())
+        {
+            return Err(FetchTrackersError::RecentlyFailed);
+        }
+        *cached = Cache::default();
         let fetch = async {
             self.client
                 .get(url.clone())
@@ -96,13 +119,19 @@ impl TrackerList {
         };
         let text = tokio::select! {
             () = cancel.cancelled() => return Err(FetchTrackersError::Cancelled),
-            result = fetch => result?,
+            result = fetch => match result {
+                Ok(text) => text,
+                Err(error) => {
+                    cached.failure = Some((url, Instant::now() + FAILURE_BACKOFF));
+                    return Err(error.into());
+                }
+            },
         };
         let (trackers, rejected) = rdc_torrent::parse_tracker_list(&text);
         tracing::debug!(rejected, "Trackers rejected during enrichment");
         let trackers: Arc<[String]> = trackers.into();
         if expiration_minutes > 0 && !trackers.is_empty() {
-            *cached = Some(CachedList {
+            cached.list = Some(CachedList {
                 url,
                 expiration_minutes,
                 expires_at: Instant::now()
@@ -191,7 +220,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failures_propagate_and_are_retried() {
+    async fn failures_propagate_and_are_retried_after_a_backoff() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .respond_with(ResponseTemplate::new(503))
@@ -199,13 +228,16 @@ mod tests {
             .mount(&server)
             .await;
         let list = TrackerList::new().unwrap();
-        for _ in 0..2 {
-            assert!(matches!(
-                list.fetch(Some(&server.uri()), 60, &CancellationToken::new())
-                    .await,
-                Err(FetchTrackersError::Http(_))
-            ));
-        }
+        let (url, cancel) = (server.uri(), CancellationToken::new());
+        let fetch = || list.fetch(Some(&url), 0, &cancel);
+        assert!(matches!(fetch().await, Err(FetchTrackersError::Http(_))));
+        assert!(matches!(
+            fetch().await,
+            Err(FetchTrackersError::RecentlyFailed)
+        ));
+        list.cached.lock().await.failure.as_mut().unwrap().1 =
+            Instant::now() - Duration::from_secs(1);
+        assert!(matches!(fetch().await, Err(FetchTrackersError::Http(_))));
     }
 
     #[tokio::test]
@@ -221,7 +253,7 @@ mod tests {
         let list = TrackerList::new().unwrap();
         let cancel = CancellationToken::new();
         list.fetch(Some(&server.uri()), 1, &cancel).await.unwrap();
-        list.cached.lock().await.as_mut().unwrap().expires_at =
+        list.cached.lock().await.list.as_mut().unwrap().expires_at =
             Instant::now() - Duration::from_secs(1);
         list.fetch(Some(&server.uri()), 1, &cancel).await.unwrap();
         list.fetch(Some(&format!("{}/other", server.uri())), 1, &cancel)
