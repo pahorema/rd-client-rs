@@ -107,7 +107,8 @@
 		anchor.href = url;
 		anchor.download = `${current.rdName ?? current.hash}.torrent`;
 		anchor.click();
-		URL.revokeObjectURL(url);
+		// Some browsers start the download after `click()` returns; revoking at once can cancel it.
+		setTimeout(() => URL.revokeObjectURL(url), 60_000);
 	}
 
 	function toggle(download: Download) {
