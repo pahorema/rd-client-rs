@@ -161,9 +161,9 @@ impl Premiumize {
 
     /// Lists the files of the torrent's transfer that pass its file filter.
     ///
-    /// Files come from the transfer folder, searched recursively; a
-    /// sub-folder is entered only when its name passes the filter's path
-    /// rules. A single-file transfer adds its file without filtering.
+    /// Files come from the transfer folder, searched recursively; the filter
+    /// sees each file's path below that folder (`Season 1/episode.mkv`).
+    /// A single-file transfer adds its file without filtering.
     /// Returns `None` when the torrent has not been sent to Premiumize yet.
     pub async fn download_infos(
         &self,
@@ -180,7 +180,7 @@ impl Premiumize {
             .ok_or_else(|| DebridError::NotFound(format!("Transfer {rd_id} not found")))?;
         let filter = torrent.file_filter()?;
         let mut infos = match non_blank(transfer.folder_id.as_deref()) {
-            Some(folder_id) => self.folder_infos(&filter, folder_id).await?,
+            Some(folder_id) => self.folder_infos(&filter, folder_id, "").await?,
             None => Vec::new(),
         };
         if let Some(file_id) = non_blank(transfer.file_id.as_deref()) {
@@ -198,7 +198,14 @@ impl Premiumize {
         Ok(Some(infos))
     }
 
-    fn folder_infos<'a>(&'a self, filter: &'a FileFilter, folder_id: &'a str) -> FolderInfos<'a> {
+    /// The download infos of the files below the folder `folder_id`, which
+    /// lies at `path` (empty for the transfer folder).
+    fn folder_infos<'a>(
+        &'a self,
+        filter: &'a FileFilter,
+        folder_id: &'a str,
+        path: &'a str,
+    ) -> FolderInfos<'a> {
         Box::pin(async move {
             let folder: Folder = self
                 .call(self.request(
@@ -210,25 +217,27 @@ impl Premiumize {
             let mut infos = Vec::new();
             for item in folder.content.unwrap_or_default() {
                 let name = item.name.as_deref().unwrap_or_default();
+                let item_path = if path.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{path}/{name}")
+                };
                 match item.kind.as_deref() {
                     Some("file") => {
                         let Some(link) = non_blank(item.link.as_deref()) else {
                             tracing::debug!(folder_id, name, "Premiumize file has no link");
                             continue;
                         };
-                        if filter.is_downloadable(name, item.size.unwrap_or_default())? {
+                        if filter.is_downloadable(&item_path, item.size.unwrap_or_default())? {
                             infos.push(DownloadInfo {
                                 file_name: item.name.clone(),
                                 restricted_link: link.to_owned(),
                             });
                         }
                     }
-                    // Folders have no size: only the path rules apply to them.
                     Some("folder") => {
-                        if let Some(id) = non_blank(item.id.as_deref())
-                            && filter.is_downloadable(name, i64::MAX)?
-                        {
-                            infos.extend(self.folder_infos(filter, id).await?);
+                        if let Some(id) = non_blank(item.id.as_deref()) {
+                            infos.extend(self.folder_infos(filter, id, &item_path).await?);
                         }
                     }
                     kind => tracing::debug!(folder_id, name, ?kind, "skipping Premiumize item"),

@@ -561,23 +561,39 @@ async fn download_infos_walk_the_transfer_folder() {
     );
 }
 
-#[tokio::test]
-async fn download_infos_filter_files_by_size_and_folders_by_name() {
-    let (server, client) = client().await;
+/// Mounts a finished transfer whose folder holds `movie.mkv`, a tiny
+/// `sample.mkv`, `Season 1/e1.mkv`, `Season 1/e1.nfo` and `Extras/bonus.mkv`.
+async fn mount_season(server: &MockServer) {
     mount_transfers(
-        &server,
+        server,
         r#"{"status":"success","transfers":[{"id":"t1","name":"R","status":"finished","folder_id":"f1"}]}"#,
     )
     .await;
-    mount_folder(&server, "f1", serde_json::json!({"status": "success", "content": [
+    mount_folder(server, "f1", serde_json::json!({"status": "success", "content": [
         {"id": "a", "name": "movie.mkv", "size": 5_000_000, "type": "file", "link": "https://dl/movie.mkv"},
         {"id": "s", "name": "sample.mkv", "size": 10, "type": "file", "link": "https://dl/sample.mkv"},
+        {"id": "s1", "name": "Season 1", "type": "folder"},
         {"id": "x", "name": "Extras", "type": "folder"}
     ]}))
     .await;
+    mount_folder(server, "s1", serde_json::json!({"status": "success", "content": [
+        {"id": "e", "name": "e1.mkv", "size": 5_000_000, "type": "file", "link": "https://dl/e1.mkv"},
+        {"id": "n", "name": "e1.nfo", "size": 5_000_000, "type": "file", "link": "https://dl/e1.nfo"}
+    ]}))
+    .await;
+    mount_folder(server, "x", serde_json::json!({"status": "success", "content": [
+        {"id": "b", "name": "bonus.mkv", "size": 5_000_000, "type": "file", "link": "https://dl/bonus.mkv"}
+    ]}))
+    .await;
+}
+
+#[tokio::test]
+async fn download_infos_include_files_of_every_folder_by_their_path() {
+    let (server, client) = client().await;
+    mount_season(&server).await;
     let torrent = Torrent {
         download_min_size: 1,
-        exclude_regex: Some("Extras".to_owned()),
+        include_regex: Some(r"\.mkv$".to_owned()),
         ..sent_torrent("t1")
     };
 
@@ -587,7 +603,39 @@ async fn download_infos_filter_files_by_size_and_folders_by_name() {
         .expect("infos")
         .expect("ready");
 
-    assert_eq!(infos(&found), [(Some("movie.mkv"), "https://dl/movie.mkv")]);
+    assert_eq!(
+        infos(&found),
+        [
+            (Some("movie.mkv"), "https://dl/movie.mkv"),
+            (Some("e1.mkv"), "https://dl/e1.mkv"),
+            (Some("bonus.mkv"), "https://dl/bonus.mkv")
+        ]
+    );
+}
+
+#[tokio::test]
+async fn download_infos_exclude_files_by_their_path() {
+    let (server, client) = client().await;
+    mount_season(&server).await;
+    let torrent = Torrent {
+        exclude_regex: Some(r"^Extras/|\.nfo$".to_owned()),
+        ..sent_torrent("t1")
+    };
+
+    let found = client
+        .download_infos(&torrent)
+        .await
+        .expect("infos")
+        .expect("ready");
+
+    assert_eq!(
+        infos(&found),
+        [
+            (Some("movie.mkv"), "https://dl/movie.mkv"),
+            (Some("sample.mkv"), "https://dl/sample.mkv"),
+            (Some("e1.mkv"), "https://dl/e1.mkv")
+        ]
+    );
 }
 
 #[tokio::test]
