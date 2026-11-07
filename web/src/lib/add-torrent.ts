@@ -6,6 +6,38 @@ import {
 	type NewTorrent,
 	type Setting
 } from './api/types.js';
+import { wholeNumberError } from './numbers.js';
+
+/** Numeric settings of a new torrent; only the priority may be left empty. */
+export const NUMBER_FIELDS = [
+	'priority',
+	'downloadMinSize',
+	'finishedActionDelay',
+	'downloadRetryAttempts',
+	'torrentRetryAttempts',
+	'deleteOnError',
+	'lifetime'
+] as const satisfies readonly (keyof NewTorrent)[];
+
+export type NumberField = (typeof NUMBER_FIELDS)[number];
+
+/**
+ * Errors of numeric fields the server would reject: empty required fields, decimals and
+ * negative numbers. Keys follow `NUMBER_FIELDS` order, so the first key is the first bad field.
+ */
+export function newTorrentErrors(torrent: NewTorrent): Partial<Record<NumberField, string>> {
+	const errors: Partial<Record<NumberField, string>> = {};
+
+	for (const field of NUMBER_FIELDS) {
+		const error = wholeNumberError(torrent[field], { optional: field === 'priority' });
+
+		if (error) {
+			errors[field] = error;
+		}
+	}
+
+	return errors;
+}
 
 /** Per-torrent settings for a new torrent, taken from the `Gui:Default:*` settings. */
 export function guiDefaults(settings: readonly Setting[]): NewTorrent {

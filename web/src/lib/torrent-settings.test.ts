@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { DownloadClient, TorrentHostDownloadAction, type Torrent } from './api/types.js';
-import { applySettings, commonSettings, type TorrentSettingsDraft } from './torrent-settings.js';
+import {
+	applySettings,
+	commonSettings,
+	draftErrors,
+	type TorrentSettingsDraft
+} from './torrent-settings.js';
 
 function torrent(overrides: Partial<Torrent>): Torrent {
 	return {
@@ -102,5 +107,17 @@ describe('applySettings', () => {
 			lifetime: 120
 		});
 		expect(original.category).toBeNull();
+	});
+});
+
+describe('draftErrors', () => {
+	it('allows blank values and rejects decimals and negatives', () => {
+		const draft = commonSettings([]);
+
+		expect(draftErrors(draft)).toEqual({});
+		expect(Object.keys(draftErrors({ ...draft, lifetime: 1.5, priority: -2 }))).toEqual([
+			'priority',
+			'lifetime'
+		]);
 	});
 });

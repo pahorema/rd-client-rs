@@ -3,6 +3,7 @@ import {
 	allowedFinishedAction,
 	guiDefaults,
 	magnetFromHash,
+	newTorrentErrors,
 	parseCategories
 } from './add-torrent.js';
 import {
@@ -110,5 +111,34 @@ describe('magnetFromHash', () => {
 	it('returns null without a magnet', () => {
 		expect(magnetFromHash('#/add')).toBeNull();
 		expect(magnetFromHash('#/add?magnet=')).toBeNull();
+	});
+});
+
+describe('newTorrentErrors', () => {
+	const valid = guiDefaults([]);
+
+	it('accepts the defaults and an empty priority', () => {
+		expect(newTorrentErrors(valid)).toEqual({});
+		expect(newTorrentErrors({ ...valid, priority: null })).toEqual({});
+	});
+
+	it('names cleared, decimal and negative fields in form order', () => {
+		// An empty number input binds as `null`, which the server cannot parse as an integer.
+		const errors = newTorrentErrors({
+			...valid,
+			lifetime: null as unknown as number,
+			downloadMinSize: 1.5,
+			deleteOnError: -1,
+			priority: 2.5
+		});
+
+		expect(Object.keys(errors)).toEqual([
+			'priority',
+			'downloadMinSize',
+			'deleteOnError',
+			'lifetime'
+		]);
+		expect(errors.lifetime).toBe('Enter a number.');
+		expect(errors.downloadMinSize).toBe('Enter a whole number from 0 to 2147483647.');
 	});
 });

@@ -3,7 +3,9 @@
 		allowedFinishedAction,
 		guiDefaults,
 		magnetFromHash,
-		parseCategories
+		newTorrentErrors,
+		parseCategories,
+		type NumberField
 	} from '#lib/add-torrent.js';
 	import {
 		errorMessage,
@@ -59,6 +61,21 @@
 
 	let saving = $state(false);
 	let error = $state<string | null>(null);
+	// Field errors show once a submit was attempted and then follow every edit.
+	let validated = $state(false);
+	const fieldErrors: Partial<Record<NumberField, string>> = $derived(
+		validated && torrent ? newTorrentErrors(torrent) : {}
+	);
+
+	const fieldIds: Record<NumberField, string> = {
+		priority: 'priority',
+		downloadMinSize: 'min-size',
+		finishedActionDelay: 'finished-delay',
+		downloadRetryAttempts: 'download-retries',
+		torrentRetryAttempts: 'torrent-retries',
+		deleteOnError: 'delete-on-error',
+		lifetime: 'lifetime'
+	};
 
 	const multiple = $derived(!magnet.trim() && files.length > 1);
 	const finishedOptions = $derived(
@@ -158,6 +175,12 @@
 	async function submit(event: SubmitEvent) {
 		event.preventDefault();
 		if (!torrent || saving) return;
+		validated = true;
+		const invalid = Object.keys(newTorrentErrors(torrent))[0] as NumberField | undefined;
+		if (invalid) {
+			document.getElementById(fieldIds[invalid])?.focus();
+			return;
+		}
 		saving = true;
 		// A failed check only hides the file list; the torrent can still be added.
 		await checkFiles();
@@ -374,20 +397,30 @@
 						</datalist>
 						<Field.Description>Becomes a sub-folder of the download path.</Field.Description>
 					</Field.Field>
-					<Field.Field>
+					<Field.Field data-invalid={fieldErrors.priority ? true : undefined}>
 						<Field.Label for="priority">Priority</Field.Label>
-						<Input id="priority" type="number" min="0" step="1" bind:value={torrent.priority} />
+						<Input
+							id="priority"
+							type="number"
+							min="0"
+							step="1"
+							aria-invalid={fieldErrors.priority ? true : undefined}
+							bind:value={torrent.priority}
+						/>
 						<Field.Description>1 is the highest. Empty means lowest.</Field.Description>
+						{@render numberError('priority')}
 					</Field.Field>
-					<Field.Field>
+					<Field.Field data-invalid={fieldErrors.downloadMinSize ? true : undefined}>
 						<Field.Label for="min-size">Minimum file size (MB)</Field.Label>
 						<Input
 							id="min-size"
 							type="number"
 							min="0"
 							step="1"
+							aria-invalid={fieldErrors.downloadMinSize ? true : undefined}
 							bind:value={torrent.downloadMinSize}
 						/>
+						{@render numberError('downloadMinSize')}
 						{#if provider === 'AllDebrid'}
 							<Field.Description>
 								AllDebrid may group small files into one archive, so smaller files can still be
@@ -417,42 +450,67 @@
 							bind:value={torrent.finishedAction}
 						/>
 					</Field.Field>
-					<Field.Field>
+					<Field.Field data-invalid={fieldErrors.finishedActionDelay ? true : undefined}>
 						<Field.Label for="finished-delay">Finished action delay (minutes)</Field.Label>
 						<Input
 							id="finished-delay"
 							type="number"
 							min="0"
+							step="1"
+							aria-invalid={fieldErrors.finishedActionDelay ? true : undefined}
 							bind:value={torrent.finishedActionDelay}
 						/>
+						{@render numberError('finishedActionDelay')}
 					</Field.Field>
-					<Field.Field>
+					<Field.Field data-invalid={fieldErrors.downloadRetryAttempts ? true : undefined}>
 						<Field.Label for="download-retries">Automatic download retries</Field.Label>
 						<Input
 							id="download-retries"
 							type="number"
 							min="0"
+							step="1"
+							aria-invalid={fieldErrors.downloadRetryAttempts ? true : undefined}
 							bind:value={torrent.downloadRetryAttempts}
 						/>
+						{@render numberError('downloadRetryAttempts')}
 					</Field.Field>
-					<Field.Field>
+					<Field.Field data-invalid={fieldErrors.torrentRetryAttempts ? true : undefined}>
 						<Field.Label for="torrent-retries">Automatic torrent retries</Field.Label>
 						<Input
 							id="torrent-retries"
 							type="number"
 							min="0"
+							step="1"
+							aria-invalid={fieldErrors.torrentRetryAttempts ? true : undefined}
 							bind:value={torrent.torrentRetryAttempts}
 						/>
+						{@render numberError('torrentRetryAttempts')}
 					</Field.Field>
-					<Field.Field>
+					<Field.Field data-invalid={fieldErrors.deleteOnError ? true : undefined}>
 						<Field.Label for="delete-on-error">Delete when in error (minutes)</Field.Label>
-						<Input id="delete-on-error" type="number" min="0" bind:value={torrent.deleteOnError} />
+						<Input
+							id="delete-on-error"
+							type="number"
+							min="0"
+							step="1"
+							aria-invalid={fieldErrors.deleteOnError ? true : undefined}
+							bind:value={torrent.deleteOnError}
+						/>
 						<Field.Description>0 disables it.</Field.Description>
+						{@render numberError('deleteOnError')}
 					</Field.Field>
-					<Field.Field>
+					<Field.Field data-invalid={fieldErrors.lifetime ? true : undefined}>
 						<Field.Label for="lifetime">Maximum lifetime (minutes)</Field.Label>
-						<Input id="lifetime" type="number" min="0" bind:value={torrent.lifetime} />
+						<Input
+							id="lifetime"
+							type="number"
+							min="0"
+							step="1"
+							aria-invalid={fieldErrors.lifetime ? true : undefined}
+							bind:value={torrent.lifetime}
+						/>
 						<Field.Description>0 disables it.</Field.Description>
+						{@render numberError('lifetime')}
 					</Field.Field>
 				</Field.Group>
 			</Card.Content>
@@ -466,4 +524,8 @@
 		<Alert.Title>Could not add the torrent</Alert.Title>
 		<Alert.Description>{error}</Alert.Description>
 	</Alert.Root>
+{/snippet}
+
+{#snippet numberError(field: NumberField)}
+	{#if fieldErrors[field]}<Field.Error>{fieldErrors[field]}</Field.Error>{/if}
 {/snippet}

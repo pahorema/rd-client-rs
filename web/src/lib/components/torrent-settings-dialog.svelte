@@ -9,6 +9,7 @@
 	import {
 		applySettings,
 		commonSettings,
+		draftErrors,
 		type TorrentSettingsDraft
 	} from '#lib/torrent-settings.js';
 	import { untrack } from 'svelte';
@@ -27,7 +28,9 @@
 	let draft = $state<TorrentSettingsDraft>(commonSettings([]));
 	let saving = $state(false);
 	let error = $state<string | null>(null);
+	let validated = $state(false);
 
+	const errors = $derived(validated ? draftErrors(draft) : {});
 	const bulk = $derived(torrents.length > 1);
 
 	// Take a snapshot when the dialog opens; live updates must not reset the form.
@@ -35,10 +38,13 @@
 		if (open) {
 			draft = untrack(() => commonSettings(torrents));
 			error = null;
+			validated = false;
 		}
 	});
 
 	async function save() {
+		validated = true;
+		if (Object.keys(draftErrors(draft)).length > 0) return;
 		saving = true;
 		error = null;
 
@@ -73,8 +79,7 @@
 			{/if}
 		</Dialog.Header>
 
-		<TorrentSettingsFields bind:draft mixedPlaceholder={bulk} />
-
+		<TorrentSettingsFields bind:draft mixedPlaceholder={bulk} {errors} />
 		{#if error}
 			<Alert.Root variant="destructive">
 				<CircleAlertIcon />

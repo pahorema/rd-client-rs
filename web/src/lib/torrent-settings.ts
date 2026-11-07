@@ -1,4 +1,5 @@
 import type { Torrent, TorrentSettings } from './api/types.js';
+import { wholeNumberError } from './numbers.js';
 
 /** Editable torrent settings; `null` means "keep the current value" when editing several torrents. */
 export type TorrentSettingsDraft = { [K in keyof TorrentSettings]: TorrentSettings[K] | null };
@@ -24,6 +25,33 @@ export function commonSettings(torrents: readonly Torrent[]): TorrentSettingsDra
 	}
 
 	return draft as TorrentSettingsDraft;
+}
+
+const NUMBER_KEYS = [
+	'priority',
+	'downloadRetryAttempts',
+	'torrentRetryAttempts',
+	'deleteOnError',
+	'lifetime'
+] as const satisfies readonly (keyof TorrentSettings)[];
+
+export type SettingsNumberField = (typeof NUMBER_KEYS)[number];
+
+/** Numeric values the server would reject; blank values are valid (see `applySettings`). */
+export function draftErrors(
+	draft: TorrentSettingsDraft
+): Partial<Record<SettingsNumberField, string>> {
+	const errors: Partial<Record<SettingsNumberField, string>> = {};
+
+	for (const key of NUMBER_KEYS) {
+		const error = wholeNumberError(draft[key], { optional: true });
+
+		if (error) {
+			errors[key] = error;
+		}
+	}
+
+	return errors;
 }
 
 /**
