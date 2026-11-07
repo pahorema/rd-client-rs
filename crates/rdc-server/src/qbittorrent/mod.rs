@@ -7,7 +7,7 @@ mod preferences;
 #[cfg(test)]
 mod tests;
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Duration};
 
 use axum::{
     Json, Router,
@@ -497,14 +497,7 @@ async fn add(engine: &Engine, params: Params) -> Result<Response, ApiError> {
                     .await
                     .map_err(internal)?
             } else if url.starts_with("http") {
-                let bytes = reqwest::get(url)
-                    .await
-                    .map_err(internal)?
-                    .error_for_status()
-                    .map_err(internal)?
-                    .bytes()
-                    .await
-                    .map_err(internal)?;
+                let bytes = download_torrent_file(url).await?;
                 engine
                     .add_torrent_file(&bytes, template.clone())
                     .await
@@ -519,6 +512,64 @@ async fn add(engine: &Engine, params: Params) -> Result<Response, ApiError> {
         return Ok("Ok.".into_response());
     }
     Ok(StatusCode::OK.into_response())
+}
+
+/// Largest `.torrent` file `torrents/add` downloads from a URL.
+const TORRENT_FILE_LIMIT: usize = 10 * 1024 * 1024;
+
+/// Client shared by every `torrents/add` URL download, built on first use.
+static TORRENT_FILE_CLIENT: tokio::sync::OnceCell<reqwest::Client> =
+    tokio::sync::OnceCell::const_new();
+
+/// Downloads a `.torrent` file for `torrents/add`, answering 502 with a generic message on
+/// failure; the cause is logged without the URL, which may carry a tracker passkey.
+async fn download_torrent_file(url: &str) -> Result<Vec<u8>, ApiError> {
+    fetch_torrent_file(url).await.map_err(|error| {
+        let host = url::Url::parse(url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or_default();
+        tracing::warn!(%host, error = format!("{error:#}"), "Cannot download a torrent file");
+        ApiError::new(StatusCode::BAD_GATEWAY, "Cannot download the torrent file")
+    })
+}
+
+async fn fetch_torrent_file(url: &str) -> anyhow::Result<Vec<u8>> {
+    let client = TORRENT_FILE_CLIENT
+        .get_or_try_init(|| async {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(60))
+                .redirect(reqwest::redirect::Policy::limited(5))
+                .user_agent(concat!("rd-client/", env!("CARGO_PKG_VERSION")))
+                .build()
+        })
+        .await?;
+    let mut response = client
+        .get(url)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(reqwest::Error::without_url)?;
+    let limit = TORRENT_FILE_LIMIT as u64;
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit)
+    {
+        anyhow::bail!("the response is larger than {TORRENT_FILE_LIMIT} bytes");
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(reqwest::Error::without_url)?
+    {
+        if body.len() + chunk.len() > TORRENT_FILE_LIMIT {
+            anyhow::bail!("the response is larger than {TORRENT_FILE_LIMIT} bytes");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 async fn wait(engine: &Engine, id: uuid::Uuid) -> Result<bool, ApiError> {

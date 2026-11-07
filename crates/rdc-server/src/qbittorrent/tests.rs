@@ -718,6 +718,46 @@ async fn http_torrent_url_uses_requested_priority() {
 }
 
 #[tokio::test]
+async fn http_torrent_url_failures_are_capped_and_generic() {
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/huge"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![b'd'; 10 * 1024 * 1024 + 1]))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/missing"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("secret internal page"))
+        .mount(&server)
+        .await;
+    let fixture = Fixture::new(Settings::default()).await;
+    let app = fixture.app("");
+    let cookie = fixture.login(&app, "", "/api/v2").await;
+    for name in ["huge", "missing"] {
+        let form = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("urls", &format!("{}/{name}?passkey=hidden", server.uri()))
+            .finish();
+        let response = call(
+            &app,
+            Method::POST,
+            "/api/v2/torrents/add",
+            Some(&cookie),
+            Some("application/x-www-form-urlencoded"),
+            form,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY, "{name}");
+        assert_eq!(text(response).await, "Cannot download the torrent file");
+    }
+    assert_eq!(fixture.test.engine.torrents().await.unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn auxiliary_endpoints_and_binding_errors_keep_expected_statuses() {
     let fixture = Fixture::new(Settings::default()).await;
     let app = fixture.app("");
