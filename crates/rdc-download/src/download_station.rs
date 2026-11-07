@@ -477,19 +477,29 @@ impl DownloadEngine for DownloadStationDownload {
     }
 
     async fn pause(&self) {
-        let (Some(gid), Some(session)) = (self.shared.gid(), self.shared.stored_session()) else {
+        let Some(gid) = self.shared.gid() else {
             return;
         };
-        if let Err(error) = session.pause_task(&gid).await {
+        let id = gid.as_str();
+        let result = self
+            .shared
+            .with_session(|session| async move { session.pause_task(id).await })
+            .await;
+        if let Err(error) = result {
             tracing::debug!("Ignoring failed pause of Download Station task {gid}: {error}");
         }
     }
 
     async fn resume(&self) {
-        let (Some(gid), Some(session)) = (self.shared.gid(), self.shared.stored_session()) else {
+        let Some(gid) = self.shared.gid() else {
             return;
         };
-        if let Err(error) = session.resume_task(&gid).await {
+        let id = gid.as_str();
+        let result = self
+            .shared
+            .with_session(|session| async move { session.resume_task(id).await })
+            .await;
+        if let Err(error) = result {
             tracing::debug!("Ignoring failed resume of Download Station task {gid}: {error}");
         }
     }

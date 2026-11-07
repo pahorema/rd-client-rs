@@ -11,6 +11,8 @@ use rdc_download::{
 };
 use rdc_synology::SessionProvider;
 use serde_json::json;
+use wiremock::matchers::{method, path, query_param};
+use wiremock::{Mock, ResponseTemplate};
 
 fn config(fake: &FakeDsm) -> DownloadStationConfig {
     DownloadStationConfig {
@@ -324,6 +326,31 @@ async fn pause_and_resume_reach_download_station() {
     engine.resume().await;
     assert_eq!(fake.count("DownloadStation/task.cgi pause").await, 1);
     assert_eq!(fake.count("DownloadStation/task.cgi resume").await, 1);
+}
+
+#[tokio::test]
+async fn pause_and_resume_sign_in_again_when_the_session_expired() {
+    let fake = FakeDsm::start().await;
+    let engine = engine(&fake, request(&fake, Some(GID)));
+    engine.start().await.expect("start");
+    for action in ["pause", "resume"] {
+        Mock::given(method("GET"))
+            .and(path("/webapi/DownloadStation/task.cgi"))
+            .and(query_param("method", action))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"success": false, "error": {"code": 119}})),
+            )
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&fake.server)
+            .await;
+    }
+    engine.pause().await;
+    engine.resume().await;
+    assert_eq!(fake.count("entry.cgi login").await, 3);
+    assert_eq!(fake.count("DownloadStation/task.cgi pause").await, 2);
+    assert_eq!(fake.count("DownloadStation/task.cgi resume").await, 2);
 }
 
 async fn finish(engine: &DownloadStationDownload) -> Outcome {
