@@ -1,9 +1,13 @@
 use super::*;
-use crate::testing::{
-    FakeDebridProvider, TestEngine,
-    downloads::{FakeDownloadEngine, FakeDownloadFactory},
+use crate::{
+    registry::ActiveDownload,
+    testing::{
+        FakeDebridProvider, TestEngine,
+        downloads::{FakeDownloadEngine, FakeDownloadFactory},
+    },
 };
 use rdc_model::settings::Settings;
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -317,6 +321,87 @@ async fn configured_aria2_engine_adopts_existing_gid_without_removing_the_local_
     assert_eq!(fs::read(output).await.expect("retained"), b"keep");
     transfer.cancel().await;
     test.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutdown_leaves_aria2_jobs_for_the_next_start_to_adopt() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(|request: &wiremock::Request| {
+        let rpc: serde_json::Value = serde_json::from_slice(&request.body).expect("RPC");
+        let result = match rpc["method"].as_str() {
+            Some("system.multicall") => serde_json::json!([[[]], [[]], [[]]]),
+            Some("aria2.addUri") => serde_json::json!("gid1"),
+            Some("aria2.tellStatus") => serde_json::json!({"gid":"gid1","status":"active","totalLength":"4","completedLength":"0","downloadSpeed":"0","files":[]}),
+            _ => serde_json::json!("OK"),
+        };
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({"jsonrpc":"2.0","id":rpc["id"],"result":result}))
+    }).mount(&server).await;
+    let calls = async |name: &str| {
+        let requests = server.received_requests().await.expect("recording");
+        requests
+            .iter()
+            .filter(|request| {
+                let rpc: serde_json::Value = serde_json::from_slice(&request.body).expect("RPC");
+                rpc["method"] == name
+            })
+            .count()
+    };
+    let aria2_url = format!("{}/jsonrpc", server.uri());
+    let (torrent, mut download) = metadata(DownloadClient::Aria2c);
+
+    let first = TestEngine::new().await.expect("engine");
+    first
+        .engine
+        .update_setting("DownloadClient:Aria2cUrl", Some(&aria2_url))
+        .await
+        .expect("aria2 URL");
+    let transfer = first
+        .engine
+        .prepare_download(&torrent, &download)
+        .await
+        .expect("prepare");
+    let gid = transfer.start().await.expect("start");
+    first
+        .engine
+        .inner
+        .registry
+        .downloads
+        .lock()
+        .expect("registry")
+        .insert(
+            download.download_id,
+            Arc::new(ActiveDownload {
+                torrent_id: torrent.torrent_id,
+                kind: DownloadClient::Aria2c,
+                engine: Arc::clone(&transfer),
+                last_bytes: AtomicU64::new(0),
+            }),
+        );
+    first.engine.shutdown().await;
+    assert_eq!(
+        transfer.completion().outcome(),
+        Some(Err(rdc_download::DETACHED_MESSAGE.to_owned()))
+    );
+    assert_eq!(calls("aria2.forceRemove").await, 0);
+    assert_eq!(calls("aria2.removeDownloadResult").await, 0);
+
+    // The stored remote id lets the next run adopt the job instead of adding it again.
+    download.remote_id = Some(gid);
+    let second = TestEngine::new().await.expect("engine");
+    second
+        .engine
+        .update_setting("DownloadClient:Aria2cUrl", Some(&aria2_url))
+        .await
+        .expect("aria2 URL");
+    let adopted = second
+        .engine
+        .prepare_download(&torrent, &download)
+        .await
+        .expect("prepare");
+    assert_eq!(adopted.start().await.expect("adopt"), "gid1");
+    assert_eq!(calls("aria2.addUri").await, 1);
+    adopted.detach().await;
+    second.engine.shutdown().await;
 }
 
 #[cfg(unix)]

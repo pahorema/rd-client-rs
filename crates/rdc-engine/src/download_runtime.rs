@@ -401,6 +401,15 @@ impl DownloadEngine for Transfer {
             .complete(Err(rdc_download::CANCELLED_MESSAGE.to_owned()));
         self.shared.publish();
     }
+    async fn detach(&self) {
+        self.shared.backend.detach().await;
+        // Detaching ends the backend (as detached, or as cancelled when it has no remote job to
+        // leave); the monitor forwards that outcome, reported here too so it is set on return.
+        if let Some(Err(message)) = self.shared.backend.completion().outcome() {
+            self.shared.completion.complete(Err(message));
+        }
+        self.shared.publish();
+    }
     async fn pause(&self) {
         self.shared.backend.pause().await;
     }

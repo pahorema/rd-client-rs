@@ -122,7 +122,8 @@ impl Engine {
         }
         Ok(engine)
     }
-    /// Stops background jobs, then waits for active transfers and extractions to stop.
+    /// Stops background jobs, then waits for active transfers and extractions to stop. aria2
+    /// and Download Station jobs are left running for the next start to adopt.
     ///
     /// All clones observe shutdown; repeated or simultaneous calls are safe. The store
     /// remains open because the host application may still need its user/settings APIs.
@@ -135,7 +136,7 @@ impl Engine {
             }
         }
         let _tick = self.inner.tick_lock.lock().await;
-        self.inner.registry.cancel_all().await;
+        self.inner.registry.shutdown().await;
         let completion_jobs: Vec<_> = self
             .inner
             .completion_jobs

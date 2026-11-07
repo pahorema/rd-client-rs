@@ -150,22 +150,39 @@ impl Registry {
         }
     }
 
-    pub(crate) async fn cancel_all(&self) {
-        let mut ids: Vec<_> = self
+    /// Stops every transfer and extraction for shutdown. Transfers are detached: aria2 and
+    /// Download Station jobs keep running so the next start adopts them through their stored
+    /// remote id, while internal and symlink transfers are cancelled.
+    pub(crate) async fn shutdown(&self) {
+        let downloads: Vec<_> = self
             .downloads
             .lock()
             .expect("download registry lock poisoned")
+            .iter()
+            .map(|(id, active)| (*id, Arc::clone(active)))
+            .collect();
+        for (id, active) in downloads {
+            active.engine.detach().await;
+            self.download_stats(&active);
+            let mut downloads = self
+                .downloads
+                .lock()
+                .expect("download registry lock poisoned");
+            if downloads
+                .get(&id)
+                .is_some_and(|entry| Arc::ptr_eq(entry, &active))
+            {
+                downloads.remove(&id);
+            }
+        }
+        let unpacks: Vec<_> = self
+            .unpacks
+            .lock()
+            .expect("unpack registry lock poisoned")
             .keys()
             .copied()
             .collect();
-        ids.extend(
-            self.unpacks
-                .lock()
-                .expect("unpack registry lock poisoned")
-                .keys()
-                .copied(),
-        );
-        for id in ids {
+        for id in unpacks {
             self.cancel(id).await;
         }
     }
@@ -270,7 +287,7 @@ mod tests {
             speed: 0,
         });
         assert_eq!(registry.session_bytes(), 65);
-        registry.cancel_all().await;
+        registry.shutdown().await;
         assert_eq!(
             registry.session_bytes(),
             65,
@@ -308,7 +325,7 @@ mod tests {
         assert_eq!(remote.paused.load(Ordering::Relaxed), 1);
         registry.resume_torrent(torrent_id).await;
         assert_eq!(remote.resumed.load(Ordering::Relaxed), 1);
-        registry.cancel_all().await;
+        registry.shutdown().await;
     }
 
     #[tokio::test]
