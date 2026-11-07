@@ -6,6 +6,7 @@ pub mod app;
 pub mod auth;
 pub mod config;
 mod dto;
+mod events;
 pub mod http;
 pub mod logging;
 mod preferences;

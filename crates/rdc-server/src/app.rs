@@ -1,6 +1,9 @@
 //! HTTP router assembly and shared application dependencies.
 
-use std::fmt::Display;
+use std::{
+    fmt::Display,
+    sync::{Arc, Mutex},
+};
 
 use axum::{Json, Router, extract::rejection::JsonRejection, http::StatusCode, middleware};
 use rdc_engine::Engine;
@@ -10,10 +13,12 @@ use serde::{
     de::{DeserializeOwned, Error as _},
 };
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     accounts,
     auth::{AuthPolicy, Sessions, require_auth},
+    events,
     http::{ApiError, AppBuilder},
     logging::LogControl,
     preferences, torrents,
@@ -39,6 +44,10 @@ pub(crate) struct AppState {
     pub(crate) store: Store,
     pub(crate) sessions: Sessions,
     pub(crate) policy: AuthPolicy,
+    /// Number of currently connected event streams.
+    pub(crate) connections: Arc<Mutex<usize>>,
+    /// Ends open event streams during graceful shutdown.
+    pub(crate) shutdown: CancellationToken,
 }
 
 /// Map any failure to a 500 response carrying its message.
@@ -82,7 +91,14 @@ impl<'de, T: DeserializeOwned> Deserialize<'de> for CaseInsensitive<T> {
 }
 
 /// Build the complete web application with protected routes mounted inside path preprocessing.
-pub fn build(backend: Backend, base_path: &str, logs: LogControl) -> Router {
+///
+/// Cancelling `shutdown` ends every open event stream.
+pub fn build(
+    backend: Backend,
+    base_path: &str,
+    logs: LogControl,
+    shutdown: CancellationToken,
+) -> Router {
     let Backend {
         engine,
         store,
@@ -94,11 +110,14 @@ pub fn build(backend: Backend, base_path: &str, logs: LogControl) -> Router {
         store,
         sessions,
         policy: policy.clone(),
+        connections: Arc::new(Mutex::new(0)),
+        shutdown,
     };
     let protected = Router::new()
         .merge(accounts::protected_routes())
         .merge(preferences::routes())
         .merge(torrents::routes())
+        .merge(events::routes())
         .route_layer(middleware::from_fn_with_state(policy, require_auth));
     AppBuilder::new(base_path, logs)
         .merge(accounts::public_routes(), accounts::PUBLIC_PATHS)
@@ -108,6 +127,7 @@ pub fn build(backend: Backend, base_path: &str, logs: LogControl) -> Router {
                 accounts::PROTECTED_PATHS,
                 preferences::PATHS,
                 torrents::PATHS,
+                events::PATHS,
             ]
             .concat(),
         )

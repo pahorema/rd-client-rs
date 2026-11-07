@@ -9,7 +9,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Serve => {
             let logs = rdc_server::logging::init(&config)?;
             let app = rdc_server::http::AppBuilder::new(&config.base_path, logs).build(());
-            rdc_server::http::serve(config.port, app).await
+            let shutdown = tokio_util::sync::CancellationToken::new();
+            rdc_server::http::serve(config.port, app, shutdown).await
         }
     }
 }

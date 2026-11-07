@@ -276,6 +276,7 @@ mod tests {
                 },
                 base,
                 logs,
+                tokio_util::sync::CancellationToken::new(),
             );
             Self {
                 test,

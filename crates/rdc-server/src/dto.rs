@@ -14,6 +14,8 @@ use uuid::Uuid;
 pub(crate) enum Variant {
     /// Torrent rows only: no downloads, files or payload.
     List,
+    /// Rows with their downloads, as pushed by live updates.
+    Update,
     /// Everything, including provider files and the original payload.
     Detail,
 }

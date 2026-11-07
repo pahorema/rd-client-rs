@@ -196,6 +196,7 @@ mod tests {
                 },
                 "",
                 logs,
+                tokio_util::sync::CancellationToken::new(),
             );
             let mut fixture = Self {
                 test,

@@ -33,6 +33,8 @@ sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "signal", "process", "sync"] }
+tokio-stream.workspace = true
+tokio-util.workspace = true
 tower-http = { workspace = true, features = ["catch-panic"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, features = ["fmt", "registry", "std"] }

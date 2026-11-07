@@ -477,12 +477,22 @@ fn asset_response(name: &str, bytes: std::borrow::Cow<'static, [u8]>) -> Respons
 
 /// Serve on every IPv4 interface until Ctrl-C or a termination signal arrives.
 ///
+/// `shutdown` is cancelled when the signal arrives, before open connections are drained, so
+/// long-lived responses such as event streams can end.
+///
 /// # Errors
 /// Returns bind or server I/O errors.
-pub async fn serve(port: u16, app: Router) -> anyhow::Result<()> {
+pub async fn serve(
+    port: u16,
+    app: Router,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?;
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            shutdown.cancel();
+        })
         .await?;
     Ok(())
 }

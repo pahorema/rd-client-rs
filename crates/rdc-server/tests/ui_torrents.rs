@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     Router,
@@ -13,6 +13,8 @@ use rdc_server::{
     logging,
 };
 use serde_json::{Value, json};
+use tokio_stream::StreamExt;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 const MAGNET: &str = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Movie";
@@ -52,6 +54,7 @@ async fn fixture(base: &str) -> (TestEngine, Router) {
         },
         base,
         logs,
+        CancellationToken::new(),
     );
     (fixture, router)
 }
@@ -296,4 +299,43 @@ async fn torrent_file_uploads_and_availability_checks() {
     let result: Value = serde_json::from_str(&body).expect("regex response");
     assert_ne!(result["includeError"].as_str().expect("error"), "");
     assert_eq!(result["selectedFiles"], json!([]));
+}
+
+#[tokio::test]
+async fn event_stream_requires_auth_and_starts_with_update() {
+    let (fixture, router) = fixture("/base").await;
+    let response = router
+        .clone()
+        .oneshot(request("GET", "/base/Api/Events", Body::empty(), None))
+        .await
+        .expect("event stream response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut chunks = response.into_body().into_data_stream();
+    let first = tokio::time::timeout(Duration::from_secs(2), chunks.next())
+        .await
+        .expect("first event deadline")
+        .expect("first event")
+        .expect("first chunk");
+    let text = String::from_utf8(first.to_vec()).expect("event UTF-8");
+    assert!(text.contains("event: update"), "{text}");
+    assert!(text.contains("data: []"), "{text}");
+
+    fixture
+        .engine
+        .update_setting("General:AuthenticationType", Some("0"))
+        .await
+        .expect("enable auth");
+    let response = router
+        .clone()
+        .oneshot(request("GET", "/base/Api/Events", Body::empty(), None))
+        .await
+        .expect("unauthorized response");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        to_bytes(response.into_body(), 1024)
+            .await
+            .expect("empty body")
+            .len(),
+        0
+    );
 }
