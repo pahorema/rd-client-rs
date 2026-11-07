@@ -20,6 +20,7 @@ function download(overrides: Partial<Download> = {}): Download {
 		completed: null,
 		retryCount: 0,
 		error: null,
+		size: null,
 		bytesTotal: 0,
 		bytesDone: 0,
 		speed: 0,

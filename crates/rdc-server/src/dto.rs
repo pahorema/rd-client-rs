@@ -4,7 +4,7 @@ use jiff::Timestamp;
 use rdc_engine::{DownloadStats, Engine};
 use rdc_model::{
     Download, DownloadClient, RemoteFile, Torrent, TorrentDownloadAction, TorrentFinishedAction,
-    TorrentHostDownloadAction, TorrentStatus, format_size,
+    TorrentHostDownloadAction, TorrentStatus, format_size, paths,
 };
 use serde::Serialize;
 use uuid::Uuid;
@@ -90,7 +90,7 @@ impl From<RemoteFile> for FileDto {
     }
 }
 
-/// A host transfer with its live statistics.
+/// A host transfer with its file size and live statistics.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DownloadDto {
@@ -108,13 +108,17 @@ struct DownloadDto {
     completed: Option<Timestamp>,
     retry_count: i32,
     error: Option<String>,
+    /// Size of the file as reported by the provider; `None` until the download has an
+    /// unrestricted link or when no single provider file matches it.
+    size: Option<i64>,
+    /// Live counters of the running transfer or unpack; 0 otherwise.
     bytes_total: u64,
     bytes_done: u64,
     speed: u64,
 }
 
 impl DownloadDto {
-    fn new(download: Download, stats: DownloadStats) -> Self {
+    fn new(download: Download, size: Option<i64>, stats: DownloadStats) -> Self {
         Self {
             download_id: download.download_id,
             torrent_id: download.torrent_id,
@@ -130,6 +134,7 @@ impl DownloadDto {
             completed: download.completed,
             retry_count: download.retry_count,
             error: download.error,
+            size,
             bytes_total: stats.bytes_total,
             bytes_done: stats.bytes_done,
             speed: stats.speed,
@@ -144,11 +149,6 @@ impl TorrentDto {
         let provider_files = torrent.files();
         let files_count = provider_files.len();
         let downloads_count = torrent.downloads.len();
-        let files = if variant == Variant::Detail {
-            provider_files.into_iter().map(FileDto::from).collect()
-        } else {
-            Vec::new()
-        };
         let downloads = if variant == Variant::List {
             Vec::new()
         } else {
@@ -157,9 +157,15 @@ impl TorrentDto {
                 .into_iter()
                 .map(|download| {
                     let stats = engine.download_stats(download.download_id);
-                    DownloadDto::new(download, stats)
+                    let size = file_size(&provider_files, &download);
+                    DownloadDto::new(download, size, stats)
                 })
                 .collect()
+        };
+        let files = if variant == Variant::Detail {
+            provider_files.into_iter().map(FileDto::from).collect()
+        } else {
+            Vec::new()
         };
         Self {
             torrent_id: torrent.torrent_id,
@@ -205,6 +211,21 @@ impl TorrentDto {
             downloads,
         }
     }
+}
+
+/// Size the provider reports for the download's file: the only provider file whose path ends
+/// with the download's file name, as in [`rdc_model::paths::expected_file_size`] (which parses
+/// the file list again for every download).
+fn file_size(files: &[RemoteFile], download: &Download) -> Option<i64> {
+    let name = paths::file_name(download).filter(|name| !name.trim().is_empty())?;
+    let mut matching = files
+        .iter()
+        .filter(|file| !file.path.trim().is_empty() && file.path.ends_with(&name));
+    let file = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    (file.bytes > 0).then_some(file.bytes)
 }
 
 /// Compute the first applicable status, prioritizing errors and active host transfers.
@@ -409,5 +430,34 @@ mod tests {
         );
         t.downloads[0].completed = Some(time);
         assert_eq!(status_text(&t, |_| DownloadStats::default()), "Finished");
+    }
+
+    #[test]
+    fn download_size_comes_from_the_matching_provider_file() {
+        let file = |path: &str, bytes| RemoteFile {
+            path: path.to_owned(),
+            bytes,
+            ..RemoteFile::default()
+        };
+        let files = [
+            file("/Show/S01E01.mkv", 700),
+            file("/Show/S01E02.mkv", 800),
+            file("/Show/a/info.nfo", 1),
+            file("/Show/b/info.nfo", 2),
+        ];
+        let download = |link: Option<&str>| Download {
+            link: link.map(str::to_owned),
+            ..Download::default()
+        };
+        assert_eq!(
+            file_size(&files, &download(Some("https://cdn/x/S01E02.mkv"))),
+            Some(800)
+        );
+        // Unknown until unrestricted, and never guessed between same-named files.
+        assert_eq!(file_size(&files, &download(None)), None);
+        assert_eq!(
+            file_size(&files, &download(Some("https://cdn/x/info.nfo"))),
+            None
+        );
     }
 }

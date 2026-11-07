@@ -69,7 +69,7 @@ export interface TorrentFile {
 	downloadLink: string | null;
 }
 
-/** One file transfer from the provider to the host, with live statistics. */
+/** One file transfer from the provider to the host, with its size and live statistics. */
 export interface Download {
 	downloadId: string;
 	torrentId: string;
@@ -87,6 +87,9 @@ export interface Download {
 	completed: Timestamp | null;
 	retryCount: number;
 	error: string | null;
+	/** File size reported by the provider; `null` until the link is unrestricted or when unknown. */
+	size: number | null;
+	/** Live counters of the running transfer or unpack (a percentage while unpacking); 0 otherwise. */
 	bytesTotal: number;
 	bytesDone: number;
 	speed: number;

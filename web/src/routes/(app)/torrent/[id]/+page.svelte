@@ -284,7 +284,7 @@
 									{decodeUrl(download.link ?? download.path)}
 								</Table.Cell>
 								<Table.Cell class="text-right tabular-nums"
-									>{formatSize(download.bytesTotal)}</Table.Cell
+									>{download.size != null ? formatSize(download.size) : ''}</Table.Cell
 								>
 								<Table.Cell class={download.error ? 'text-destructive' : ''}>
 									{downloadStatusText(download)}
@@ -306,10 +306,12 @@
 													{/if}
 												</dd>
 												{@render item('Provider link', download.path)}
-												{@render item(
-													'Transferred',
-													`${formatSize(download.bytesDone)} / ${formatSize(download.bytesTotal)} (${formatSpeed(download.speed)})`
-												)}
+												{#if download.downloadStarted && !download.downloadFinished && !download.completed}
+													{@render item(
+														'Transferred',
+														`${formatSize(download.bytesDone)} / ${formatSize(download.bytesTotal)} (${formatSpeed(download.speed)})`
+													)}
+												{/if}
 												{@render item(
 													'Retry count',
 													`${download.retryCount} / ${torrent.downloadRetryAttempts}`
