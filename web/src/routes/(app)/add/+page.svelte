@@ -47,10 +47,11 @@
 	let provider = $state<string | null>(null);
 	let categories = $state<string[]>([]);
 
-	const manual = new SvelteSet<string>();
+	// Indexes into the checked files: providers may report several files with the same name.
+	const manual = new SvelteSet<number>();
 	const fileCheck = new FileCheck((available) => {
 		manual.clear();
-		for (const file of available) manual.add(file.filename);
+		available.forEach((_, index) => manual.add(index));
 		void verifyRegex();
 	});
 	const regexCheck = new Latest();
@@ -168,12 +169,13 @@
 		settings.category = settings.category?.trim() || null;
 
 		if (torrent.downloadAction === TorrentDownloadAction.DownloadManual && !multiple) {
-			if (!fileCheck.available || manual.size === 0) {
+			const chosen = (fileCheck.available ?? []).filter((_, index) => manual.has(index));
+			if (chosen.length === 0) {
 				error = 'Select at least one file to download.';
 				saving = false;
 				return;
 			}
-			settings.downloadManualFiles = [...manual].join(',');
+			settings.downloadManualFiles = [...new Set(chosen.map((f) => f.filename))].join(',');
 		}
 
 		const link = magnet.trim();
@@ -299,15 +301,15 @@
 						</div>
 					{:else if fileCheck.available && fileCheck.available.length > 0}
 						<ul class="grid max-h-96 gap-1 overflow-y-auto rounded-lg border p-1 text-sm">
-							{#each fileCheck.available as file (file.filename)}
+							{#each fileCheck.available as file, index (index)}
 								{@const excluded = regexSelection != null && !regexSelection.has(file.filename)}
 								<li class="rounded px-2 py-1 hover:bg-muted">
 									{#if torrent.downloadAction === TorrentDownloadAction.DownloadManual}
 										<Label class="flex items-center gap-2 font-normal">
 											<Checkbox
-												checked={manual.has(file.filename)}
+												checked={manual.has(index)}
 												onCheckedChange={(checked) =>
-													checked ? manual.add(file.filename) : manual.delete(file.filename)}
+													checked ? manual.add(index) : manual.delete(index)}
 											/>
 											<span class="min-w-0 flex-1 break-all">{file.filename}</span>
 											<span class="text-muted-foreground">{formatSize(file.filesize)}</span>
