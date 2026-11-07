@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use rdc_aria2::{AddUriOptions, Client, DownloadState, DownloadStatus, Error};
 use tokio::sync::watch;
 
-use crate::engine::{CANCELLED_MESSAGE, Completion, DownloadEngine, Outcome, Progress, StartError};
+use crate::engine::{Completion, DownloadEngine, Outcome, Progress, StartError};
 use crate::remote::{Polled, Signals, Timing, remote_parent, remote_path, spawn_polling};
 
 /// Timeout of each aria2 request.
@@ -68,7 +68,8 @@ pub struct Aria2Request {
 /// an error removes it and fails, a download removed before its last byte fails, a completed
 /// download (or one removed after its last byte) is removed and succeeds as soon as the local
 /// file exists (looked for ten times, about 45 s), and an unknown GID fails.
-/// Pausing and resuming pause and unpause the aria2 download; cancelling removes it.
+/// Pausing and resuming pause and unpause the aria2 download; cancelling removes it, detaching
+/// leaves it running for a later start to adopt.
 #[derive(Debug)]
 pub struct Aria2Download {
     shared: Arc<Shared>,
@@ -200,7 +201,7 @@ impl Shared {
                 Err(AddError::Aria2(error)) => {
                     tracing::debug!("Error starting aria2 download: {error}, retry {retry}");
                     if !self.signals.sleep(self.timing.retry_step * retry).await {
-                        return Err(StartError::new(CANCELLED_MESSAGE));
+                        return Err(self.signals.stopped());
                     }
                     retry += 1;
                 }
@@ -209,13 +210,17 @@ impl Shared {
         *self.gid.lock().expect("gid lock poisoned") = Some(gid.clone());
         if self.signals.cancel.is_cancelled() {
             self.remove().await;
-            return Err(StartError::new(CANCELLED_MESSAGE));
+            return Err(self.signals.stopped());
         }
         Ok(gid)
     }
 
-    /// Removes the download and its result from aria2, ignoring failures.
+    /// Removes the download and its result from aria2, ignoring failures; a detached transfer
+    /// leaves both in place.
     async fn remove(&self) {
+        if self.signals.is_detached() {
+            return;
+        }
         let (Some(gid), Some(client)) = (self.gid(), self.client.get()) else {
             return;
         };
@@ -363,6 +368,11 @@ impl DownloadEngine for Aria2Download {
     async fn cancel(&self) {
         self.shared.signals.cancel();
         self.shared.remove().await;
+    }
+
+    /// Stops following the download and leaves it running in aria2.
+    async fn detach(&self) {
+        self.shared.signals.detach();
     }
 
     async fn pause(&self) {

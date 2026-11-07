@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use dsm::{FOLDER_CREATE, FakeDsm, GID, Reply, TASK_CREATE, TASK_GET, TASK_LIST, URL, task, tasks};
 use rdc_download::{
-    CANCELLED_MESSAGE, DownloadEngine, DownloadStationConfig, DownloadStationDownload,
-    DownloadStationRequest, Outcome, Progress,
+    CANCELLED_MESSAGE, DETACHED_MESSAGE, DownloadEngine, DownloadStationConfig,
+    DownloadStationDownload, DownloadStationRequest, Outcome, Progress,
 };
 use rdc_synology::SessionProvider;
 use serde_json::json;
@@ -303,6 +303,24 @@ async fn cancel_deletes_the_task() {
         Some(Err(CANCELLED_MESSAGE.to_owned()))
     );
     assert_eq!(fake.count("DownloadStation/task.cgi delete").await, 1);
+}
+
+#[tokio::test]
+async fn detach_stops_following_but_leaves_the_task() {
+    let fake = FakeDsm::start().await;
+    let engine = engine(&fake, request(&fake, Some(GID)));
+    engine.start().await.expect("start");
+    engine.detach().await;
+    assert_eq!(
+        engine.completion().outcome(),
+        Some(Err(DETACHED_MESSAGE.to_owned()))
+    );
+    let reads = fake.count(TASK_GET).await;
+    // Were polling still running, the next poll would delete the failed task.
+    fake.get.always(tasks(&[task(2, "broken_link")]));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fake.count(TASK_GET).await, reads);
+    assert_eq!(fake.count("DownloadStation/task.cgi delete").await, 0);
 }
 
 #[tokio::test]

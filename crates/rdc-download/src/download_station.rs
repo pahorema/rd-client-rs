@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use rdc_synology::{Credentials, Error, Session, SessionProvider, Task, TaskStatus};
 use tokio::sync::watch;
 
-use crate::engine::{CANCELLED_MESSAGE, Completion, DownloadEngine, Outcome, Progress, StartError};
+use crate::engine::{Completion, DownloadEngine, Outcome, Progress, StartError};
 use crate::remote::{Polled, Signals, Timing, remote_parent, remote_path, spawn_polling};
 
 /// Attempts to find or create the task before the start fails.
@@ -68,7 +68,8 @@ pub struct DownloadStationRequest {
 /// task and fails; a finished task (or one with every byte downloaded) succeeds as soon as the
 /// local file exists (looked for ten times, about 45 s); a task that no longer exists fails, as
 /// does any other call DSM rejects, with its error; unreachable DSMs are asked again.
-/// Pausing and resuming pause and resume the task; cancelling deletes it.
+/// Pausing and resuming pause and resume the task; cancelling deletes it, detaching leaves it
+/// running for a later start to adopt.
 #[derive(Debug)]
 pub struct DownloadStationDownload {
     shared: Arc<Shared>,
@@ -233,7 +234,7 @@ impl Shared {
         self.set_gid(&gid);
         if self.signals.cancel.is_cancelled() {
             self.delete().await;
-            return Err(StartError::new(CANCELLED_MESSAGE));
+            return Err(self.signals.stopped());
         }
         Ok(gid)
     }
@@ -257,7 +258,7 @@ impl Shared {
             }
             attempt += 1;
             if !self.signals.sleep(self.timing.retry_step * attempt).await {
-                return Err(StartError::new(CANCELLED_MESSAGE));
+                return Err(self.signals.stopped());
             }
         }
         Err(self.signals.fail("Unable to download file".to_owned()))
@@ -353,8 +354,12 @@ impl Shared {
         }
     }
 
-    /// Deletes the task (looked up by link when its id is unknown), ignoring failures.
+    /// Deletes the task (looked up by link when its id is unknown), ignoring failures; a
+    /// detached transfer leaves it in place.
     async fn delete(&self) {
+        if self.signals.is_detached() {
+            return;
+        }
         let gid = match self.gid() {
             Some(gid) => gid,
             None => match self.gid_from_uri().await {
@@ -474,6 +479,11 @@ impl DownloadEngine for DownloadStationDownload {
         if self.shared.credentials.get().is_some() {
             self.shared.delete().await;
         }
+    }
+
+    /// Stops following the task and leaves it running on Download Station.
+    async fn detach(&self) {
+        self.shared.signals.detach();
     }
 
     async fn pause(&self) {

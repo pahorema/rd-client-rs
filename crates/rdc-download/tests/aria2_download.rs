@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rdc_download::{
-    Aria2Config, Aria2Download, Aria2Request, CANCELLED_MESSAGE, DownloadEngine, Outcome, Progress,
+    Aria2Config, Aria2Download, Aria2Request, CANCELLED_MESSAGE, DETACHED_MESSAGE, DownloadEngine,
+    Outcome, Progress,
 };
 use serde_json::{Value, json};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -431,6 +432,45 @@ async fn cancel_removes_the_download_even_when_aria2_fails() {
     assert_eq!(finish(&engine).await, Err(CANCELLED_MESSAGE.to_owned()));
     assert_eq!(fake.calls("aria2.forceRemove").await.len(), 2);
     assert_eq!(fake.calls("aria2.removeDownloadResult").await.len(), 2);
+}
+
+#[tokio::test]
+async fn detach_stops_following_but_leaves_the_download_in_aria2() {
+    let fake = FakeAria2::start().await;
+    let engine = fake.engine(fake.request());
+    engine.start().await.expect("start");
+    engine.detach().await;
+    assert_eq!(finish(&engine).await, Err(DETACHED_MESSAGE.to_owned()));
+    let polls = fake.calls("aria2.tellStatus").await.len();
+    // Were polling still running, the next poll would remove the finished download.
+    FakeAria2::set(&fake.status, Some(status("complete")));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fake.calls("aria2.tellStatus").await.len(), polls);
+    assert_eq!(fake.calls("aria2.forceRemove").await, Vec::<Value>::new());
+    assert_eq!(
+        fake.calls("aria2.removeDownloadResult").await,
+        Vec::<Value>::new()
+    );
+}
+
+#[tokio::test]
+async fn detach_while_adding_leaves_what_aria2_holds() {
+    let fake = FakeAria2::start().await;
+    // aria2 never confirms the added GID, so the start keeps retrying until it is detached.
+    FakeAria2::set(&fake.status, None);
+    let engine = Arc::new(
+        fake.engine(fake.request())
+            .with_retry_step(Duration::from_secs(1)),
+    );
+    let starting = Arc::clone(&engine);
+    let start = tokio::spawn(async move { starting.start().await });
+    while fake.calls("aria2.addUri").await.is_empty() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    engine.detach().await;
+    let error = start.await.expect("task").expect_err("detached");
+    assert_eq!(error.message(), DETACHED_MESSAGE);
+    assert_eq!(fake.calls("aria2.forceRemove").await, Vec::<Value>::new());
 }
 
 #[tokio::test]

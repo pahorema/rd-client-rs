@@ -8,6 +8,10 @@ use tokio::sync::watch;
 /// Completion message of a transfer stopped through [`DownloadEngine::cancel`].
 pub const CANCELLED_MESSAGE: &str = "The download was cancelled";
 
+/// Completion message of a transfer left to its download client through
+/// [`DownloadEngine::detach`].
+pub const DETACHED_MESSAGE: &str = "The download was left to the download client";
+
 /// Completion message used when an engine went away without reporting an outcome.
 pub const STOPPED_UNEXPECTEDLY_MESSAGE: &str = "The download stopped unexpectedly";
 
@@ -76,11 +80,15 @@ impl StartError {
 ///    `Ok(())` on success, `Err(message)` with a user-visible message otherwise. A failing
 ///    `start` also resolves the completion with the same message, so a caller that only watches
 ///    completions still sees every transfer end.
-/// 5. [`DownloadEngine::cancel`], [`DownloadEngine::pause`] and [`DownloadEngine::resume`] may
-///    be called at any time and in any order, any number of times. They never fail the caller:
-///    backend errors are logged. `cancel` returns once the engine stopped transferring and
-///    cleaned up what it owns, and a cancelled transfer completes with
-///    [`CANCELLED_MESSAGE`] unless it had already completed.
+/// 5. [`DownloadEngine::cancel`], [`DownloadEngine::detach`], [`DownloadEngine::pause`] and
+///    [`DownloadEngine::resume`] may be called at any time and in any order, any number of
+///    times. They never fail the caller: backend errors are logged. `cancel` returns once the
+///    engine stopped transferring and cleaned up what it owns, and a cancelled transfer
+///    completes with [`CANCELLED_MESSAGE`] unless it had already completed. `detach` stops
+///    following the transfer but leaves a remote downloader's job running, so a later run
+///    adopts it through the persisted remote id; such a transfer completes with
+///    [`DETACHED_MESSAGE`] unless it had already completed. An engine without a remote job
+///    cancels instead.
 ///
 /// # Implementing an engine
 ///
@@ -107,6 +115,15 @@ pub trait DownloadEngine: Send + Sync + fmt::Debug {
 
     /// Stops the transfer and releases what the engine owns; idempotent, never fails.
     async fn cancel(&self);
+
+    /// Stops following the transfer without touching the remote downloader's job, so a later
+    /// run can adopt it through the remote id; idempotent, never fails.
+    ///
+    /// The default cancels: an engine whose transfer lives only in this process (the internal
+    /// HTTP and symlink engines) leaves nothing behind that a later run could adopt.
+    async fn detach(&self) {
+        self.cancel().await;
+    }
 
     /// Suspends the transfer; idempotent, never fails. Engines that cannot pause ignore it.
     async fn pause(&self);

@@ -27,8 +27,8 @@ pub use self::download_station::{
     DownloadStationConfig, DownloadStationDownload, DownloadStationRequest,
 };
 pub use self::engine::{
-    CANCELLED_MESSAGE, Completion, CompletionSender, DownloadEngine, Outcome, Progress,
-    STOPPED_UNEXPECTEDLY_MESSAGE, StartError, completion_channel,
+    CANCELLED_MESSAGE, Completion, CompletionSender, DETACHED_MESSAGE, DownloadEngine, Outcome,
+    Progress, STOPPED_UNEXPECTEDLY_MESSAGE, StartError, completion_channel,
 };
 pub use self::http::{HttpDownload, InternalConfig};
 pub use self::symlink::{SourceLookup, SymlinkDownload, SymlinkError, SymlinkRequest};

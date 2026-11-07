@@ -10,8 +10,8 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::{
-    CANCELLED_MESSAGE, CompletionSender, Outcome, Progress, STOPPED_UNEXPECTEDLY_MESSAGE,
-    StartError, completion_channel,
+    CANCELLED_MESSAGE, CompletionSender, DETACHED_MESSAGE, Outcome, Progress,
+    STOPPED_UNEXPECTEDLY_MESSAGE, StartError, completion_channel,
 };
 
 /// How often a remote engine asks its backend about the transfer.
@@ -44,7 +44,10 @@ impl Default for Timing {
 pub(crate) struct Signals {
     pub(crate) progress: watch::Sender<Progress>,
     pub(crate) completion: CompletionSender,
+    /// Stops polling and the start's retries, on a cancel and on a detach.
     pub(crate) cancel: CancellationToken,
+    /// Whether the stop was a detach, which leaves the backend's job alone.
+    detached: AtomicBool,
     started: AtomicBool,
 }
 
@@ -55,17 +58,18 @@ impl Signals {
             progress: watch::Sender::new(Progress::default()),
             completion,
             cancel: CancellationToken::new(),
+            detached: AtomicBool::new(false),
             started: AtomicBool::new(false),
         }
     }
 
-    /// Marks the transfer as started; fails when it already was or was cancelled.
+    /// Marks the transfer as started; fails when it already was or was stopped.
     pub(crate) fn begin(&self) -> Result<(), StartError> {
         if self.started.swap(true, Ordering::SeqCst) {
             return Err(StartError::new("The download was already started"));
         }
         if self.cancel.is_cancelled() {
-            return Err(self.fail(CANCELLED_MESSAGE.to_owned()));
+            return Err(self.fail(self.stop_message().to_owned()));
         }
         Ok(())
     }
@@ -80,6 +84,32 @@ impl Signals {
     pub(crate) fn cancel(&self) {
         self.cancel.cancel();
         self.completion.complete(Err(CANCELLED_MESSAGE.to_owned()));
+    }
+
+    /// Stops polling and completes the transfer as detached; the backend's job must be left
+    /// alone from now on (see [`Signals::is_detached`]).
+    pub(crate) fn detach(&self) {
+        self.detached.store(true, Ordering::SeqCst);
+        self.cancel.cancel();
+        self.completion.complete(Err(DETACHED_MESSAGE.to_owned()));
+    }
+
+    /// Whether the transfer was detached, so nothing may remove the backend's job.
+    pub(crate) fn is_detached(&self) -> bool {
+        self.detached.load(Ordering::SeqCst)
+    }
+
+    /// The start error of a transfer stopped while it was starting.
+    pub(crate) fn stopped(&self) -> StartError {
+        StartError::new(self.stop_message())
+    }
+
+    fn stop_message(&self) -> &'static str {
+        if self.is_detached() {
+            DETACHED_MESSAGE
+        } else {
+            CANCELLED_MESSAGE
+        }
     }
 
     pub(crate) fn report(&self, progress: Progress) {
