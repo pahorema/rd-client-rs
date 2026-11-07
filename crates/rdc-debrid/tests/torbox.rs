@@ -385,6 +385,41 @@ async fn listing_maps_torrents_and_queued_torrents() {
     assert_eq!(queued.ended, queued.added);
 }
 
+/// Answers listing calls to `endpoint` sent with `offset` with `items`.
+async fn mount_page(server: &MockServer, endpoint: &str, offset: &str, items: &[String]) {
+    Mock::given(method("GET"))
+        .and(path(endpoint))
+        .and(query_param("offset", offset))
+        .and(query_param("limit", "1000"))
+        .respond_with(json(&data(&format!("[{}]", items.join(",")))))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+
+fn queued(id: usize) -> String {
+    format!(r#"{{"id": {id}, "hash": "h{id}", "name": "Waiting {id}"}}"#)
+}
+
+#[tokio::test]
+async fn listing_reads_pages_until_one_that_is_not_full() {
+    let (server, client) = client().await;
+    let full: Vec<String> = (0..1000)
+        .map(|id| TORRENT.replace("12345", &id.to_string()))
+        .collect();
+    mount_page(&server, "/torrents/mylist", "0", &full).await;
+    mount_page(&server, "/torrents/mylist", "1000", &[TORRENT.to_owned()]).await;
+    let full: Vec<String> = (0..1000).map(queued).collect();
+    mount_page(&server, "/queued/getqueued", "0", &full).await;
+    mount_page(&server, "/queued/getqueued", "1000", &[]).await;
+
+    let torrents = client.list_torrents().await.expect("list");
+
+    assert_eq!(torrents.len(), 2001);
+    assert_eq!(torrents[1000].id, "12345");
+    assert_eq!(torrents[2000].status.as_deref(), Some("queued"));
+}
+
 #[tokio::test]
 async fn listing_skips_missing_lists() {
     let (server, client) = client().await;

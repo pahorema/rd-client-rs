@@ -25,8 +25,8 @@ use crate::values::{base_name, excerpt, percent};
 /// Address of the TorBox API.
 pub const DEFAULT_BASE_URL: &str = "https://api.torbox.app/v1/api/";
 
-/// Most torrents (and, separately, queued torrents) one listing returns.
-const LIST_LIMIT: &str = "1000";
+/// Torrents (and, separately, queued torrents) requested per listing page.
+const PAGE_SIZE: usize = 1000;
 
 /// Download state of torrents TorBox has queued but not started yet.
 const QUEUED_STATE: &str = "queued";
@@ -134,36 +134,64 @@ impl TorBox {
     }
 
     /// Lists the torrents of the account followed by its queued torrents
-    /// (at most 1000 of each; queued torrents have their own ids).
+    /// (queued torrents have their own ids), each read page by page.
     pub async fn list_torrents(&self) -> Result<Vec<RemoteTorrent>, DebridError> {
-        let current: Option<Vec<TorrentInfo>> = self
-            .call(|| {
+        let current: Vec<TorrentInfo> = self
+            .pages(|offset, limit| {
                 self.request(
                     Method::GET,
                     "torrents/mylist",
-                    &[("bypass_cache", "true"), ("limit", LIST_LIMIT)],
+                    &[
+                        ("bypass_cache", "true"),
+                        ("offset", offset),
+                        ("limit", limit),
+                    ],
                 )
             })
             .await?;
-        let queued: Option<Vec<QueuedTorrent>> = self.call(|| self.queued_request(None)).await?;
+        let queued: Vec<QueuedTorrent> = self
+            .pages(|offset, limit| self.queued_request(&[("offset", offset), ("limit", limit)]))
+            .await?;
         Ok(current
             .into_iter()
-            .flatten()
             .map(TorrentInfo::into_remote)
-            .chain(queued.into_iter().flatten().map(QueuedTorrent::into_remote))
+            .chain(queued.into_iter().map(QueuedTorrent::into_remote))
             .collect())
+    }
+
+    /// Every item of a listing read in pages of [`PAGE_SIZE`] until a page
+    /// that is not full; `page` builds the request for an offset and a limit.
+    async fn pages<T: DeserializeOwned>(
+        &self,
+        page: impl Fn(&str, &str) -> Result<RequestBuilder, DebridError> + Send + Sync,
+    ) -> Result<Vec<T>, DebridError> {
+        let limit = PAGE_SIZE.to_string();
+        let mut items = Vec::new();
+        loop {
+            let offset = items.len().to_string();
+            let found: Vec<T> = self
+                .call(|| page(&offset, &limit))
+                .await?
+                .unwrap_or_default();
+            let full = found.len() >= PAGE_SIZE;
+            items.extend(found);
+            if !full {
+                return Ok(items);
+            }
+        }
     }
 
     /// Looks the torrent `id` up among the current torrents, then among the
     /// queued ones; `None` when neither has it.
     pub async fn torrent(&self, id: &str) -> Result<Option<RemoteTorrent>, DebridError> {
         let id = parse_id(id)?.to_string();
+        let limit = PAGE_SIZE.to_string();
         let current: Result<Option<OneOrMany<TorrentInfo>>, _> = self
             .call(|| {
                 self.request(
                     Method::GET,
                     "torrents/mylist",
-                    &[("id", &id), ("bypass_cache", "true"), ("limit", LIST_LIMIT)],
+                    &[("id", &id), ("bypass_cache", "true"), ("limit", &limit)],
                 )
             })
             .await;
@@ -176,7 +204,10 @@ impl TorBox {
             Err(error) if error.is_not_found() => {}
             Err(error) => return Err(error),
         }
-        match self.call(|| self.queued_request(Some(&id))).await {
+        let queued = self
+            .call(|| self.queued_request(&[("id", &id), ("offset", "0"), ("limit", &limit)]))
+            .await;
+        match queued {
             Ok(found) => Ok(found
                 .and_then(OneOrMany::into_first)
                 .map(QueuedTorrent::into_remote)),
@@ -402,11 +433,15 @@ impl TorBox {
             .collect())
     }
 
-    fn queued_request(&self, id: Option<&str>) -> Result<RequestBuilder, DebridError> {
-        let mut params = vec![("type", "torrent"), ("bypass_cache", "true")];
-        params.extend(id.map(|id| ("id", id)));
-        params.extend([("offset", "0"), ("limit", LIST_LIMIT)]);
-        self.request(Method::GET, "queued/getqueued", &params)
+    /// A request for queued torrents with `params`.
+    fn queued_request(&self, params: &[(&str, &str)]) -> Result<RequestBuilder, DebridError> {
+        Ok(self
+            .request(
+                Method::GET,
+                "queued/getqueued",
+                &[("type", "torrent"), ("bypass_cache", "true")],
+            )?
+            .query(params))
     }
 
     fn request(
