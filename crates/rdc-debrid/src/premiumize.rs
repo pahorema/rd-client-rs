@@ -1,8 +1,8 @@
 //! Premiumize.me client.
 //!
 //! Every call authenticates with the `apikey` query parameter. Responses are
-//! JSON objects whose `status` is `"success"` unless the call failed, in which
-//! case `message` explains why.
+//! JSON objects; any `status` other than `"success"` is a failure, which
+//! `message` usually explains (item details carry no `status`).
 //!
 //! The transfer listing reports neither sizes nor files, so a refreshed
 //! torrent keeps no size and an empty file list; the files to download are
@@ -250,7 +250,7 @@ impl Premiumize {
         let list: TransferList = self
             .call(self.request(Method::POST, "transfer/list", &[])?)
             .await?;
-        Ok(list.transfers.unwrap_or_default())
+        Ok(list.transfers)
     }
 
     /// Builds a request for `path` with the API key and `params`.
@@ -291,7 +291,7 @@ struct Account {
 
 #[derive(Debug, Deserialize)]
 struct TransferList {
-    transfers: Option<Vec<Transfer>>,
+    transfers: Vec<Transfer>,
 }
 
 /// A transfer (torrent) of the account.
@@ -377,10 +377,14 @@ fn parse_response<T: DeserializeOwned>(status: StatusCode, body: &str) -> Result
             ))
         }
     })?;
-    if envelope.status.as_deref() != Some("success")
-        && let Some(message) = envelope.message
-    {
-        return Err(provider_error(message, envelope.code.as_deref()));
+    match envelope.status.as_deref() {
+        Some("success") | None => {}
+        Some(failed) => {
+            let message = envelope.message.unwrap_or_else(|| {
+                format!("Premiumize answered with status \"{failed}\" and no message")
+            });
+            return Err(provider_error(message, envelope.code.as_deref()));
+        }
     }
     serde_json::from_str(body).map_err(|error| unreadable(body, &error))
 }

@@ -361,6 +361,39 @@ async fn mount_transfers(server: &MockServer, body: &str) {
         .await;
 }
 
+#[tokio::test]
+async fn failures_without_a_message_are_errors() {
+    let (server, client) = client().await;
+    Mock::given(method("POST"))
+        .respond_with(json(r#"{"status":"error"}"#))
+        .mount(&server)
+        .await;
+
+    let listing = client.list_torrents().await.expect_err("failed listing");
+    let deleting = client
+        .delete_transfer("t1")
+        .await
+        .expect_err("failed delete");
+
+    for error in [listing, deleting] {
+        assert!(matches!(error, DebridError::Provider(_)), "{error:?}");
+        assert!(error.to_string().contains("\"error\""), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn listings_without_transfers_are_errors() {
+    let (server, client) = client().await;
+    mount_transfers(&server, r#"{"status":"success"}"#).await;
+
+    let error = client.list_torrents().await.expect_err("no transfers");
+
+    assert!(
+        matches!(error, DebridError::InvalidResponse(_)),
+        "{error:?}"
+    );
+}
+
 fn sent_torrent(rd_id: &str) -> Torrent {
     Torrent {
         rd_id: Some(rd_id.to_owned()),
