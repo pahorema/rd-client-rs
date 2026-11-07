@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { auth, errorMessage } from '#lib/api/index.js';
+	import { ApiError, auth, errorMessage } from '#lib/api/index.js';
 	import { Provider } from '#lib/api/types.js';
 	import AuthLayout from '#lib/components/auth-layout.svelte';
 	import ExternalLink from '#lib/components/external-link.svelte';
@@ -16,8 +16,10 @@
 	import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
 	import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
 	import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
+	import { onMount } from 'svelte';
 
-	let step = $state<1 | 2 | 3>(1);
+	// 0 while finding out where to resume: a signed-in visitor already created the account.
+	let step = $state<0 | 1 | 2 | 3>(0);
 	let userName = $state('');
 	let password = $state('');
 	let provider = $state<Provider>(Provider.RealDebrid);
@@ -28,7 +30,15 @@
 	const providerOptions = providers.map((p) => ({ value: p.value, label: p.label }));
 	const selectedProvider = $derived(providers.find((p) => p.value === provider));
 
-	async function run(action: () => Promise<unknown>, next: 2 | 3) {
+	onMount(() => {
+		auth
+			.isLoggedIn()
+			.then(() => (step = 2))
+			// 402: no account yet. A 403 (account exists, signed out) goes to the login page.
+			.catch(() => (step = 1));
+	});
+
+	async function run(action: () => Promise<unknown>, next: 2 | 3, refused: string) {
 		working = true;
 		error = null;
 
@@ -36,7 +46,7 @@
 			await action();
 			step = next;
 		} catch (e) {
-			error = errorMessage(e);
+			error = e instanceof ApiError && e.status === 403 ? refused : errorMessage(e);
 		} finally {
 			working = false;
 		}
@@ -44,12 +54,20 @@
 
 	function createAccount(event: SubmitEvent) {
 		event.preventDefault();
-		void run(() => auth.create(userName, password), 2);
+		void run(
+			() => auth.create(userName, password),
+			2,
+			'An account already exists. Sign in to finish the setup.'
+		);
 	}
 
 	function connectProvider(event: SubmitEvent) {
 		event.preventDefault();
-		void run(() => auth.setupProvider(provider, token.trim()), 3);
+		void run(
+			() => auth.setupProvider(provider, token.trim()),
+			3,
+			'A debrid provider is already connected. You can change it on the Settings page.'
+		);
 	}
 </script>
 
@@ -59,7 +77,11 @@
 
 <AuthLayout>
 	<Card.Root>
-		{#if step === 1}
+		{#if step === 0}
+			<Card.Content class="flex justify-center py-8">
+				<Spinner class="size-6 text-muted-foreground" />
+			</Card.Content>
+		{:else if step === 1}
 			<Card.Header>
 				<Card.Title>Welcome</Card.Title>
 				<Card.Description>Create the account you will use to sign in to RD Client.</Card.Description
