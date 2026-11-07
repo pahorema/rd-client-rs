@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use super::config::InternalConfig;
 use super::error::TransferError;
 use super::rate::Throttle;
-use crate::bind::resolve_bind_address;
+use crate::bind::is_local_unicast_address;
 
 /// `User-Agent` of every request.
 const USER_AGENT: &str = concat!("rd-client/", env!("CARGO_PKG_VERSION"));
@@ -127,7 +127,8 @@ impl Context {
     /// Sends a GET for `url`, optionally limited to `range`, and returns a successful response.
     ///
     /// With a bind address configured the request waits until the address is usable and
-    /// retries connection failures every second, as long as the download is not cancelled.
+    /// retries connection failures every second, as long as the download is not cancelled; a
+    /// bind address that is not an IP address fails at once.
     pub(crate) async fn get(
         &self,
         url: &Url,
@@ -176,15 +177,18 @@ impl Context {
             let bind = match config.bind_address.as_deref() {
                 None => None,
                 Some(configured) => {
-                    if let Some(address) = resolve_bind_address(Some(configured)) {
-                        Some(address)
-                    } else {
+                    // A typo never becomes an address; only a missing interface can come up.
+                    let Ok(address) = configured.trim().parse::<IpAddr>() else {
+                        return Err(TransferError::InvalidBindAddress(configured.to_owned()));
+                    };
+                    if !is_local_unicast_address(address) {
                         tracing::warn!(
-                            "The bind address {configured:?} is not assigned to an active network interface, retrying"
+                            "The bind address {address} is not assigned to an active network interface, retrying"
                         );
                         Self::sleep(cancel, BIND_RETRY_DELAY).await?;
                         continue;
                     }
+                    Some(address)
                 }
             };
             let proxy = config.proxy_url().map(str::to_owned);

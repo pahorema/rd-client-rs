@@ -4,6 +4,11 @@ use std::time::Duration;
 
 /// Chunk count used when the configured count is `0` or negative.
 const DEFAULT_CHUNK_COUNT: u64 = 8;
+/// Most chunks a file is split into, so a huge setting cannot exhaust memory planning them.
+const MAX_CHUNK_COUNT: u64 = 1024;
+/// Most concurrent connections of one download; each may hold a buffer of up to
+/// [`MAX_BUFFER_SIZE`].
+const MAX_PARALLEL_CONNECTIONS: usize = 16;
 /// Per-read timeout used when the configured timeout is `0` or negative.
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
 /// Shortest accepted per-read timeout.
@@ -28,10 +33,11 @@ pub struct InternalConfig {
     /// Speed limit of one download in bytes per second, shared by its connections; `0` means
     /// unlimited.
     pub max_speed: u64,
-    /// Maximum concurrent connections per download; `1` or less means one connection.
+    /// Maximum concurrent connections per download; `1` or less means one connection, at
+    /// most 16.
     pub parallel_connections: i32,
-    /// Number of chunks a file is split into; `0` or less means 8. Files that are small, of
-    /// unknown size or served without range support are fetched as one chunk.
+    /// Number of chunks a file is split into; `0` or less means 8, at most 1024. Files that
+    /// are small, of unknown size or served without range support are fetched as one chunk.
     pub chunk_count: i32,
     /// Per-read timeout in milliseconds; `0` or less means 1000, at least 100.
     pub timeout_ms: i32,
@@ -40,7 +46,8 @@ pub struct InternalConfig {
     /// Proxy URL every request goes through; blank means a direct connection.
     pub proxy: Option<String>,
     /// Local IP address connections are bound to; `None` disables binding. The address must
-    /// belong to an interface that is up; until it does, connecting waits and retries.
+    /// belong to an interface that is up; until it does, connecting waits and retries. A value
+    /// that is not an IP address fails the download.
     pub bind_address: Option<String>,
 }
 
@@ -53,7 +60,7 @@ impl InternalConfig {
     pub(crate) fn effective_parallel_connections(&self) -> usize {
         usize::try_from(self.parallel_connections)
             .unwrap_or(1)
-            .max(1)
+            .clamp(1, MAX_PARALLEL_CONNECTIONS)
     }
 
     pub(crate) fn effective_chunk_count(&self) -> u64 {
@@ -61,6 +68,7 @@ impl InternalConfig {
             .ok()
             .filter(|count| *count > 0)
             .unwrap_or(DEFAULT_CHUNK_COUNT)
+            .min(MAX_CHUNK_COUNT)
     }
 
     pub(crate) fn read_timeout(&self) -> Duration {
@@ -117,6 +125,17 @@ mod tests {
             ..InternalConfig::new()
         };
         assert_eq!(config.effective_parallel_connections(), 6);
+    }
+
+    #[test]
+    fn huge_connection_and_chunk_counts_are_bounded() {
+        let config = InternalConfig {
+            parallel_connections: i32::MAX,
+            chunk_count: i32::MAX,
+            ..InternalConfig::new()
+        };
+        assert_eq!(config.effective_parallel_connections(), 16);
+        assert_eq!(config.effective_chunk_count(), 1024);
     }
 
     #[test]

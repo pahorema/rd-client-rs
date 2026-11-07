@@ -36,6 +36,8 @@ pub(crate) enum TransferError {
         proxy: String,
         error: reqwest::Error,
     },
+    #[error("Invalid bind address {0:?}: it is not an IP address.")]
+    InvalidBindAddress(String),
     #[error("Unable to write {}: {source}", .path.display())]
     Io {
         path: PathBuf,
@@ -65,6 +67,7 @@ impl TransferError {
             Self::Incomplete { .. }
             | Self::RangeIgnored
             | Self::Proxy { .. }
+            | Self::InvalidBindAddress(_)
             | Self::Io { .. }
             | Self::Interrupted(_)
             | Self::Cancelled => false,

@@ -22,7 +22,7 @@ mod symlink;
 mod verify;
 
 pub use self::aria2::{Aria2Config, Aria2Download, Aria2Request};
-pub use self::bind::{is_local_unicast_address, resolve_bind_address};
+pub use self::bind::is_local_unicast_address;
 pub use self::download_station::{
     DownloadStationConfig, DownloadStationDownload, DownloadStationRequest,
 };

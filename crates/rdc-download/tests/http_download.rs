@@ -873,6 +873,22 @@ async fn connections_can_be_bound_to_a_local_address() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bind_address_that_is_not_an_ip_fails_the_download() {
+    let data = test_data(4096);
+    let server = TestServer::file(Arc::clone(&data), FileOptions::default()).await;
+    let typo = InternalConfig {
+        bind_address: Some("192.168.1.x".to_owned()),
+        ..config()
+    };
+    let (_run, outcome) = download(&server.url("/file.bin"), typo).await;
+    assert_eq!(
+        outcome,
+        Err(r#"Invalid bind address "192.168.1.x": it is not an IP address."#.to_owned())
+    );
+    assert!(server.requests().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_download_starts_only_once() {
     let data = test_data(1024);
     let server = TestServer::file(Arc::clone(&data), FileOptions::default()).await;
