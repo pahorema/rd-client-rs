@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use rdc_synology::{Client, Error};
 use serde_json::json;
 use wiremock::matchers::{
@@ -5,7 +7,7 @@ use wiremock::matchers::{
 };
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use crate::common::{SID, failure, logged_in, mount_info, ok, ok_without_data};
+use crate::common::{SID, failure, logged_in, mount_info, mount_login, ok, ok_without_data};
 
 #[tokio::test]
 async fn connect_rejects_an_invalid_url_without_a_request() {
@@ -231,6 +233,32 @@ async fn error_details_are_kept() {
     assert_eq!(api.errors.len(), 1);
     assert_eq!(api.errors[0].code, 401);
     assert_eq!(api.errors[0].path.as_deref(), Some("/x"));
+}
+
+#[tokio::test]
+async fn transport_errors_hide_the_session_id() {
+    let server = MockServer::start().await;
+    mount_info(&server).await;
+    mount_login(&server, SID).await;
+    Mock::given(method("GET"))
+        .and(query_param("method", "logout"))
+        .respond_with(ok_without_data().set_delay(Duration::from_secs(5)))
+        .mount(&server)
+        .await;
+    let session = Client::connect_with_timeout(&server.uri(), Duration::from_millis(200))
+        .await
+        .unwrap()
+        .login("user", "pass")
+        .await
+        .unwrap();
+
+    let error = session.logout().await.unwrap_err();
+
+    let message = error.to_string();
+    assert!(matches!(error, Error::Transport(_)), "{error:?}");
+    assert!(!message.contains(SID), "{message}");
+    assert!(!format!("{error:?}").contains(SID), "{error:?}");
+    assert!(message.contains("timed out"), "{message}");
 }
 
 #[test]

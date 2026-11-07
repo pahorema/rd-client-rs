@@ -196,12 +196,12 @@ async fn finish<T: DeserializeOwned>(
     api: &Api,
     method: &'static str,
 ) -> Result<T, Error> {
-    let response = response.map_err(Error::Transport)?;
+    let response = response.map_err(transport)?;
     let status = response.status();
     if status != StatusCode::OK {
         return Err(Error::UnexpectedStatus(status.as_u16()));
     }
-    let body = response.text().await.map_err(Error::Transport)?;
+    let body = response.text().await.map_err(transport)?;
     let envelope: Envelope = match serde_json::from_str(&body) {
         Ok(envelope) => envelope,
         Err(source) => return Err(Error::Decode { source, body }),
@@ -217,6 +217,12 @@ async fn finish<T: DeserializeOwned>(
     // Calls without a result answer with no `data`; treat that as an empty object.
     let data = envelope.data.unwrap_or_else(|| Value::Object(Map::new()));
     serde_json::from_value(data).map_err(|source| Error::Decode { source, body })
+}
+
+/// Wraps a request failure without its URL: the query carries the session id (`_sid`) and,
+/// for created tasks, the download link, neither of which may reach logs or the user.
+fn transport(error: reqwest::Error) -> Error {
+    Error::Transport(error.without_url())
 }
 
 /// `<url>/webapi` for a DSM URL, rejecting anything that is not an absolute HTTP(S) URL.

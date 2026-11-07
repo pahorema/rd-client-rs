@@ -21,9 +21,11 @@ pub enum Error {
     /// The HTTP client could not be constructed.
     #[error("failed to build the HTTP client: {0}")]
     ClientBuild(#[source] reqwest::Error),
-    /// The request could not be sent or the response could not be read.
-    #[error("request to Synology failed: {0}")]
-    Transport(#[source] reqwest::Error),
+    /// The request could not be sent or the response could not be read. The request URL
+    /// is stripped because its query carries the session id.
+    // The message already carries the causes, so they are not repeated as a source.
+    #[error("request to Synology failed: {}", describe(.0))]
+    Transport(reqwest::Error),
     /// DSM answered with an HTTP status other than 200.
     #[error("received unexpected response status {0}")]
     UnexpectedStatus(u16),
@@ -59,6 +61,18 @@ impl Error {
         self.api_code()
             .is_some_and(|code| SESSION_ERROR_CODES.contains(&code))
     }
+}
+
+/// Joins an error and its sources into one line.
+fn describe(error: &reqwest::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
 }
 
 /// Error reported by DSM in a `success: false` response.
