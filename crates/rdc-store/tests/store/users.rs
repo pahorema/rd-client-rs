@@ -43,7 +43,7 @@ async fn creating_the_account_writes_a_complete_row() {
     let user = test
         .store
         .users()
-        .create("Admin", "secret1")
+        .create("Admin", "secret123")
         .await
         .expect("create");
     assert_eq!(
@@ -110,29 +110,29 @@ async fn creating_rejects_weak_passwords_and_bad_names() {
     let test = TestStore::new().await;
     let users = test.store.users();
     let cases = [
-        ("admin", "abc1", "Passwords must be at least 5 characters."),
+        ("admin", "abcdef1", "Passwords must be at least 8 characters."),
         (
             "admin",
-            "secret",
+            "password",
             "Passwords must have at least one digit ('0'-'9').",
         ),
         (
             "admin",
-            "11111",
+            "11111111",
             "Passwords must use at least 3 different characters.",
         ),
         (
             "ad min",
-            "secret1",
+            "secret123",
             "Username 'ad min' is invalid, can only contain letters or digits.",
         ),
         (
             "",
-            "secret1",
+            "secret123",
             "Username '' is invalid, can only contain letters or digits.",
         ),
         // The password is checked first.
-        ("ad min", "abc", "Passwords must be at least 5 characters."),
+        ("ad min", "abc", "Passwords must be at least 8 characters."),
     ];
     for (name, password, message) in cases {
         let error = users.create(name, password).await.expect_err("rejected");
@@ -144,7 +144,7 @@ async fn creating_rejects_weak_passwords_and_bad_names() {
     }
     assert_eq!(users.first().await.expect("first"), None);
 
-    users.create("admin", "secret1").await.expect("create");
+    users.create("admin", "secret123").await.expect("create");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -153,7 +153,7 @@ async fn only_one_account_can_ever_be_created() {
     let mut creations = tokio::task::JoinSet::new();
     for name in ["alice", "bob", "carol", "dave", "erin", "frank"] {
         let store = test.store.clone();
-        creations.spawn(async move { store.users().create(name, "secret1").await });
+        creations.spawn(async move { store.users().create(name, "secret123").await });
     }
     let created: Vec<User> = creations
         .join_all()
@@ -170,7 +170,7 @@ async fn only_one_account_can_ever_be_created() {
         .await
         .expect("count");
     assert_eq!(count, 1);
-    let error = users.create("ADMIN", "secret2").await.expect_err("exists");
+    let error = users.create("ADMIN", "secret234").await.expect_err("exists");
     assert!(matches!(error, UserError::AccountExists), "{error:?}");
 }
 
@@ -180,18 +180,18 @@ async fn logins_match_names_case_insensitively() {
     let user = test
         .store
         .users()
-        .create("Admin", "secret1")
+        .create("Admin", "secret123")
         .await
         .expect("create");
 
     assert_eq!(
-        login(&test, "aDMIN", "secret1").await,
+        login(&test, "aDMIN", "secret123").await,
         LoginOutcome::Success(user)
     );
     for (name, password) in [
-        ("admin", "secret2"),
-        ("other", "secret1"),
-        ("", "secret1"),
+        ("admin", "secret234"),
+        ("other", "secret123"),
+        ("", "secret123"),
         ("admin", " "),
     ] {
         assert_eq!(
@@ -207,7 +207,7 @@ async fn locked_out_accounts_cannot_log_in_until_the_lockout_ends() {
     let test = TestStore::new().await;
     test.store
         .users()
-        .create("admin", "secret1")
+        .create("admin", "secret123")
         .await
         .expect("create");
     let raw = test.raw().await;
@@ -218,12 +218,12 @@ async fn locked_out_accounts_cannot_log_in_until_the_lockout_ends() {
     )
     .await;
     assert_eq!(
-        login(&test, "admin", "secret1").await,
+        login(&test, "admin", "secret123").await,
         LoginOutcome::LockedOut
     );
     execute(&raw, r#"UPDATE "AspNetUsers" SET "LockoutEnabled" = 0"#).await;
     assert!(matches!(
-        login(&test, "admin", "secret1").await,
+        login(&test, "admin", "secret123").await,
         LoginOutcome::Success(_)
     ));
     execute(
@@ -232,7 +232,7 @@ async fn locked_out_accounts_cannot_log_in_until_the_lockout_ends() {
     )
     .await;
     assert!(matches!(
-        login(&test, "admin", "secret1").await,
+        login(&test, "admin", "secret123").await,
         LoginOutcome::Success(_)
     ));
 }
@@ -243,7 +243,7 @@ async fn logging_in_upgrades_weak_hashes_and_clears_failed_attempts() {
     let user = test
         .store
         .users()
-        .create("admin", "secret1")
+        .create("admin", "secret123")
         .await
         .expect("create");
     let raw = test.raw().await;
@@ -286,7 +286,7 @@ async fn logging_in_upgrades_weak_hashes_and_clears_failed_attempts() {
 async fn updating_credentials_changes_name_and_password() {
     let test = TestStore::new().await;
     let users = test.store.users();
-    let created = users.create("admin", "secret1").await.expect("create");
+    let created = users.create("admin", "secret123").await.expect("create");
 
     let renamed = users.update_credentials("Owner", "").await.expect("rename");
     assert_eq!(renamed.user_name.as_deref(), Some("Owner"));
@@ -294,14 +294,14 @@ async fn updating_credentials_changes_name_and_password() {
         renamed.security_stamp, created.security_stamp,
         "names end sessions"
     );
-    assert_eq!(login(&test, "admin", "secret1").await, LoginOutcome::Failed);
+    assert_eq!(login(&test, "admin", "secret123").await, LoginOutcome::Failed);
     assert!(matches!(
-        login(&test, "owner", "secret1").await,
+        login(&test, "owner", "secret123").await,
         LoginOutcome::Success(_)
     ));
 
     let changed = users
-        .update_credentials(" ", "better2")
+        .update_credentials(" ", "better234")
         .await
         .expect("new password");
     assert_eq!(changed.user_name.as_deref(), Some("Owner"));
@@ -310,9 +310,9 @@ async fn updating_credentials_changes_name_and_password() {
         "passwords end sessions"
     );
     assert_eq!(users.first().await.expect("first"), Some(changed.clone()));
-    assert_eq!(login(&test, "owner", "secret1").await, LoginOutcome::Failed);
+    assert_eq!(login(&test, "owner", "secret123").await, LoginOutcome::Failed);
     assert_eq!(
-        login(&test, "owner", "better2").await,
+        login(&test, "owner", "better234").await,
         LoginOutcome::Success(changed.clone())
     );
 
@@ -333,14 +333,14 @@ async fn rejected_credential_updates_change_nothing() {
     let test = TestStore::new().await;
     let users = test.store.users();
     let error = users
-        .update_credentials("admin", "secret1")
+        .update_credentials("admin", "secret123")
         .await
         .expect_err("no account");
     assert!(matches!(error, UserError::NoUser), "{error:?}");
 
-    let created = users.create("admin", "secret1").await.expect("create");
+    let created = users.create("admin", "secret123").await.expect("create");
     let error = users
-        .update_credentials("bad name", "better2")
+        .update_credentials("bad name", "better234")
         .await
         .expect_err("bad name");
     assert_eq!(
@@ -351,11 +351,11 @@ async fn rejected_credential_updates_change_nothing() {
         .update_credentials("owner", "weak")
         .await
         .expect_err("weak password");
-    assert_eq!(rejected(error), "Passwords must be at least 5 characters.");
+    assert_eq!(rejected(error), "Passwords must be at least 8 characters.");
     let user: Option<User> = users.first().await.expect("first");
     assert_eq!(user, Some(created));
     assert!(matches!(
-        login(&test, "admin", "secret1").await,
+        login(&test, "admin", "secret123").await,
         LoginOutcome::Success(_)
     ));
 }
@@ -365,7 +365,7 @@ async fn the_first_account_is_the_lowest_id() {
     let test = TestStore::new().await;
     test.store
         .users()
-        .create("zed", "secret1")
+        .create("zed", "secret123")
         .await
         .expect("create");
     let raw = test.raw().await;
@@ -385,7 +385,7 @@ async fn the_first_account_is_the_lowest_id() {
         .expect("found");
     assert_eq!(first.user_name.as_deref(), Some("first"));
     assert_eq!(
-        login(&test, "first", "anything1").await,
+        login(&test, "first", "anything123").await,
         LoginOutcome::Failed,
         "no password"
     );

@@ -130,7 +130,7 @@
 							required
 							bind:value={password}
 						/>
-						<Field.Description>At least 5 characters, including a digit.</Field.Description>
+						<Field.Description>At least 8 characters, including a digit.</Field.Description>
 					</Field.Field>
 					{#if saveError}
 						<Alert.Root variant="destructive">

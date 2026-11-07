@@ -81,7 +81,7 @@
 								required
 								bind:value={password}
 							/>
-							<Field.Description>At least 5 characters, including a digit.</Field.Description>
+							<Field.Description>At least 8 characters, including a digit.</Field.Description>
 						</Field.Field>
 						{@render failure()}
 						<Button type="submit" disabled={working}>

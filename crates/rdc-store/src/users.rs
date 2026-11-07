@@ -16,8 +16,9 @@ use crate::{
     row,
 };
 
-/// Shortest accepted password, in UTF-16 code units.
-const MINIMUM_PASSWORD_LENGTH: usize = 5;
+/// Shortest accepted new password, in UTF-16 code units; existing hashes of
+/// shorter passwords keep working.
+const MINIMUM_PASSWORD_LENGTH: usize = 8;
 /// Fewest distinct characters (UTF-16 code units) in an accepted password.
 const MINIMUM_DISTINCT_CHARACTERS: usize = 3;
 /// Characters allowed besides ASCII letters and digits in user names.
@@ -131,7 +132,7 @@ impl<'store> Users<'store> {
 
     /// Creates the account, unless one exists.
     ///
-    /// The password needs at least 5 characters, one digit and 3 distinct
+    /// The password needs at least 8 characters, one digit and 3 distinct
     /// characters; the name may only contain ASCII letters, digits and
     /// `-._@+`. Checking for an existing account and inserting the new one
     /// is a single statement, so concurrent calls create one account.
@@ -440,19 +441,19 @@ mod tests {
     #[test]
     fn password_rules_report_the_first_violation() {
         let cases = [
-            ("", "Passwords must be at least 5 characters."),
-            ("     ", "Passwords must be at least 5 characters."),
-            ("a1b2", "Passwords must be at least 5 characters."),
+            ("", "Passwords must be at least 8 characters."),
+            ("        ", "Passwords must be at least 8 characters."),
+            ("abcde12", "Passwords must be at least 8 characters."),
             (
-                "abcdef",
+                "abcdefgh",
                 "Passwords must have at least one digit ('0'-'9').",
             ),
             (
-                "11111",
+                "11111111",
                 "Passwords must use at least 3 different characters.",
             ),
             (
-                "1a1a1a",
+                "1a1a1a1a",
                 "Passwords must use at least 3 different characters.",
             ),
         ];
@@ -460,7 +461,7 @@ mod tests {
             let error = validate_password(password).expect_err(password);
             assert_eq!(error.to_string(), message, "password {password:?}");
         }
-        for password in ["abc12", "1a1a1b", "pässwörd1"] {
+        for password in ["abcde123", "1a1a1a1b", "pässwörd1"] {
             assert!(validate_password(password).is_ok(), "password {password:?}");
         }
     }
