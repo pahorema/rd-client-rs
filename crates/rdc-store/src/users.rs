@@ -1,6 +1,6 @@
 //! The user account (`AspNetUsers` of the existing database layout).
 //!
-//! rd-client has a single account: the first row ordered by id. Names are
+//! rd-client has a single account, created once and never a second time. Names are
 //! looked up through their upper-cased form; passwords are stored as
 //! [`password`](crate::password) hashes. Every write rotates the row's
 //! concurrency stamp and only applies when that stamp is unchanged; changing
@@ -54,6 +54,9 @@ pub enum UserError {
     /// There is no account to change.
     #[error("no user account exists")]
     NoUser,
+    /// An account already exists, so no other can be created.
+    #[error("an account already exists")]
+    AccountExists,
     /// The store failed.
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -126,24 +129,21 @@ impl<'store> Users<'store> {
         Ok(stamp.flatten())
     }
 
-    /// Creates an account.
+    /// Creates the account, unless one exists.
     ///
     /// The password needs at least 5 characters, one digit and 3 distinct
     /// characters; the name may only contain ASCII letters, digits and
-    /// `-._@+` and must not be taken.
+    /// `-._@+`. Checking for an existing account and inserting the new one
+    /// is a single statement, so concurrent calls create one account.
     ///
     /// # Errors
     ///
     /// Fails with [`UserError::Rejected`] and the first violated rule's
-    /// message, or on database errors.
+    /// message, [`UserError::AccountExists`] when an account exists, or on
+    /// database errors.
     pub async fn create(&self, user_name: &str, password: &str) -> Result<User, UserError> {
         validate_password(password)?;
         validate_user_name(user_name)?;
-        if self.find_by_name(user_name).await?.is_some() {
-            return Err(UserError::Rejected(format!(
-                "Username '{user_name}' is already taken."
-            )));
-        }
         let user = User {
             id: Uuid::new_v4().to_string(),
             user_name: Some(user_name.to_owned()),
@@ -151,12 +151,13 @@ impl<'store> Users<'store> {
             lockout_end: None,
             lockout_enabled: true,
         };
-        sqlx::query(
+        let inserted = sqlx::query(
             r#"INSERT INTO "AspNetUsers" ("Id", "UserName", "NormalizedUserName", "Email",
                    "NormalizedEmail", "EmailConfirmed", "PasswordHash", "SecurityStamp",
                    "ConcurrencyStamp", "PhoneNumber", "PhoneNumberConfirmed", "TwoFactorEnabled",
                    "LockoutEnd", "LockoutEnabled", "AccessFailedCount")
-               VALUES (?, ?, ?, NULL, NULL, 0, ?, ?, ?, NULL, 0, 0, NULL, 1, 0)"#,
+               SELECT ?, ?, ?, NULL, NULL, 0, ?, ?, ?, NULL, 0, 0, NULL, 1, 0
+               WHERE NOT EXISTS (SELECT 1 FROM "AspNetUsers")"#,
         )
         .bind(&user.id)
         .bind(user_name)
@@ -166,6 +167,9 @@ impl<'store> Users<'store> {
         .bind(Uuid::new_v4().to_string())
         .execute(self.pool)
         .await?;
+        if inserted.rows_affected() == 0 {
+            return Err(UserError::AccountExists);
+        }
         Ok(user)
     }
 

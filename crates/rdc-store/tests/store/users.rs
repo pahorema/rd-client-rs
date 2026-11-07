@@ -106,7 +106,7 @@ async fn creating_the_account_writes_a_complete_row() {
 }
 
 #[tokio::test]
-async fn creating_rejects_weak_passwords_bad_names_and_taken_names() {
+async fn creating_rejects_weak_passwords_and_bad_names() {
     let test = TestStore::new().await;
     let users = test.store.users();
     let cases = [
@@ -145,8 +145,33 @@ async fn creating_rejects_weak_passwords_bad_names_and_taken_names() {
     assert_eq!(users.first().await.expect("first"), None);
 
     users.create("admin", "secret1").await.expect("create");
-    let error = users.create("ADMIN", "secret2").await.expect_err("taken");
-    assert_eq!(rejected(error), "Username 'ADMIN' is already taken.");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn only_one_account_can_ever_be_created() {
+    let test = TestStore::new().await;
+    let mut creations = tokio::task::JoinSet::new();
+    for name in ["alice", "bob", "carol", "dave", "erin", "frank"] {
+        let store = test.store.clone();
+        creations.spawn(async move { store.users().create(name, "secret1").await });
+    }
+    let created: Vec<User> = creations
+        .join_all()
+        .await
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect();
+    let users = test.store.users();
+    assert_eq!(created.len(), 1, "exactly one concurrent creation wins");
+    assert_eq!(users.first().await.expect("first"), Some(created[0].clone()));
+    let raw = test.raw().await;
+    let count: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "AspNetUsers""#)
+        .fetch_one(&raw)
+        .await
+        .expect("count");
+    assert_eq!(count, 1);
+    let error = users.create("ADMIN", "secret2").await.expect_err("exists");
+    assert!(matches!(error, UserError::AccountExists), "{error:?}");
 }
 
 #[tokio::test]

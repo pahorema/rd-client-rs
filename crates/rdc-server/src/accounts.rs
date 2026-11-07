@@ -215,6 +215,7 @@ async fn update(
 fn user_error(error: UserError) -> ApiError {
     match error {
         UserError::Rejected(reason) => ApiError::new(StatusCode::BAD_REQUEST, reason),
+        UserError::AccountExists => ApiError::new(StatusCode::FORBIDDEN, ""),
         other => internal(other),
     }
 }
@@ -630,6 +631,51 @@ mod tests {
                 .status(),
             StatusCode::OK
         );
+        fixture.test.engine.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_setup_requests_create_a_single_account() {
+        let fixture = Arc::new(Fixture::new("").await);
+        let mut requests = tokio::task::JoinSet::new();
+        for name in ["owner", "intruder1", "intruder2", "intruder3"] {
+            let fixture = fixture.clone();
+            requests.spawn(async move {
+                fixture
+                    .send(
+                        "POST",
+                        "/api/authentication/create",
+                        Some(json!({"userName": name, "password": "Passw0rd!"})),
+                        None,
+                    )
+                    .await
+                    .status()
+            });
+        }
+        let statuses = requests.join_all().await;
+        assert_eq!(
+            statuses.iter().filter(|status| **status == StatusCode::OK).count(),
+            1,
+            "{statuses:?}"
+        );
+        assert!(
+            statuses
+                .iter()
+                .all(|status| matches!(*status, StatusCode::OK | StatusCode::FORBIDDEN)),
+            "{statuses:?}"
+        );
+        let mut accounts = 0;
+        for name in ["owner", "intruder1", "intruder2", "intruder3"] {
+            let outcome = fixture
+                .test
+                .store
+                .users()
+                .verify_login(name, "Passw0rd!")
+                .await
+                .expect("login check");
+            accounts += usize::from(matches!(outcome, rdc_store::LoginOutcome::Success(_)));
+        }
+        assert_eq!(accounts, 1, "only the winning name can sign in");
         fixture.test.engine.shutdown().await;
     }
 }
