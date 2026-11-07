@@ -30,12 +30,14 @@
 	import SearchIcon from '@lucide/svelte/icons/search';
 	import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
 	import Trash2Icon from '@lucide/svelte/icons/trash-2';
-	import { SvelteSet } from 'svelte/reactivity';
+	import { MediaQuery, SvelteSet } from 'svelte/reactivity';
 
 	let query = $state('');
 	let filter = $state<TorrentFilter>('all');
 	let sort = $state(loadTorrentSort(browserStorage()));
 	const selected = new SvelteSet<string>();
+	// Tailwind's `md` breakpoint: only one of the table and the card list exists at a time.
+	const desktop = new MediaQuery('min-width: 48rem');
 
 	let deleteOpen = $state(false);
 	let retryOpen = $state(false);
@@ -196,8 +198,8 @@
 	<div class="rounded-xl border border-dashed py-16 text-center text-sm text-muted-foreground">
 		{torrents.length === 0 ? 'No torrents yet.' : 'No torrents match the current filter.'}
 	</div>
-{:else}
-	<div class="hidden overflow-hidden rounded-xl border md:block">
+{:else if desktop.current}
+	<div class="overflow-hidden rounded-xl border">
 		<Table.Root>
 			<Table.Header>
 				<Table.Row>
@@ -274,8 +276,8 @@
 			</Table.Body>
 		</Table.Root>
 	</div>
-
-	<ul class="grid gap-2 md:hidden">
+{:else}
+	<ul class="grid gap-2">
 		{#each visible as torrent (torrent.torrentId)}
 			<li
 				class={cn(
