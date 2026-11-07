@@ -12,11 +12,17 @@ export class ApiError extends Error {
 /** Where the user must go after the server rejected a request. */
 export type AuthRequirement = 'setup' | 'login';
 
+const LOGIN_STATUS_PATH = 'Api/Authentication/IsLoggedIn';
+
 let authRequiredHandler: ((requirement: AuthRequirement) => void) | null = null;
 
 /**
  * Registers the callback invoked when a request fails because the client is
  * not set up yet (402) or the user is not signed in (401/403).
+ *
+ * The server also answers 403 to refused actions (an account or provider that
+ * already exists), so other requests failing with 401/403 first ask the login
+ * status, which calls the handler only when the session is really missing.
  */
 export function onAuthRequired(handler: ((requirement: AuthRequirement) => void) | null): void {
 	authRequiredHandler = handler;
@@ -82,7 +88,11 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
 		if (response.status === 402) {
 			authRequiredHandler?.('setup');
 		} else if (response.status === 401 || response.status === 403) {
-			authRequiredHandler?.('login');
+			if (path === LOGIN_STATUS_PATH) {
+				authRequiredHandler?.('login');
+			} else if (authRequiredHandler) {
+				void request(LOGIN_STATUS_PATH).catch(() => undefined);
+			}
 		}
 
 		throw await failure(response);

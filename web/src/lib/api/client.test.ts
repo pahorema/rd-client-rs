@@ -89,16 +89,37 @@ describe('request', () => {
 		await expect(request('Api/Torrents')).rejects.toThrow('Unexpected response from the server');
 	});
 
-	it('asks for setup on 402 and for login on 401 and 403', async () => {
+	it('asks for setup on 402 and for login when the login status is refused', async () => {
 		const handler = vi.fn();
 		onAuthRequired(handler);
 
 		for (const status of [402, 401, 403, 400]) {
 			fetchMock.mockResolvedValueOnce(new Response(null, { status }));
-			await request('Api/Torrents').catch(() => undefined);
+			await request('Api/Authentication/IsLoggedIn').catch(() => undefined);
 		}
 
 		expect(handler.mock.calls).toEqual([['setup'], ['login'], ['login']]);
+	});
+
+	it('checks the login status before treating another 403 as a missing session', async () => {
+		const handler = vi.fn();
+		onAuthRequired(handler);
+
+		// A refused action while signed in: the login status still succeeds.
+		fetchMock
+			.mockResolvedValueOnce(new Response(null, { status: 403 }))
+			.mockResolvedValueOnce(new Response(null, { status: 200 }));
+		await request('Api/Authentication/SetupProvider').catch(() => undefined);
+		await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+		expect(fetchMock.mock.calls[1][0]).toBe('Api/Authentication/IsLoggedIn');
+		expect(handler).not.toHaveBeenCalled();
+
+		// An expired session: the login status is refused as well.
+		fetchMock
+			.mockResolvedValueOnce(new Response(null, { status: 403 }))
+			.mockResolvedValueOnce(new Response(null, { status: 403 }));
+		await request('Api/Torrents').catch(() => undefined);
+		await vi.waitFor(() => expect(handler.mock.calls).toEqual([['login']]));
 	});
 });
 
