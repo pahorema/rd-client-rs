@@ -2,6 +2,7 @@
 	import type { Profile } from '#lib/api/types.js';
 	import ExternalLink from '#lib/components/external-link.svelte';
 	import * as Alert from '#lib/components/ui/alert/index.js';
+	import { isNewerVersion } from '#lib/version.js';
 	import ShieldAlertIcon from '@lucide/svelte/icons/shield-alert';
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
 
@@ -11,7 +12,7 @@
 	const visible = $derived(
 		profile != null &&
 			!!profile.latestVersion &&
-			profile.currentVersion !== profile.latestVersion &&
+			isNewerVersion(profile.latestVersion, profile.currentVersion ?? '') &&
 			(!profile.disableUpdateNotification || profile.isInsecure === true)
 	);
 </script>
