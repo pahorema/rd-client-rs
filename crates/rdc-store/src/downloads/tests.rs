@@ -18,27 +18,27 @@ async fn count(pool: &SqlitePool) -> i64 {
 }
 
 #[tokio::test]
-async fn a_concurrent_duplicate_insert_reports_already_exists() {
+async fn a_duplicate_add_reports_already_exists() {
     let (_dir, store) = temp_store().await;
     insert_torrent_row(&store.pool, TORRENT, "a", "2026-01-01 00:00:00+00:00", 0).await;
     let torrent_id = Uuid::parse_str(TORRENT).expect("uuid");
     let downloads = store.downloads();
 
-    let first = downloads.insert(torrent_id, &info("https://host/a")).await;
-    let second = downloads.insert(torrent_id, &info("https://host/a")).await;
-    assert_eq!(first.expect("first insert"), AddResult::Added);
-    assert_eq!(second.expect("second insert"), AddResult::AlreadyExists);
+    let first = downloads.try_add(torrent_id, &info("https://host/a")).await;
+    let second = downloads.try_add(torrent_id, &info("https://host/a")).await;
+    assert_eq!(first.expect("first add"), AddResult::Added);
+    assert_eq!(second.expect("second add"), AddResult::AlreadyExists);
     assert_eq!(count(&store.pool).await, 1);
 }
 
 #[tokio::test]
-async fn an_insert_for_a_deleted_torrent_reports_torrent_missing() {
+async fn an_add_for_a_missing_torrent_reports_torrent_missing() {
     let (_dir, store) = temp_store().await;
     let result = store
         .downloads()
-        .insert(Uuid::new_v4(), &info("https://host/a"))
+        .try_add(Uuid::new_v4(), &info("https://host/a"))
         .await;
-    assert_eq!(result.expect("insert"), AddResult::TorrentMissing);
+    assert_eq!(result.expect("add"), AddResult::TorrentMissing);
     assert_eq!(count(&store.pool).await, 0);
 }
 

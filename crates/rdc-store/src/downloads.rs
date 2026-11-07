@@ -30,8 +30,6 @@ pub(crate) use download_columns;
 
 /// SQLite extended result code of a violated unique constraint.
 const UNIQUE_VIOLATION: &str = "2067";
-/// SQLite extended result code of a violated foreign key.
-const FOREIGN_KEY_VIOLATION: &str = "787";
 
 /// Outcome of [`Downloads::try_add`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,65 +143,36 @@ impl<'store> Downloads<'store> {
             debug!(%torrent_id, "skipped creating a download with a blank link");
             return Ok(AddResult::InvalidInput);
         }
-        if !self.torrent_exists(torrent_id).await? {
-            debug!(%torrent_id, "skipped creating a download of a missing torrent");
-            return Ok(AddResult::TorrentMissing);
-        }
-        let existing: Option<i64> = sqlx::query_scalar(
-            r#"SELECT 1 FROM "Downloads" WHERE "TorrentId" = ? AND "Path" = ? LIMIT 1"#,
-        )
-        .bind(uuid_text(torrent_id))
-        .bind(&info.restricted_link)
-        .fetch_optional(self.pool)
-        .await?;
-        if existing.is_some() {
-            debug!(%torrent_id, "skipped creating a download that already exists");
-            return Ok(AddResult::AlreadyExists);
-        }
-        self.insert(torrent_id, info).await
-    }
-
-    async fn torrent_exists(&self, torrent_id: Uuid) -> Result<bool> {
-        let found: Option<i64> =
-            sqlx::query_scalar(r#"SELECT 1 FROM "Torrents" WHERE "TorrentId" = ? AND "Type" = 0"#)
-                .bind(uuid_text(torrent_id))
-                .fetch_optional(self.pool)
-                .await?;
-        Ok(found.is_some())
-    }
-
-    /// Inserts the download, mapping constraint violations to their outcome.
-    async fn insert(&self, torrent_id: Uuid, info: &DownloadInfo) -> Result<AddResult> {
         let now = timestamp_text(codec::now());
+        let id = uuid_text(torrent_id);
         let inserted = sqlx::query(
             r#"INSERT INTO "Downloads" ("DownloadId", "TorrentId", "Path", "Link", "Added",
                    "DownloadQueued", "DownloadStarted", "DownloadFinished", "UnpackingQueued",
                    "UnpackingStarted", "UnpackingFinished", "Completed", "RetryCount", "Error",
                    "RemoteId", "FileName")
-               VALUES (?, ?, ?, NULL, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, ?)"#,
+               SELECT ?1, ?2, ?3, NULL, ?4, ?4, NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL,
+                   NULL, ?5
+               WHERE EXISTS (SELECT 1 FROM "Torrents" WHERE "TorrentId" = ?2 AND "Type" = 0)"#,
         )
         .bind(uuid_text(Uuid::new_v4()))
-        .bind(uuid_text(torrent_id))
+        .bind(&id)
         .bind(&info.restricted_link)
-        .bind(&now)
         .bind(&now)
         .bind(&info.file_name)
         .execute(self.pool)
         .await;
-        let error = match inserted {
-            Ok(_) => return Ok(AddResult::Added),
-            Err(sqlx::Error::Database(error)) => error,
-            Err(error) => return Err(error.into()),
-        };
-        if is_duplicate_download(error.as_ref()) {
-            debug!(%torrent_id, "skipped creating a download inserted concurrently");
-            return Ok(AddResult::AlreadyExists);
+        match inserted {
+            Ok(done) if done.rows_affected() == 0 => {
+                debug!(%torrent_id, "skipped creating a download of a missing torrent");
+                Ok(AddResult::TorrentMissing)
+            }
+            Ok(_) => Ok(AddResult::Added),
+            Err(sqlx::Error::Database(error)) if is_duplicate_download(error.as_ref()) => {
+                debug!(%torrent_id, "skipped creating a download that already exists");
+                Ok(AddResult::AlreadyExists)
+            }
+            Err(error) => Err(error.into()),
         }
-        if is_foreign_key_violation(error.as_ref()) && !self.torrent_exists(torrent_id).await? {
-            debug!(%torrent_id, "skipped creating a download of a torrent deleted concurrently");
-            return Ok(AddResult::TorrentMissing);
-        }
-        Err(sqlx::Error::Database(error).into())
     }
 
     /// Stores the unrestricted link.
@@ -395,11 +364,6 @@ fn is_duplicate_download(error: &dyn DatabaseError) -> bool {
         || error
             .message()
             .contains("UNIQUE constraint failed: Downloads.TorrentId, Downloads.Path")
-}
-
-fn is_foreign_key_violation(error: &dyn DatabaseError) -> bool {
-    error.code().as_deref() == Some(FOREIGN_KEY_VIOLATION)
-        || error.message().contains("FOREIGN KEY constraint failed")
 }
 
 /// Decodes a row selected with [`download_columns`].
