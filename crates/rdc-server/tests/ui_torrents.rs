@@ -16,6 +16,8 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 
 const MAGNET: &str = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=Movie";
+const TORRENT: &[u8] =
+    b"d4:infod6:lengthi1e4:name5:Movie12:piece lengthi1e6:pieces20:abcdefghijklmnopqrstee";
 
 /// An isolated engine with authentication disabled, served under `base`.
 async fn fixture(base: &str) -> (TestEngine, Router) {
@@ -157,4 +159,141 @@ async fn torrent_queries_return_list_detail_and_status_shapes() {
     )
     .await;
     assert_eq!((status, body.as_str()), (StatusCode::NO_CONTENT, ""));
+}
+
+#[tokio::test]
+async fn torrent_changes_cover_add_update_retry_delete_and_errors() {
+    let (fixture, router) = fixture("/movies").await;
+    let (status, error) = response(
+        &router,
+        "POST",
+        "/movies/Api/Torrents/UploadMagnet",
+        json!({"magnetLink": ""}),
+    )
+    .await;
+    assert_eq!(
+        (status, error.as_str()),
+        (StatusCode::BAD_REQUEST, "Invalid magnet link")
+    );
+    let (status, error) = response(
+        &router,
+        "POST",
+        "/movies/Api/Torrents/UploadMagnet",
+        json!({"magnetLink": MAGNET, "torrent": null}),
+    )
+    .await;
+    assert_eq!(
+        (status, error.as_str()),
+        (StatusCode::BAD_REQUEST, "Invalid Torrent")
+    );
+    let (status, body) = response(
+        &router,
+        "POST",
+        "/movies/Api/Torrents/UploadMagnet",
+        json!({"magnetLink": "not-a-magnet", "torrent": {}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(body.contains("not-a-magnet"), "{body}");
+
+    let (status, _) = response(
+        &router,
+        "POST",
+        "/movies/Api/Torrents/UploadMagnet",
+        json!({"magnetLink": MAGNET, "torrent": {"category": "movies", "priority": 4}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = fixture.engine.torrents().await.expect("added torrent");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].category.as_deref(), Some("movies"));
+    assert_eq!(rows[0].priority, Some(4));
+    let id = rows[0].torrent_id;
+
+    let (status, _) = response(
+        &router,
+        "PUT",
+        "/movies/Api/Torrents/Update",
+        json!({
+            "torrentId": id,
+            "category": "series",
+            "priority": 2,
+            "downloadRetryAttempts": 3,
+            "hash": "ignored",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = fixture.engine.torrents().await.expect("updated torrent");
+    assert_eq!(rows[0].category.as_deref(), Some("series"));
+    assert_eq!(rows[0].download_retry_attempts, 3);
+
+    let (status, _) = response(
+        &router,
+        "POST",
+        "/movies/Api/Torrents/RetryDownload/00000000-0000-0000-0000-000000000000",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = response(
+        &router,
+        "POST",
+        &format!("/movies/Api/Torrents/Delete/{id}"),
+        json!({"deleteData": true, "deleteRdTorrent": false, "deleteLocalFiles": false}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let remaining = fixture.engine.torrents().await.expect("remaining torrents");
+    assert_eq!(remaining.len(), 0);
+}
+
+#[tokio::test]
+async fn torrent_file_uploads_and_availability_checks() {
+    let (fixture, router) = fixture("").await;
+    let boundary = "rdc-boundary";
+    let mut payload = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"formData\"\r\n\r\n\
+         {{\"torrent\":{{\"priority\":3}}}}\r\n--{boundary}\r\n\
+         Content-Disposition: form-data; name=\"file\"; filename=\"sample.torrent\"\r\n\
+         Content-Type: application/x-bittorrent\r\n\r\n"
+    )
+    .into_bytes();
+    payload.extend_from_slice(TORRENT);
+    payload.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let upload = router
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/Api/Torrents/UploadFile",
+            Body::from(payload),
+            Some(&format!("multipart/form-data; boundary={boundary}")),
+        ))
+        .await
+        .expect("upload response");
+    assert_eq!(upload.status(), StatusCode::OK);
+    let rows = fixture.engine.torrents().await.expect("file list");
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].is_file);
+    assert_eq!(rows[0].priority, Some(3));
+
+    let (status, body) = response(
+        &router,
+        "POST",
+        "/Api/Torrents/CheckFilesMagnet",
+        json!({"magnetLink": MAGNET}),
+    )
+    .await;
+    assert_eq!((status, body.as_str()), (StatusCode::OK, "[]"));
+    let (status, body) = response(
+        &router,
+        "POST",
+        "/Api/Torrents/VerifyRegex",
+        json!({"magnetLink": MAGNET, "includeRegex": "["}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let result: Value = serde_json::from_str(&body).expect("regex response");
+    assert_ne!(result["includeError"].as_str().expect("error"), "");
+    assert_eq!(result["selectedFiles"], json!([]));
 }
