@@ -16,6 +16,9 @@ pub enum EngineError {
     /// Filesystem operation failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// A setting value does not decode; nothing was stored.
+    #[error(transparent)]
+    InvalidSetting(#[from] rdc_model::settings::ApplySettingError),
     /// HTTP client initialization or diagnostic request failed.
     #[error(transparent)]
     Http(#[from] reqwest::Error),

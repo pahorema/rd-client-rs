@@ -11,9 +11,10 @@ use crate::{
 };
 use rdc_debrid::{DebridError, DebridProvider, ProviderConfig, ProviderHttp, RateLimitCoordinator};
 use rdc_download::InternalConfig;
-use rdc_model::settings::Settings;
+use rdc_model::settings::{ApplySettingError, Settings};
 use rdc_store::Store;
 use std::{
+    collections::HashSet,
     fmt,
     sync::{
         Arc, RwLock,
@@ -154,20 +155,32 @@ impl Engine {
             .clone()
     }
 
-    /// Stores known setting keys and publishes the resulting snapshot and live configuration.
+    /// Validates and stores known setting keys, then publishes the resulting snapshot and
+    /// live configuration.
     ///
-    /// Unknown keys are ignored, first duplicate input wins, and invalid stored values
-    /// retain their previous cached value, following the settings catalogue's parse rules.
+    /// Unknown keys are ignored and the first duplicate input wins. A value that does not
+    /// decode rejects the whole update before anything is stored or published.
+    ///
+    /// # Errors
+    /// Returns [`EngineError::InvalidSetting`] for an undecodable value, and persistence or
+    /// provider construction errors.
     pub async fn update_settings(
         &self,
         values: Vec<(String, Option<String>)>,
     ) -> Result<(), EngineError> {
         let _settings_guard = self.inner.settings_lock.lock().await;
         let provider_guard = self.inner.provider_lock.lock().await;
-        self.inner.store.settings().update(&values).await?;
         let previous = self.settings();
         let mut next = (*previous).clone();
-        self.inner.store.settings().load_into(&mut next).await?;
+        let mut seen = HashSet::new();
+        for (key, value) in &values {
+            if seen.insert(key.as_str()) {
+                match next.apply(key, value.as_deref()) {
+                    Ok(()) | Err(ApplySettingError::UnknownKey { .. }) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
         let rebuilt = if previous.provider == next.provider {
             None
         } else {
@@ -177,6 +190,7 @@ impl Engine {
                 &self.inner.coordinator,
             )?)
         };
+        self.inner.store.settings().update(&values).await?;
         let next = Arc::new(next);
         if let Some(provider) = rebuilt {
             *self.inner.provider.write().expect("provider lock poisoned") = provider;
@@ -192,7 +206,10 @@ impl Engine {
         Ok(())
     }
 
-    /// Updates one persisted setting; unknown keys are ignored.
+    /// Validates and stores one setting; unknown keys are ignored.
+    ///
+    /// # Errors
+    /// Fails like [`update_settings`](Self::update_settings).
     pub async fn update_setting(&self, key: &str, value: Option<&str>) -> Result<(), EngineError> {
         self.update_settings(vec![(key.to_owned(), value.map(str::to_owned))])
             .await

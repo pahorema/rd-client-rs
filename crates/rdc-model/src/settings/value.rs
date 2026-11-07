@@ -78,7 +78,8 @@ impl Serialize for SettingValue {
 /// Numbers keep their JSON text (`10`, `2.5`), booleans become
 /// `True`/`False`, strings are stored as they are and `null` clears the
 /// value (SQL NULL). Arrays and objects are stored as their JSON text. The
-/// text is not validated: it is checked when the settings are next applied.
+/// text is not validated here: [`Settings::apply`](super::Settings::apply)
+/// decodes it.
 pub fn stored_text_from_json(value: &Value) -> Option<String> {
     match value {
         Value::Null => None,

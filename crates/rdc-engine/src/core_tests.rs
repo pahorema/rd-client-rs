@@ -1,7 +1,7 @@
 //! Settings, construction and profile integration tests.
 
 use crate::{
-    EngineOptions,
+    EngineError, EngineOptions,
     testing::{FakeDebridProvider, TestEngine},
 };
 use jiff::Timestamp;
@@ -93,25 +93,37 @@ async fn provider_rebuild_uses_new_config_only_for_provider_changes() {
 }
 
 #[tokio::test]
-async fn settings_invalid_values_keep_cache_unknown_keys_ignore_and_first_duplicate_wins() {
+async fn settings_invalid_values_reject_the_update_unknown_keys_ignore_and_first_duplicate_wins() {
     let test = TestEngine::new().await.expect("engine");
     test.engine
         .update_setting("General:DownloadLimit", Some("9"))
         .await
         .expect("valid");
-    test.engine
+    let error = test
+        .engine
         .update_settings(vec![
+            ("Watch:Interval".to_owned(), Some("4".to_owned())),
             (
                 "General:DownloadLimit".to_owned(),
                 Some("invalid".to_owned()),
             ),
+        ])
+        .await
+        .expect_err("invalid value rejected");
+    assert!(matches!(error, EngineError::InvalidSetting(_)), "{error:?}");
+    let stored = test.store.settings().load().await.expect("stored");
+    for settings in [&stored, &*test.engine.settings()] {
+        assert_eq!(settings.general.download_limit, 9);
+        assert_ne!(settings.watch.interval, 4);
+    }
+    test.engine
+        .update_settings(vec![
             ("Unknown:Setting".to_owned(), Some("oops".to_owned())),
             ("Watch:Interval".to_owned(), Some("4".to_owned())),
             ("Watch:Interval".to_owned(), Some("70".to_owned())),
         ])
         .await
-        .expect("invalid stored value tolerated");
-    assert_eq!(test.engine.settings().general.download_limit, 9);
+        .expect("unknown keys ignored");
     assert_eq!(test.engine.settings().watch.interval, 4);
     test.engine
         .update_setting("General:DownloadLimit", None)

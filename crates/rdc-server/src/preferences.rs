@@ -6,6 +6,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
+use rdc_engine::EngineError;
 use rdc_model::settings::{SettingEntry, stored_text_from_json};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -74,7 +75,12 @@ async fn update(
         .engine
         .update_settings(values)
         .await
-        .map_err(internal)?;
+        .map_err(|error| match error {
+            EngineError::InvalidSetting(error) => {
+                ApiError::new(StatusCode::BAD_REQUEST, error.to_string())
+            }
+            error => internal(error),
+        })?;
     Ok(StatusCode::OK)
 }
 
@@ -342,6 +348,41 @@ mod tests {
             .expect("settings reload");
         assert_eq!(settings.watch.path, None);
         assert!(!settings.provider.auto_import);
+        fixture.test.engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_invalid_value_rejects_the_update_without_storing_anything() {
+        let fixture = Fixture::new().await;
+        let rejected = fixture
+            .send(
+                "PUT",
+                "/Api/Settings",
+                Some(json!([
+                    {"key":"Provider:AutoImport","value":true},
+                    {"key":"General:DownloadLimit","value":2.5}
+                ])),
+            )
+            .await;
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        assert!(text(rejected).await.contains("General:DownloadLimit"));
+        let stored = fixture
+            .test
+            .store
+            .settings()
+            .load()
+            .await
+            .expect("settings load");
+        let live = fixture.test.engine.settings();
+        for settings in [&stored, &*live] {
+            assert!(!settings.provider.auto_import);
+            assert_eq!(
+                settings.general.download_limit,
+                rdc_model::settings::Settings::default()
+                    .general
+                    .download_limit
+            );
+        }
         fixture.test.engine.shutdown().await;
     }
 
