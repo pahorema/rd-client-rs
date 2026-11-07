@@ -22,8 +22,8 @@ use rdc_model::TorrentFinishedAction;
 use serde_json::{Value, json};
 
 use crate::{
-    auth::{AuthPolicy, RequestUser, Sessions, require_auth},
-    http::{ApiError, RequestBasePath},
+    auth::{AuthPolicy, CookieScope, RequestUser, Sessions, require_auth},
+    http::ApiError,
 };
 use binding::{Params, bad_request, internal};
 
@@ -189,12 +189,12 @@ async fn public_request(
         "app/webapiversion" => Ok("2.7".into_response()),
         "app/buildinfo" => Ok(Json(json!({"bitness":64,"boost":"1.75.0","libtorrent":"1.2.11.0","openssl":"1.1.1i","qt":"5.15.2","zlib":"1.2.11"})).into_response()),
         "auth/login" => {
-            let base = request.extensions().get::<RequestBasePath>().cloned().unwrap_or(RequestBasePath(String::new()));
+            let scope = CookieScope::of(request.extensions(), request.headers());
             let params = Params::read(request, false).await?;
             if state.policy.is_disabled() { return Ok("Ok.".into_response()); }
             let user = params.get("username").unwrap_or_default();
             let pass = params.get("password").unwrap_or_default();
-            let Some(cookie) = state.sessions.login(user,pass,&base).await.map_err(internal)? else {
+            let Some(cookie) = state.sessions.login(user,pass,&scope).await.map_err(internal)? else {
                 return Ok("Fails.".into_response());
             };
             Ok(([(header::SET_COOKIE,cookie)],"Ok.").into_response())
@@ -226,11 +226,7 @@ async fn protected_request(
     {
         return Err(internal("A form content type is required"));
     }
-    let base = request
-        .extensions()
-        .get::<RequestBasePath>()
-        .cloned()
-        .unwrap_or(RequestBasePath(String::new()));
+    let scope = CookieScope::of(request.extensions(), request.headers());
     let Some(user) = request.extensions().get::<RequestUser>().cloned() else {
         return Ok(StatusCode::FORBIDDEN.into_response());
     };
@@ -244,7 +240,7 @@ async fn protected_request(
         "auth/logout" => Ok((
             [(
                 header::SET_COOKIE,
-                state.sessions.logout(&base).map_err(internal)?,
+                state.sessions.logout(&scope).map_err(internal)?,
             )],
             StatusCode::OK,
         )

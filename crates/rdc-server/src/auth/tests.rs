@@ -68,7 +68,7 @@ impl Fixture {
                 &self.user.id,
                 &digest,
                 issued,
-                &RequestBasePath(String::new()),
+                &root_scope(),
             )
             .unwrap();
         cookie(&set_cookie)
@@ -116,10 +116,10 @@ async fn sessions_expose_the_requesting_account_name() {
 
 async fn login(
     State(sessions): State<Sessions>,
-    Extension(base): Extension<RequestBasePath>,
+    scope: CookieScope,
 ) -> Response {
     let value = sessions
-        .login("alice", "Passw0rd!", &base)
+        .login("alice", "Passw0rd!", &scope)
         .await
         .unwrap()
         .unwrap();
@@ -128,13 +128,20 @@ async fn login(
 
 async fn logout(
     State(sessions): State<Sessions>,
-    Extension(base): Extension<RequestBasePath>,
+    scope: CookieScope,
 ) -> Response {
     (
-        [(header::SET_COOKIE, sessions.logout(&base).unwrap())],
+        [(header::SET_COOKIE, sessions.logout(&scope).unwrap())],
         StatusCode::OK,
     )
         .into_response()
+}
+
+fn root_scope() -> CookieScope {
+    CookieScope {
+        base_path: RequestBasePath(String::new()),
+        secure: false,
+    }
 }
 
 fn enabled() -> Arc<AtomicBool> {
@@ -186,7 +193,8 @@ async fn login_cookie_has_persistent_attributes_and_the_request_mount_path() {
         let set_cookie = &response.headers()[header::SET_COOKIE];
         let attributes: Vec<_> = set_cookie.to_str().unwrap().split("; ").collect();
         assert!(attributes.contains(&"HttpOnly"));
-        assert!(attributes.contains(&"SameSite=Lax"));
+        assert!(attributes.contains(&"SameSite=Strict"));
+        assert!(!attributes.contains(&"Secure"), "plain HTTP request");
         assert!(attributes.contains(&expected_path));
         assert!(attributes.contains(&"Max-Age=1209600"));
         let value = cookie(set_cookie);
@@ -206,6 +214,27 @@ async fn login_cookie_has_persistent_attributes_and_the_request_mount_path() {
             !payload
                 .windows(fixture.user.security_stamp.as_ref().unwrap().len())
                 .any(|part| part == fixture.user.security_stamp.as_ref().unwrap().as_bytes())
+        );
+    }
+}
+
+#[tokio::test]
+async fn cookies_are_secure_when_a_proxy_reports_https() {
+    let fixture = Fixture::new().await;
+    let router = fixture.router("", enabled());
+    for (proto, secure) in [("https", true), ("HTTPS, http", true), ("http", false)] {
+        let login = Request::builder()
+            .method("POST")
+            .uri("/api/login")
+            .header("x-forwarded-proto", proto)
+            .body(Body::empty())
+            .unwrap();
+        let response = router.clone().oneshot(login).await.unwrap();
+        let set_cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert_eq!(
+            set_cookie.split("; ").any(|part| part == "Secure"),
+            secure,
+            "{proto}: {set_cookie}"
         );
     }
 }
@@ -275,7 +304,7 @@ async fn credential_changes_and_invalidation_reject_previously_cached_cookies() 
         };
         let old = fixture
             .sessions
-            .login("alice", current, &RequestBasePath(String::new()))
+            .login("alice", current, &root_scope())
             .await
             .unwrap()
             .unwrap();
@@ -382,7 +411,7 @@ async fn concurrent_key_initializers_share_one_key_and_invalid_keys_are_not_repl
     );
     let (first, second) = (first.unwrap(), second.unwrap());
     let set_cookie = first
-        .login("alice", "Passw0rd!", &RequestBasePath(String::new()))
+        .login("alice", "Passw0rd!", &root_scope())
         .await
         .unwrap()
         .unwrap();
@@ -404,7 +433,7 @@ async fn blank_credentials_fail_without_accessing_the_closed_store() {
         assert!(
             fixture
                 .sessions
-                .login(name, password, &RequestBasePath(String::new()))
+                .login(name, password, &root_scope())
                 .await
                 .unwrap()
                 .is_none()
@@ -415,7 +444,7 @@ async fn blank_credentials_fail_without_accessing_the_closed_store() {
 #[tokio::test]
 async fn wrong_credentials_fail_and_malformed_mount_paths_are_rejected() {
     let fixture = Fixture::new().await;
-    let root = RequestBasePath(String::new());
+    let root = root_scope();
     for (name, password) in [("alice", "wrong"), ("missing", "Passw0rd!")] {
         assert!(
             fixture
@@ -428,7 +457,10 @@ async fn wrong_credentials_fail_and_malformed_mount_paths_are_rejected() {
     }
     for path in ["relative", "/mount; HttpOnly", "/mount\r\n"] {
         assert!(matches!(
-            fixture.sessions.logout(&RequestBasePath(path.to_owned())),
+            fixture.sessions.logout(&CookieScope {
+                base_path: RequestBasePath(path.to_owned()),
+                secure: false,
+            }),
             Err(AuthError::CookiePath)
         ));
     }

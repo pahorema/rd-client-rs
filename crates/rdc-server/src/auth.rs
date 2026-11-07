@@ -5,9 +5,10 @@
 //! [`Sessions::is_authenticated`] and [`AuthPolicy::is_disabled`] themselves.
 //! After a credential update, await [`Sessions::invalidate`] before responding.
 //! Login and logout return a header to append as `SET_COOKIE`; both must receive
-//! the request's [`RequestBasePath`] (or its empty root equivalent).
+//! the request's [`CookieScope`].
 
 use std::{
+    convert::Infallible,
     fmt,
     fs::OpenOptions,
     io::{self, Read, Seek, SeekFrom, Write},
@@ -17,8 +18,8 @@ use std::{
 };
 
 use axum::{
-    extract::{Request, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    extract::{FromRequestParts, Request, State},
+    http::{Extensions, HeaderMap, HeaderValue, StatusCode, header, request::Parts},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -136,7 +137,7 @@ impl Sessions {
         &self,
         user_name: &str,
         password: &str,
-        base_path: &RequestBasePath,
+        scope: &CookieScope,
     ) -> Result<Option<HeaderValue>, AuthError> {
         if user_name.trim().is_empty() || password.is_empty() {
             return Ok(None);
@@ -158,7 +159,7 @@ impl Sessions {
             &user.id,
             &Sha256::digest(stamp.as_bytes()).into(),
             now(),
-            base_path,
+            scope,
         )
         .map(Some)
     }
@@ -182,8 +183,8 @@ impl Sessions {
     /// Logout removes the browser cookie, not other sessions of the account.
     /// # Errors
     /// Fails if the base path cannot be represented safely in a cookie.
-    pub fn logout(&self, base_path: &RequestBasePath) -> Result<HeaderValue, AuthError> {
-        cookie_header("", 0, base_path)
+    pub fn logout(&self, scope: &CookieScope) -> Result<HeaderValue, AuthError> {
+        cookie_header("", 0, scope)
     }
 
     /// Checks the cookie only; malformed cookies and store failures fail closed.
@@ -263,7 +264,7 @@ impl Sessions {
         user_id: &str,
         digest: &[u8; 32],
         issued: u64,
-        base_path: &RequestBasePath,
+        scope: &CookieScope,
     ) -> Result<HeaderValue, AuthError> {
         let mut payload = Vec::with_capacity(PAYLOAD_PREFIX + user_id.len());
         payload.push(1);
@@ -274,7 +275,7 @@ impl Sessions {
         let mut signer = self.0.signer.clone();
         signer.update(payload.as_bytes());
         let signature = BASE64URL_NOPAD.encode(&signer.finalize().into_bytes());
-        cookie_header(&format!("{payload}.{signature}"), LIFETIME, base_path)
+        cookie_header(&format!("{payload}.{signature}"), LIFETIME, scope)
     }
 }
 
@@ -322,14 +323,10 @@ pub async fn require_auth(
         return StatusCode::FORBIDDEN.into_response();
     };
     let refresh = if session.refresh {
-        let root = RequestBasePath(String::new());
-        let base = request
-            .extensions()
-            .get::<RequestBasePath>()
-            .unwrap_or(&root);
+        let scope = CookieScope::of(request.extensions(), request.headers());
         policy
             .sessions
-            .issue(&session.user_id, &session.digest, now(), base)
+            .issue(&session.user_id, &session.digest, now(), &scope)
             .ok()
     } else {
         None
@@ -359,17 +356,54 @@ fn sid(headers: &HeaderMap) -> Option<&str> {
         .find_map(|part| part.trim().strip_prefix("SID="))
 }
 
-fn cookie_header(
-    value: &str,
-    max_age: u64,
-    base: &RequestBasePath,
-) -> Result<HeaderValue, AuthError> {
-    if base.0.contains([';', '\r', '\n']) || (!base.0.is_empty() && !base.0.starts_with('/')) {
+/// Where and how a request's session cookie is set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CookieScope {
+    /// The application mount prefix, empty at the root; the cookie path is its directory.
+    pub base_path: RequestBasePath,
+    /// Whether the request arrived over HTTPS, so the cookie gets the `Secure` attribute.
+    pub secure: bool,
+}
+
+impl CookieScope {
+    /// Reads the scope of a request routed by [`crate::http::AppBuilder`].
+    ///
+    /// The server speaks plain HTTP, so HTTPS is recognized from the first
+    /// `X-Forwarded-Proto` value a TLS-terminating proxy sets.
+    pub fn of(extensions: &Extensions, headers: &HeaderMap) -> Self {
+        let secure = headers
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .is_some_and(|proto| proto.trim().eq_ignore_ascii_case("https"));
+        Self {
+            base_path: extensions
+                .get::<RequestBasePath>()
+                .cloned()
+                .unwrap_or_else(|| RequestBasePath(String::new())),
+            secure,
+        }
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for CookieScope {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self::of(&parts.extensions, &parts.headers))
+    }
+}
+
+/// The UI and API are same-origin, so the cookie is never needed on cross-site requests.
+fn cookie_header(value: &str, max_age: u64, scope: &CookieScope) -> Result<HeaderValue, AuthError> {
+    let base = &scope.base_path.0;
+    if base.contains([';', '\r', '\n']) || (!base.is_empty() && !base.starts_with('/')) {
         return Err(AuthError::CookiePath);
     }
-    let path = format!("{}/", base.0.trim_end_matches('/'));
+    let path = format!("{}/", base.trim_end_matches('/'));
+    let secure = if scope.secure { "; Secure" } else { "" };
     HeaderValue::from_str(&format!(
-        "SID={value}; HttpOnly; SameSite=Lax; Path={path}; Max-Age={max_age}"
+        "SID={value}; HttpOnly; SameSite=Strict{secure}; Path={path}; Max-Age={max_age}"
     ))
     .map_err(|_| AuthError::CookiePath)
 }

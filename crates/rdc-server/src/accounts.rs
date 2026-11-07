@@ -12,8 +12,8 @@ use serde::Deserialize;
 
 use crate::{
     app::{AppState, CaseInsensitive, internal, required},
-    auth::RequestUser,
-    http::{ApiError, RequestBasePath},
+    auth::{CookieScope, RequestUser},
+    http::ApiError,
 };
 
 /// Anonymous session and initial-account endpoint paths.
@@ -85,7 +85,7 @@ async fn is_logged_in(
 
 async fn create(
     State(state): State<AppState>,
-    Extension(base): Extension<RequestBasePath>,
+    scope: CookieScope,
     input: Result<Json<Option<CaseInsensitive<Credentials>>>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let credentials = required(input)?.0;
@@ -115,7 +115,7 @@ async fn create(
         .map_err(user_error)?;
     let cookie = state
         .sessions
-        .login(user_name, password, &base)
+        .login(user_name, password, &scope)
         .await
         .map_err(internal)?
         .ok_or_else(|| internal("Account created but sign-in failed"))?;
@@ -124,7 +124,7 @@ async fn create(
 
 async fn login(
     State(state): State<AppState>,
-    Extension(base): Extension<RequestBasePath>,
+    scope: CookieScope,
     input: Result<Json<Option<CaseInsensitive<Credentials>>>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let credentials = required(input)?.0;
@@ -148,7 +148,7 @@ async fn login(
     }
     let Some(cookie) = state
         .sessions
-        .login(user_name, password, &base)
+        .login(user_name, password, &scope)
         .await
         .map_err(internal)?
     else {
@@ -162,9 +162,9 @@ async fn login(
 
 async fn logout(
     State(state): State<AppState>,
-    Extension(base): Extension<RequestBasePath>,
+    scope: CookieScope,
 ) -> Result<Response, ApiError> {
-    let cookie = state.sessions.logout(&base).map_err(internal)?;
+    let cookie = state.sessions.logout(&scope).map_err(internal)?;
     Ok(([(header::SET_COOKIE, cookie)], StatusCode::OK).into_response())
 }
 
