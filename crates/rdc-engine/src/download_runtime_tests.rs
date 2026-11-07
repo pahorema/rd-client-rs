@@ -73,7 +73,7 @@ async fn successful_internal_completion_checks_the_expected_file_size() {
 }
 
 #[tokio::test]
-async fn remote_adoption_keeps_the_existing_target_and_passes_the_stored_identity() {
+async fn remote_adoption_keeps_the_existing_target_but_fresh_remote_starts_replace_it() {
     let fake = FakeDebridProvider::default();
     let factory = FakeDownloadFactory::new();
     let mut options = fake.options();
@@ -107,6 +107,23 @@ async fn remote_adoption_keeps_the_existing_target_and_passes_the_stored_identit
                 .as_deref(),
             Some("adopt-me")
         );
+        transfer.cancel().await;
+    }
+    for client in [DownloadClient::Aria2c, DownloadClient::DownloadStation] {
+        let (torrent, download) = metadata(client);
+        let (_, output, _) = test
+            .engine
+            .output_paths(&torrent, &download)
+            .await
+            .expect("paths");
+        fs::write(&output, b"stale").await.expect("stale target");
+        let transfer = test
+            .engine
+            .prepare_download(&torrent, &download)
+            .await
+            .expect("transfer");
+        transfer.start().await.expect("start");
+        assert!(!output.exists());
         transfer.cancel().await;
     }
     test.engine.shutdown().await;

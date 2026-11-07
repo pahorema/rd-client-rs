@@ -126,12 +126,22 @@ impl Engine {
         } else {
             0
         };
+        // A stale file from an earlier attempt is replaced, but a file owned by an adopted
+        // remote transfer is kept.
+        let remove_target = match torrent.download_client {
+            DownloadClient::Internal => true,
+            DownloadClient::Aria2c | DownloadClient::DownloadStation => download
+                .remote_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty()),
+            DownloadClient::Symlink => false,
+        };
         Ok(Arc::new(Transfer::new(
             backend,
             output,
             expected,
             fallback,
-            torrent.download_client == DownloadClient::Internal,
+            remove_target,
         )))
     }
 
