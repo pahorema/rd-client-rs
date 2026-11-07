@@ -83,7 +83,7 @@
 		{
 			name: 'download',
 			label: 'Test download speed',
-			help: 'Downloads a test file from the debrid provider and stops after 50 MB.',
+			help: 'Downloads a test file from your provider (or a public speed-test server when it has none) and stops after 50 MB.',
 			action: async () => `Download speed: ${formatSpeed(await settingsApi.testDownloadSpeed())}`
 		},
 		{

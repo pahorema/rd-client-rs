@@ -12,8 +12,8 @@ use tokio::{fs, io::AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-/// Public provider speed-test object, measured only when explicitly requested.
-const SPEED_TEST_URL: &str = "https://34.download.real-debrid.com/speedtest/testDefault.rar";
+/// Public test file (reachable over IPv4 and IPv6) for providers without their own speed test.
+const FALLBACK_SPEED_TEST_URL: &str = "https://speed.cloudflare.com/__down?bytes=52428800";
 /// Stop the speed probe after transferring fifty mebibytes.
 const SPEED_TEST_BYTES: u64 = 50 * 1024 * 1024;
 /// Filesystem throughput probe size.
@@ -69,7 +69,8 @@ impl Engine {
             .map_err(|error| EngineError::Message(error.to_string()))?
     }
 
-    /// Measures the configured downloader against the provider speed-test object, in bytes/s.
+    /// Measures the configured downloader against the provider's speed-test file (or a public
+    /// one when the provider has none), in bytes/s.
     ///
     /// Symlink mode uses the internal downloader. The probe stops after fifty mebibytes
     /// or completion; request cancellation and shutdown stop it and remove its local file.
@@ -114,8 +115,16 @@ impl Engine {
         if torrent.download_client == DownloadClient::Symlink {
             torrent.download_client = DownloadClient::Internal;
         }
+        let url = match self.provider().speed_test_url().await {
+            Ok(Some(url)) => url,
+            Ok(None) => FALLBACK_SPEED_TEST_URL.to_owned(),
+            Err(error) => {
+                tracing::warn!(%error, "Unable to get the provider speed test, using the public one");
+                FALLBACK_SPEED_TEST_URL.to_owned()
+            }
+        };
         let download = Download {
-            link: Some(SPEED_TEST_URL.to_owned()),
+            link: Some(url),
             ..Download::default()
         };
         let relative = output
