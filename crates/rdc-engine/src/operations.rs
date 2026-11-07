@@ -309,12 +309,11 @@ impl Engine {
         {
             return Ok(());
         }
-        let torrents = self.inner.store.torrents().list().await?;
+        let torrents = self.inner.store.torrents().list_incomplete().await?;
         let mut active = torrents
             .iter()
             .filter(|torrent| {
-                torrent.completed.is_none()
-                    && torrent.rd_id.is_some()
+                torrent.rd_id.is_some()
                     && !matches!(
                         torrent.rd_status,
                         Some(TorrentStatus::Finished | TorrentStatus::Error)

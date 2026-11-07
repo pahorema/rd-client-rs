@@ -48,15 +48,14 @@ impl Engine {
         self.remove_stale_work(&torrents).await;
         self.process_retention_and_retries(&torrents).await?;
         self.dispatch_queued().await?;
-        let torrents = self.torrents().await?;
+        // The phases above never change a completed torrent without an error, the only ones
+        // a finished action handles; a vanished torrent is skipped by its deletion.
         self.process_finished_actions(&torrents).await?;
+        let torrents = self.inner.store.torrents().list_incomplete().await?;
         let download_limit = usize::try_from(settings.general.download_limit.max(1)).unwrap_or(1);
         let unpack_limit = usize::try_from(settings.general.unpack_limit.max(0)).unwrap_or(0);
         let mut starts_blocked = false;
-        for torrent in torrents
-            .iter()
-            .filter(|torrent| torrent.completed.is_none())
-        {
+        for torrent in &torrents {
             match self
                 .advance_torrent(torrent, download_limit, unpack_limit, &mut starts_blocked)
                 .await
@@ -124,7 +123,8 @@ impl Engine {
         {
             self.select_torrent_files(torrent.torrent_id).await?;
         }
-        let Some(current) = self.inner.store.torrents().get(torrent.torrent_id).await? else {
+        let torrents = self.inner.store.torrents();
+        let Some(mut current) = torrents.get_without_payload(torrent.torrent_id).await? else {
             return Ok(());
         };
         if current.completed.is_some() {
@@ -137,12 +137,13 @@ impl Engine {
             && current.host_download_action == TorrentHostDownloadAction::DownloadAll
         {
             self.create_torrent_downloads(&current).await?;
+            // Created downloads are visible to completion in the same tick.
+            let Some(created) = torrents.get_without_payload(torrent.torrent_id).await? else {
+                return Ok(());
+            };
+            current = created;
         }
-        // Selection and download creation are visible to completion in the same tick.
-        if let Some(current) = self.inner.store.torrents().get(torrent.torrent_id).await? {
-            self.complete_if_ready(&current).await?;
-        }
-        Ok(())
+        self.complete_if_ready(&current).await
     }
 
     async fn select_torrent_files(&self, id: Uuid) -> Result<(), EngineError> {
