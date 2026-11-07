@@ -222,6 +222,44 @@ async fn rate_limited_unrestrict_requeues_at_cooldown_without_consuming_a_retry(
 }
 
 #[tokio::test]
+async fn one_tick_cancels_every_transfer_whose_download_is_gone() {
+    let (test, _) = fixture().await;
+    let engines: Vec<_> = (0..3).map(|_| FakeDownloadEngine::new()).collect();
+    {
+        let mut registry = test
+            .engine
+            .inner
+            .registry
+            .downloads
+            .lock()
+            .expect("registry");
+        for engine in &engines {
+            registry.insert(
+                Uuid::new_v4(),
+                Arc::new(ActiveDownload {
+                    torrent_id: Uuid::new_v4(),
+                    kind: DownloadClient::Internal,
+                    engine: Arc::new(engine.clone()),
+                    last_bytes: AtomicU64::new(0),
+                }),
+            );
+        }
+    }
+    test.engine.tick_once().await.expect("tick");
+    assert!(engines.iter().all(|engine| engine.cancelled() == 1));
+    assert!(
+        test.engine
+            .inner
+            .registry
+            .downloads
+            .lock()
+            .expect("registry")
+            .is_empty()
+    );
+    test.engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn an_outcome_of_a_cancelled_transfer_never_reaches_the_reset_download() {
     let (test, factory) = fixture().await;
     let torrent = add(&test, HASH, "one", &["a.bin"], template()).await;

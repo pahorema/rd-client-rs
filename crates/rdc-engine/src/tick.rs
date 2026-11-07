@@ -549,28 +549,26 @@ impl Engine {
                     .map(|download| download.download_id)
             })
             .collect();
-        let stale_download = self
+        let mut stale: HashSet<Uuid> = self
             .inner
             .registry
             .downloads
             .lock()
             .expect("download registry lock poisoned")
             .keys()
-            .find(|id| !ids.contains(id))
-            .copied();
-        if let Some(id) = stale_download {
-            self.inner.registry.cancel(id).await;
-        }
-        let stale_unpack = self
-            .inner
-            .registry
-            .unpacks
-            .lock()
-            .expect("unpack registry lock poisoned")
-            .keys()
-            .find(|id| !ids.contains(id))
-            .copied();
-        if let Some(id) = stale_unpack {
+            .filter(|id| !ids.contains(id))
+            .copied()
+            .collect();
+        stale.extend(
+            self.inner
+                .registry
+                .unpacks
+                .lock()
+                .expect("unpack registry lock poisoned")
+                .keys()
+                .filter(|id| !ids.contains(id)),
+        );
+        for id in stale {
             self.inner.registry.cancel(id).await;
         }
     }
