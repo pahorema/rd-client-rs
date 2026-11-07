@@ -61,8 +61,10 @@ pub struct Aria2Request {
 /// Downloads a file with aria2.
 ///
 /// [`start`](DownloadEngine::start) adopts the download of [`Aria2Request::gid`] when aria2
-/// still knows it, otherwise refuses a link aria2 already downloads and adds it (up to six
-/// tries). It returns the GID. The engine then asks aria2 about the download every second:
+/// still knows it. Otherwise it looks the link up in aria2 before every add: a link aria2
+/// already downloads is refused, unless an earlier start or attempt of this download may have
+/// added it, in which case that download is adopted. The add-and-verify sequence is tried up
+/// to six times. It returns the GID. The engine then asks aria2 about the download every second:
 /// an error removes it and fails, a completed or removed download is removed and succeeds as
 /// soon as the local file exists (looked for ten times, about 45 s), and an unknown GID fails.
 /// Pausing and resuming pause and unpause the aria2 download; cancelling removes it.
@@ -181,23 +183,20 @@ impl Shared {
             .gid
             .clone()
             .filter(|gid| !gid.trim().is_empty());
-        if gid.is_none() {
-            let downloads = client
-                .tell_all()
-                .await
-                .map_err(|error| fail(error.to_string()))?;
-            if downloads.iter().any(|download| download.has_uri(url)) {
-                return Err(fail(format!(
-                    "The download link {url} has already been added to Aria2"
-                )));
-            }
-        }
+        let mut ours = gid.is_some();
         let mut retry = 0;
         let gid = loop {
-            match add_or_adopt(&client, &mut gid, url, &options).await {
+            match add_or_adopt(&client, &mut gid, &mut ours, url, &options).await {
                 Ok(gid) => break gid,
-                Err(error) if retry >= START_RETRIES => return Err(fail(error.to_string())),
-                Err(error) => {
+                Err(AddError::AlreadyAdded) => {
+                    return Err(fail(format!(
+                        "The download link {url} has already been added to Aria2"
+                    )));
+                }
+                Err(AddError::Aria2(error)) if retry >= START_RETRIES => {
+                    return Err(fail(error.to_string()));
+                }
+                Err(AddError::Aria2(error)) => {
                     tracing::debug!("Error starting aria2 download: {error}, retry {retry}");
                     if !self.signals.sleep(self.timing.retry_step * retry).await {
                         return Err(StartError::new(CANCELLED_MESSAGE));
@@ -236,23 +235,50 @@ impl Shared {
     }
 }
 
-/// Adopts `gid` when aria2 knows it, otherwise adds `url` and verifies the new download.
+/// Why one attempt to add or adopt the download failed.
+enum AddError {
+    /// aria2 holds a download of the link that this engine did not add; never retried.
+    AlreadyAdded,
+    /// A call failed; the attempt is retried.
+    Aria2(Error),
+}
+
+/// Adopts `gid` when aria2 knows it. Otherwise looks the link up: a download of `url` is
+/// adopted when `ours` (an earlier start or attempt sent the link) and refused when not;
+/// only a link aria2 does not hold is added, and the new download is verified.
+///
+/// Looking up before every add matters because a failed attempt may have added the
+/// download without returning its GID (a lost `addUri` response or a failed verification).
 async fn add_or_adopt(
     client: &Client,
     gid: &mut Option<String>,
+    ours: &mut bool,
     url: &str,
     options: &AddUriOptions,
-) -> Result<String, Error> {
+) -> Result<String, AddError> {
     if let Some(known) = gid.as_deref() {
         if client.tell_status(known).await.is_ok() {
             return Ok(known.to_owned());
         }
         *gid = None;
     }
-    let added = client.add_uri(&[url], options).await?;
+    let downloads = client.tell_all().await.map_err(AddError::Aria2)?;
+    if let Some(existing) = downloads.into_iter().find(|download| download.has_uri(url)) {
+        if !*ours {
+            return Err(AddError::AlreadyAdded);
+        }
+        tracing::debug!("Adopting aria2 download {} of {url}", existing.gid);
+        return Ok(gid.insert(existing.gid).clone());
+    }
+    // Set before sending: aria2 may add the link even when the response is lost.
+    *ours = true;
+    let added = client
+        .add_uri(&[url], options)
+        .await
+        .map_err(AddError::Aria2)?;
     tracing::debug!("Added {url} to aria2 as {added}");
     let added = gid.insert(added);
-    client.tell_status(added).await?;
+    client.tell_status(added).await.map_err(AddError::Aria2)?;
     Ok(added.clone())
 }
 

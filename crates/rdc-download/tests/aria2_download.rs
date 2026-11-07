@@ -1,6 +1,7 @@
 //! Behaviour of the aria2 engine against a scripted JSON-RPC server.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -215,6 +216,55 @@ async fn a_forgotten_gid_is_added_again() {
     FakeAria2::set(&fake.status, Some(status("active")));
     let gid = start.await.expect("task").expect("start");
     assert_eq!(gid, "gid1");
+}
+
+#[tokio::test]
+async fn a_forgotten_gid_whose_link_aria2_still_holds_is_adopted() {
+    let fake = FakeAria2::start().await;
+    FakeAria2::set(&fake.status, None);
+    FakeAria2::set(&fake.all, Some(json!([[[status("active")]], [[]], [[]]])));
+    let request = Aria2Request {
+        gid: Some("gid9".to_owned()),
+        ..fake.request()
+    };
+    let gid = fake.engine(request).start().await.expect("start");
+    assert_eq!(gid, "gid1");
+    assert_eq!(fake.calls("aria2.addUri").await, Vec::<Value>::new());
+}
+
+#[tokio::test]
+async fn a_download_added_by_a_failed_attempt_is_adopted_not_added_again() {
+    let fake = FakeAria2::start().await;
+    // aria2 never confirms the added GID, so the first attempt fails after adding.
+    FakeAria2::set(&fake.status, None);
+    let added = Arc::new(AtomicBool::new(false));
+    let on_add = Arc::clone(&added);
+    Mock::given(|request: &Request| method_of(request) == "aria2.addUri")
+        .respond_with(move |_: &Request| {
+            on_add.store(true, Ordering::SeqCst);
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"jsonrpc": "2.0", "id": "x", "result": "gid1"}))
+        })
+        .with_priority(1)
+        .mount(&fake.server)
+        .await;
+    Mock::given(|request: &Request| method_of(request) == "system.multicall")
+        .respond_with(move |_: &Request| {
+            let stopped = if added.load(Ordering::SeqCst) {
+                json!([status("active")])
+            } else {
+                json!([])
+            };
+            ResponseTemplate::new(200).set_body_json(
+                json!({"jsonrpc": "2.0", "id": "x", "result": [[stopped], [[]], [[]]]}),
+            )
+        })
+        .with_priority(1)
+        .mount(&fake.server)
+        .await;
+    let gid = fake.engine(fake.request()).start().await.expect("start");
+    assert_eq!(gid, "gid1");
+    assert_eq!(fake.calls("aria2.addUri").await.len(), 1);
 }
 
 #[tokio::test]
