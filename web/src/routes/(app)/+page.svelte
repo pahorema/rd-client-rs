@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { torrents as torrentsApi } from '#lib/api/index.js';
+	import type { Torrent } from '#lib/api/types.js';
 	import ConfirmDialog from '#lib/components/confirm-dialog.svelte';
 	import DeleteTorrentDialog from '#lib/components/delete-torrent-dialog.svelte';
 	import TorrentProgress from '#lib/components/torrent-progress.svelte';
@@ -44,7 +45,11 @@
 	// a stream that cannot open.
 	const torrents = $derived(live.torrents ?? []);
 	const visible = $derived(sortTorrents(filterTorrents(torrents, query, filter), sort));
-	const selectedTorrents = $derived(torrents.filter((t) => selected.has(t.torrentId)));
+	// Actions apply to the selected rows the current search and filter show; hidden selections
+	// stay selected but are never deleted, retried or changed unseen.
+	const selectedTorrents = $derived(visible.filter((t) => selected.has(t.torrentId)));
+	// The rows an open dialog acts on, fixed when it opens so live updates can't change them.
+	let targets = $state.raw<Torrent[]>([]);
 	const allVisibleSelected = $derived(
 		visible.length > 0 && visible.every((t) => selected.has(t.torrentId))
 	);
@@ -99,9 +104,20 @@
 		}
 	}
 
+	function openWith(open: () => void) {
+		targets = selectedTorrents;
+		open();
+	}
+
+	function deselectTargets() {
+		for (const torrent of targets) {
+			selected.delete(torrent.torrentId);
+		}
+	}
+
 	async function retrySelected() {
 		const results = await Promise.allSettled(
-			selectedTorrents.map((torrent) => torrentsApi.retry(torrent.torrentId))
+			targets.map((torrent) => torrentsApi.retry(torrent.torrentId))
 		);
 		const failure = results.find((result) => result.status === 'rejected');
 
@@ -139,14 +155,16 @@
 
 <div class="flex flex-wrap items-center gap-2">
 	<span class="text-sm text-muted-foreground">
-		{selected.size > 0 ? `${selected.size} selected` : `${visible.length} of ${torrents.length}`}
+		{selectedTorrents.length > 0
+			? `${selectedTorrents.length} selected`
+			: `${visible.length} of ${torrents.length}`}
 	</span>
 	<div class="ml-auto flex flex-wrap gap-2">
 		<Button
 			size="sm"
 			variant="outline"
-			disabled={selected.size === 0}
-			onclick={() => (settingsOpen = true)}
+			disabled={selectedTorrents.length === 0}
+			onclick={() => openWith(() => (settingsOpen = true))}
 		>
 			<SlidersHorizontalIcon />
 			Change settings
@@ -154,8 +172,8 @@
 		<Button
 			size="sm"
 			variant="outline"
-			disabled={selected.size === 0}
-			onclick={() => (retryOpen = true)}
+			disabled={selectedTorrents.length === 0}
+			onclick={() => openWith(() => (retryOpen = true))}
 		>
 			<RotateCcwIcon />
 			Retry
@@ -163,8 +181,8 @@
 		<Button
 			size="sm"
 			variant="destructive"
-			disabled={selected.size === 0}
-			onclick={() => (deleteOpen = true)}
+			disabled={selectedTorrents.length === 0}
+			onclick={() => openWith(() => (deleteOpen = true))}
 		>
 			<Trash2Icon />
 			Delete
@@ -286,17 +304,17 @@
 
 <DeleteTorrentDialog
 	bind:open={deleteOpen}
-	torrentIds={selectedTorrents.map((t) => t.torrentId)}
-	onDeleted={() => selected.clear()}
+	torrentIds={targets.map((t) => t.torrentId)}
+	onDeleted={deselectTargets}
 />
 
 <ConfirmDialog
 	bind:open={retryOpen}
-	title={selected.size === 1 ? 'Retry torrent' : `Retry ${selected.size} torrents`}
+	title={targets.length === 1 ? 'Retry torrent' : `Retry ${targets.length} torrents`}
 	confirmLabel="Retry"
 	errorTitle="Could not retry"
 	action={retrySelected}
-	onDone={() => selected.clear()}
+	onDone={deselectTargets}
 >
 	<p>
 		This deletes the torrent data and every local download, then adds the original magnet link or
@@ -304,8 +322,4 @@
 	</p>
 </ConfirmDialog>
 
-<TorrentSettingsDialog
-	bind:open={settingsOpen}
-	torrents={selectedTorrents}
-	onSaved={() => selected.clear()}
-/>
+<TorrentSettingsDialog bind:open={settingsOpen} torrents={targets} onSaved={deselectTargets} />
