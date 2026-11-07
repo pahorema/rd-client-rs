@@ -183,7 +183,9 @@ export function downloadStatusText(download: Download | null | undefined): strin
 
 /**
  * Overall progress of a torrent from 0 to 100: the provider progress until
- * files reach the host, then the host transfer and unpack progress.
+ * files reach the host, then the host transfer progress. A transferred file
+ * counts as done while it waits for or goes through unpacking, whose live
+ * counters measure the archive rather than the transfer.
  */
 export function torrentProgress(torrent: TorrentStatusInput): number {
 	if (torrent.completed && !torrent.error) {
@@ -199,9 +201,9 @@ export function torrentProgress(torrent: TorrentStatusInput): number {
 	let total = 0;
 
 	for (const download of downloads) {
-		if (download.completed != null || download.unpackingFinished != null) {
+		if (download.downloadFinished != null || download.completed != null) {
 			total += 1;
-		} else if (download.downloadStarted || download.unpackingStarted) {
+		} else if (download.downloadStarted) {
 			total += download.bytesTotal > 0 ? Math.min(download.bytesDone / download.bytesTotal, 1) : 0;
 		}
 	}

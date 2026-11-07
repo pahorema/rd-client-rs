@@ -198,4 +198,23 @@ describe('torrentProgress', () => {
 
 		expect(torrentProgress(torrent({ downloads }))).toBe(50);
 	});
+
+	it('keeps a transferred download at 100% until it is completed', () => {
+		const stages = [
+			download({ downloadStarted: T, downloadFinished: T }),
+			download({ downloadStarted: T, downloadFinished: T, unpackingQueued: T }),
+			// Unpacking reports its own percentage in the byte counters.
+			download({
+				downloadStarted: T,
+				downloadFinished: T,
+				unpackingStarted: T,
+				bytesDone: 5,
+				bytesTotal: 100
+			})
+		];
+
+		for (const stage of stages) {
+			expect(torrentProgress(torrent({ downloads: [stage] }))).toBe(100);
+		}
+	});
 });
