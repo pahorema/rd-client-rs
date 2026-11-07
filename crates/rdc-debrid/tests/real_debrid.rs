@@ -254,14 +254,16 @@ fn listed(id: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
-async fn listing_requests_pages_until_an_empty_page() {
+async fn listing_requests_pages_until_a_page_that_is_not_full() {
     let server = MockServer::start().await;
     mock_server_time(&server, "2024-05-01T12:00:00+00:00").await;
+    let mut full_page = vec![listed("A"), listed("B")];
+    full_page.extend((2..5000).map(|index| listed(&format!("F{index}"))));
     Mock::given(method("GET"))
         .and(path("/rest/1.0/torrents"))
         .and(query_param_is_missing("offset"))
         .and(query_param("limit", "5000"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([listed("A"), listed("B")])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(full_page))
         .expect(1)
         .mount(&server)
         .await;
@@ -277,14 +279,15 @@ async fn listing_requests_pages_until_an_empty_page() {
         .and(path("/rest/1.0/torrents"))
         .and(query_param("offset", "10000"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
-        .expect(1)
+        .expect(0)
         .mount(&server)
         .await;
 
     let torrents = client(&server).list_torrents().await.expect("listing");
 
-    let ids: Vec<&str> = torrents.iter().map(|torrent| torrent.id.as_str()).collect();
-    assert_eq!(ids, ["A", "B", "C"]);
+    assert_eq!(torrents.len(), 5001);
+    assert_eq!(torrents[1].id, "B");
+    assert_eq!(torrents[5000].id, "C");
     let first = &torrents[0];
     assert_eq!(first.filename, "A.mkv");
     assert_eq!(first.hash, "hash-A");

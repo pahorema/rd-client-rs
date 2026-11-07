@@ -90,7 +90,8 @@ impl RealDebrid {
         })
     }
 
-    /// Lists every torrent of the account, page by page until an empty page.
+    /// Lists every torrent of the account, page by page until a page that
+    /// is not full.
     ///
     /// The listing carries neither files nor reliable links for unfinished
     /// torrents; refreshing a torrent fetches its details when needed.
@@ -104,13 +105,13 @@ impl RealDebrid {
                 request = request.query(&[("offset", offset)]);
             }
             let page: Vec<TorrentInfo> = self.call(request.query(&[("limit", PAGE_SIZE)])).await?;
-            if page.is_empty() {
-                break;
-            }
+            let full = page.len() >= PAGE_SIZE;
             torrents.extend(page.into_iter().map(|info| info.into_remote(server_offset)));
+            if !full {
+                return Ok(torrents);
+            }
             offset += PAGE_SIZE;
         }
-        Ok(torrents)
     }
 
     /// Adds a magnet link and returns the id of the new torrent.
