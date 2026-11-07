@@ -72,16 +72,16 @@ impl Highway {
     }
 
     /// Lists the torrent transfers of the account (other services are skipped).
+    ///
+    /// A missing listing (HTTP 404, an empty body or no `transfers` list)
+    /// is an error, never an account without transfers.
     pub async fn list_torrents(&self) -> Result<Vec<RemoteTorrent>, DebridError> {
-        let list: Option<TransferList> = self
-            .call(Method::GET, &[])
-            .await?
-            .as_deref()
-            .map(decode)
-            .transpose()?;
+        let body = self.call(Method::GET, &[]).await?.ok_or_else(|| {
+            DebridError::InvalidResponse("HIGHWAY did not return the transfer list".to_owned())
+        })?;
+        let list: TransferList = decode(&body)?;
         Ok(list
-            .and_then(|list| list.transfers)
-            .unwrap_or_default()
+            .transfers
             .into_iter()
             .filter(|transfer| transfer.service.as_deref() != Some("usenet"))
             .map(Transfer::into_remote)
@@ -598,10 +598,9 @@ fn id_text<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>,
 }
 
 /// Answer of the transfer listing.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Deserialize)]
 struct TransferList {
-    transfers: Option<Vec<Transfer>>,
+    transfers: Vec<Transfer>,
 }
 
 /// One transfer.

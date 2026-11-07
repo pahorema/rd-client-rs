@@ -150,16 +150,39 @@ async fn listing_has_no_speed_or_end_while_the_eta_is_unknown() {
 }
 
 #[tokio::test]
-async fn missing_endpoint_answer_is_an_empty_listing() {
+async fn missing_listings_are_errors_not_empty_lists() {
+    for response in [
+        ResponseTemplate::new(404),
+        ResponseTemplate::new(200),
+        json_response(200, &json!({})),
+        json_response(200, &json!({ "transfers": null })),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+
+        let error = client(&server)
+            .list_torrents()
+            .await
+            .expect_err("no listing");
+
+        assert!(
+            matches!(error, DebridError::InvalidResponse(_)),
+            "{error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_empty_transfer_list_is_an_empty_listing() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .respond_with(ResponseTemplate::new(404))
-        .mount(&server)
-        .await;
+    mount_listing(&server, &json!([])).await;
 
     let torrents = client(&server).list_torrents().await.expect("list");
 
-    assert_eq!(torrents.len(), 0);
+    assert_eq!(torrents, Vec::new());
 }
 
 #[tokio::test]
