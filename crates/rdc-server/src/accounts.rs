@@ -171,7 +171,10 @@ fn throttled(wait: Duration) -> Response {
     (
         StatusCode::TOO_MANY_REQUESTS,
         [(header::RETRY_AFTER, format!("{seconds}"))],
-        format!("Too many failed attempts; try again in {seconds} seconds."),
+        format!(
+            "Too many failed attempts; try again in {seconds} second{}.",
+            if seconds == 1 { "" } else { "s" }
+        ),
     )
         .into_response()
 }
