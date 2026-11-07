@@ -6,7 +6,7 @@ use axum::{
     Router,
     body::{Body, HttpBody, to_bytes},
     extract::{DefaultBodyLimit, Request},
-    http::{HeaderMap, HeaderName, StatusCode, Uri, header, uri::Authority},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri, header, uri::Authority},
     middleware::{self, Next},
     response::{IntoResponse, Redirect, Response},
     routing::{MethodRouter, get},
@@ -164,10 +164,24 @@ struct Plumbing {
 
 async fn preprocess(request: Request, next: Next, plumbing: Arc<Plumbing>) -> Response {
     let original_uri = request.uri().clone();
-    let response = dispatch(request, next, &plumbing).await;
+    let mut response = dispatch(request, next, &plumbing).await;
     if !response.status().is_success() {
         tracing::warn!(status = response.status().as_u16(), path = %plumbing.logs.redact(original_uri.path()), "HTTP response");
     }
+    // Like qBittorrent: only pages of this server may frame it (clickjacking), and
+    // browsers must not guess content types.
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::X_FRAME_OPTIONS,
+        HeaderValue::from_static("SAMEORIGIN"),
+    );
+    headers
+        .entry(header::CONTENT_SECURITY_POLICY)
+        .or_insert(HeaderValue::from_static("frame-ancestors 'self'"));
     response
 }
 

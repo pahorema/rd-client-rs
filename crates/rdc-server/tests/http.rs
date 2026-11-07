@@ -41,6 +41,24 @@ async fn request(app: Router, path: &str) -> axum::response::Response {
 }
 
 #[tokio::test]
+async fn every_response_forbids_cross_site_framing_and_type_sniffing() {
+    let app = builder("/base")
+        .route("/api/ok", get(|| async { "ok" }))
+        .build(());
+    for path in ["/base/api/ok", "/api/missing", "/", "/base/index.html"] {
+        let response = request(app.clone(), path).await;
+        let headers = response.headers();
+        assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff", "{path}");
+        assert_eq!(headers[header::X_FRAME_OPTIONS], "SAMEORIGIN", "{path}");
+        assert_eq!(
+            headers[header::CONTENT_SECURITY_POLICY],
+            "frame-ancestors 'self'",
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn root_and_normalized_base_prefix_share_handlers_and_error_bodies() {
     let app = builder("//downloads///client/")
         .route(

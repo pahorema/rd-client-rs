@@ -118,6 +118,10 @@ allowed host names; others get 403. This stops a web page from reaching the
 API through a domain of its own that resolves to rd-client (DNS rebinding). If
 you open rd-client by a host name, add that name, or turn authentication on.
 
+Like qBittorrent, rd-client only lets its own pages show it in a frame, so a
+dashboard on another host or port cannot embed the web UI (clickjacking
+protection).
+
 `rd-client healthcheck` checks the running server; the Docker image uses it as
 its health check.
 
