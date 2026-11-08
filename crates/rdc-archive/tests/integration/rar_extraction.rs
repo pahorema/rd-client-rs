@@ -322,8 +322,9 @@ fn a_link_name_padded_with_empty_components_is_refused_by_name() {
 
     let error = extract_all(&archive, &destination).unwrap_err();
 
+    // UnRAR reports Windows names with backslashes.
     assert!(
-        matches!(&error, Error::UnsafeEntry { entry } if entry == "a////////link"),
+        matches!(&error, Error::UnsafeEntry { entry } if entry.replace('\\', "/") == "a////////link"),
         "{error}"
     );
     assert!(!destination.exists());
