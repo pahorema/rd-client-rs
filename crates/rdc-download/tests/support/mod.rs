@@ -241,21 +241,47 @@ async fn serve(stream: TcpStream, handler: &Handler, stats: &Stats) {
         .expect("requests")
         .push(request.clone());
     // Probes are short-lived and overlap the first transfers; only transfers are counted.
-    let counted = request.range() != Some((0, Some(0)));
-    if counted {
-        let active = stats.active.fetch_add(1, Ordering::SeqCst) + 1;
-        stats.max_active.fetch_max(active, Ordering::SeqCst);
-    }
+    let mut slot = ActiveSlot::take(stats, request.range() != Some((0, Some(0))));
     let reply = handler(&request);
     let mut stream = reader.into_inner();
-    let _ = write_reply(&mut stream, &reply).await;
-    if counted {
-        stats.active.fetch_sub(1, Ordering::SeqCst);
-    }
+    let _ = write_reply(&mut stream, &reply, &mut slot).await;
+    drop(slot);
     let _ = stream.shutdown().await;
 }
 
-async fn write_reply(stream: &mut TcpStream, reply: &Reply) -> std::io::Result<()> {
+/// A transfer counted as active until it releases the slot or is dropped.
+struct ActiveSlot<'a>(Option<&'a AtomicUsize>);
+
+impl<'a> ActiveSlot<'a> {
+    fn take(stats: &'a Stats, counted: bool) -> Self {
+        if !counted {
+            return Self(None);
+        }
+        let active = stats.active.fetch_add(1, Ordering::SeqCst) + 1;
+        stats.max_active.fetch_max(active, Ordering::SeqCst);
+        Self(Some(&stats.active))
+    }
+
+    fn release(&mut self) {
+        if let Some(active) = self.0.take() {
+            active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Drop for ActiveSlot<'_> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// Writes `reply`. `slot` is released just before the last body bytes go out: once the client
+/// has them it may open its next connection before this task runs again.
+async fn write_reply(
+    stream: &mut TcpStream,
+    reply: &Reply,
+    slot: &mut ActiveSlot<'_>,
+) -> std::io::Result<()> {
     if reply.hang_up {
         return Ok(());
     }
@@ -298,6 +324,9 @@ async fn write_reply(stream: &mut TcpStream, reply: &Reply) -> std::io::Result<(
             && after > sent
         {
             end = end.min(after);
+        }
+        if end == reply.body.len() {
+            slot.release();
         }
         stream.write_all(&reply.body[sent..end]).await?;
         stream.flush().await?;
