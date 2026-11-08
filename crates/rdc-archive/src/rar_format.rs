@@ -160,8 +160,8 @@ pub(crate) fn extract(
         open = match extracted {
             Ok(open) => open,
             Err(error) if error.code == Code::UserBreak => {
-                // UnRAR deletes the unfinished file on Unix but leaves it on Windows, where
-                // the fresh file may still be held open for a moment by another process.
+                // UnRAR deletes its unfinished output when it stops; this only catches a file
+                // it left behind, which another process may briefly hold open on Windows.
                 remove_with_retry(
                     &target,
                     |path| fs::remove_file(path),

@@ -89,3 +89,4 @@ strip = true
 
 [patch.crates-io]
 unrar-ng = { path = "vendor/unrar-ng" }
+unrar-ng-sys = { path = "vendor/unrar-ng-sys" }
