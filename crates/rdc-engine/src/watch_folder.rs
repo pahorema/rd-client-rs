@@ -1,12 +1,11 @@
 //! Imports stable top-level torrent and magnet files and archives each attempted import.
 
 use std::fmt::Display;
-use std::fs::{File, Metadata};
+use std::fs::{File, Metadata, TryLockError};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use fs4::fs_std::FileExt;
 use thiserror::Error;
 use tokio::fs;
 use tokio::sync::watch;
@@ -202,13 +201,11 @@ async fn read_stable(
         if current != initial || Fingerprint::new(&file.metadata()?) != initial {
             return Ok(None);
         }
-        let locked = match FileExt::try_lock_exclusive(&file) {
-            Ok(locked) => locked,
-            Err(error) if is_lock_conflict(&error) => false,
-            Err(error) => return Err(error),
-        };
-        if !locked {
-            return Ok(None);
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => return Ok(None),
+            Err(TryLockError::Error(error)) if is_lock_conflict(&error) => return Ok(None),
+            Err(TryLockError::Error(error)) => return Err(error),
         }
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
@@ -550,14 +547,14 @@ mod tests {
         let path = directory.path().join("locked.torrent");
         fs::write(&path, b"data").await.unwrap();
         let lock = File::open(&path).unwrap();
-        FileExt::lock_exclusive(&lock).unwrap();
+        lock.lock().unwrap();
         let report = scan_once(&config(&directory), &CancellationToken::new(), &mut accept)
             .await
             .unwrap();
         assert_eq!(report.skipped, 1);
         assert!(path.exists());
         assert!(!directory.path().join("error").exists());
-        FileExt::unlock(&lock).unwrap();
+        lock.unlock().unwrap();
         let report = scan_once(&config(&directory), &CancellationToken::new(), &mut accept)
             .await
             .unwrap();

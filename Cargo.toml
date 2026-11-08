@@ -19,7 +19,7 @@ clap = { version = "4", default-features = false }
 data-encoding = "2"
 fancy-regex = "0.20"
 fastrand = "2"
-fs4 = "0.13"
+fs4 = "1"
 getrandom = "0.4"
 hmac = "0.13"
 if-addrs = "0.15"
