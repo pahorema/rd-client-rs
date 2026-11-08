@@ -1613,7 +1613,7 @@ dependencies = [
 
 [[package]]
 name = "rdc-archive"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tempfile",
  "thiserror",
@@ -1627,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "rdc-aria2"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -1640,7 +1640,7 @@ dependencies = [
 
 [[package]]
 name = "rdc-debrid"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "fastrand",
@@ -1657,7 +1657,7 @@ dependencies = [
 
 [[package]]
 name = "rdc-download"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "fastrand",
@@ -1677,7 +1677,7 @@ dependencies = [
 
 [[package]]
 name = "rdc-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "data-encoding",
@@ -1712,7 +1712,7 @@ dependencies = [
 
 [[package]]
 name = "rdc-model"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fancy-regex",
  "jiff",
@@ -1728,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "rdc-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1765,7 +1765,7 @@ dependencies = [
 
 [[package]]
 name = "rdc-store"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "data-encoding",
  "getrandom 0.4.3",
@@ -1785,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "rdc-synology"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "reqwest",
  "serde",
@@ -1798,7 +1798,7 @@ dependencies = [
 
 [[package]]
 name = "rdc-torrent"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "data-encoding",
  "sha1",
