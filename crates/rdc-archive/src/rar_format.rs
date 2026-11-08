@@ -4,6 +4,7 @@
 //! ones (`.partN.rar`, `.rNN` or `.NNN` names) as their content is needed and fails when one is
 //! missing.
 
+use std::fs;
 use std::io;
 use std::path::Path;
 
@@ -156,7 +157,15 @@ pub(crate) fn extract(
         });
         open = match extracted {
             Ok(open) => open,
-            Err(error) if error.code == Code::UserBreak => return Err(Error::Cancelled),
+            Err(error) if error.code == Code::UserBreak => {
+                // UnRAR deletes the unfinished file on Unix but leaves it on Windows.
+                match fs::remove_file(&target) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(Error::io("remove cancelled entry", &target)(error)),
+                }
+                return Err(Error::Cancelled);
+            }
             Err(error) => return Err(Error::read(archive)(error)),
         };
         progress.advance_to(end);
