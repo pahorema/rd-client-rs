@@ -3,25 +3,15 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::extract::{VolumeRole, extract, inspect};
-use crate::path::join_name;
+use crate::path::{join_name, remove_with_retry};
 use crate::volume::locate;
 use crate::{Error, volume_paths};
-
-/// Delays before the retries of a failed delete. A freshly written file may still be held
-/// open for a moment by another process (an indexer, an antivirus).
-const DELETE_RETRY_DELAYS: [Duration; 3] = [
-    Duration::from_secs(1),
-    Duration::from_secs(2),
-    Duration::from_secs(3),
-];
 
 /// Extension of the second volume of an old-style RAR set; an archive with an entry of this
 /// extension wraps such a set.
@@ -290,29 +280,6 @@ fn delete_archive(archive: &Path, volume: VolumeRole) -> Result<(), Error> {
         remove_with_retry(path, |path| fs::remove_file(path), "delete")?;
     }
     Ok(())
-}
-
-/// Runs `remove` on `path`, retrying after [`DELETE_RETRY_DELAYS`]; a missing path counts as
-/// removed.
-fn remove_with_retry(
-    path: &Path,
-    remove: fn(&Path) -> io::Result<()>,
-    action: &'static str,
-) -> Result<(), Error> {
-    let mut delays = DELETE_RETRY_DELAYS.iter();
-    loop {
-        match remove(path) {
-            Ok(()) => return Ok(()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => match delays.next() {
-                Some(delay) => {
-                    warn!(path = %path.display(), %error, "{action} failed, retrying");
-                    thread::sleep(*delay);
-                }
-                None => return Err(Error::io(action, path)(error)),
-            },
-        }
-    }
 }
 
 /// Forwards only percentages above the last one forwarded, so the phases of one procedure

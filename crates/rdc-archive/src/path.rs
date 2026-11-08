@@ -3,8 +3,43 @@
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::thread;
+use std::time::Duration;
+
+use tracing::warn;
 
 use crate::Error;
+
+/// Delays before the retries of a failed delete. A freshly written file may still be held
+/// open for a moment by another process (an indexer, an antivirus).
+const DELETE_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(3),
+];
+
+/// Runs `remove` on `path`, retrying after [`DELETE_RETRY_DELAYS`]; a missing path counts as
+/// removed.
+pub(crate) fn remove_with_retry(
+    path: &Path,
+    remove: fn(&Path) -> io::Result<()>,
+    action: &'static str,
+) -> Result<(), Error> {
+    let mut delays = DELETE_RETRY_DELAYS.iter();
+    loop {
+        match remove(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => match delays.next() {
+                Some(delay) => {
+                    warn!(path = %path.display(), %error, "{action} failed, retrying");
+                    thread::sleep(*delay);
+                }
+                None => return Err(Error::io(action, path)(error)),
+            },
+        }
+    }
+}
 
 /// Joins the folder `name` (a torrent name or hash) to `base`.
 ///

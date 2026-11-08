@@ -14,7 +14,9 @@ use unrar_ng::{Archive, FileHeader, Redirection, VolumeInfo};
 
 use crate::Error;
 use crate::extract::{Entry, Inspection, VolumeRole, ensure_within_limit};
-use crate::path::{create_entry_directory, entry_destination, prepare_file_target};
+use crate::path::{
+    create_entry_directory, entry_destination, prepare_file_target, remove_with_retry,
+};
 use crate::progress::Progress;
 
 /// The library takes C strings; a path with a NUL byte cannot name a file anyway.
@@ -158,12 +160,13 @@ pub(crate) fn extract(
         open = match extracted {
             Ok(open) => open,
             Err(error) if error.code == Code::UserBreak => {
-                // UnRAR deletes the unfinished file on Unix but leaves it on Windows.
-                match fs::remove_file(&target) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(Error::io("remove cancelled entry", &target)(error)),
-                }
+                // UnRAR deletes the unfinished file on Unix but leaves it on Windows, where
+                // the fresh file may still be held open for a moment by another process.
+                remove_with_retry(
+                    &target,
+                    |path| fs::remove_file(path),
+                    "remove cancelled entry",
+                )?;
                 return Err(Error::Cancelled);
             }
             Err(error) => return Err(Error::read(archive)(error)),
