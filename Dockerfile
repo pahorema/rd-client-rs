@@ -27,7 +27,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM scratch AS binary
 COPY --from=server /out/rd-client /rd-client
 
-FROM alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 RUN apk add --no-cache ca-certificates su-exec tzdata \
     && mkdir -p /data/db /data/downloads
 COPY --from=server /out/rd-client /app/rd-client
