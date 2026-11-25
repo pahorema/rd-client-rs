@@ -10,7 +10,7 @@ COPY web/ ./
 RUN bun run build
 
 # Keep the Rust version in step with rust-toolchain.toml.
-FROM rust:1.99.1-alpine3.24@sha256:44819b27be4c97b0e4d7203bd2e02c4820f97700211b6a37fb4c246a2de59383 AS server
+FROM rust:1.100.0-alpine3.24@sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33 AS server
 # Use the image's toolchain (its RUST_VERSION) instead of installing the channel again.
 ENV RUSTUP_TOOLCHAIN=${RUST_VERSION}
 RUN apk add --no-cache build-base cmake perl linux-headers
